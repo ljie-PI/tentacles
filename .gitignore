@@ -1,0 +1,15 @@
+.idea/
+*.swp
+.gradle
+.gradletasknamecache
+build/
+*.class
+
+*.jar
+*.war
+*.ear
+
+*.working
+data/
+*.log
+hs_err_pid*
