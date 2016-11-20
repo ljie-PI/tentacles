@@ -1,4 +1,4 @@
-group "com.visualbusiness.data"
+group "com.lab-440"
 version "0.1.0"
 
 apply plugin: "java"
@@ -26,14 +26,14 @@ buildscript {
 }
 
 dependencies {
-    compile "io.vertx:vertx-core:3.3.+"
-    compile "io.vertx:vertx-web:3.3.+"
-    compile "org.jsoup:jsoup:1.9.+"
+    compile "io.vertx:vertx-core:3.3.3"
+    compile "io.vertx:vertx-web:3.3.3"
+    compile "org.jsoup:jsoup:1.9.2"
     compile "de.jetwick:snacktory:1.2"
     compile "redis.clients:jedis:2.9.0"
-    compile "org.slf4j:slf4j-log4j12:1.7.+"
-    testCompile "junit:junit:4.+"
-    testCompile "io.vertx:vertx-unit:3.3.+"
+    compile "org.slf4j:slf4j-log4j12:1.7.21"
+    testCompile "junit:junit:4.12"
+    testCompile "io.vertx:vertx-unit:3.3.3"
 }
 
 mainClassName = "com.visualbusiness.tentacles.app.Crawler"
@@ -45,3 +45,5 @@ shadowJar {
 task wrapper(type: Wrapper) {
     gradleVersion = "3.0"
 }
+
+apply from: rootProject.file('gradle/gradle-mvn-push.gradle')

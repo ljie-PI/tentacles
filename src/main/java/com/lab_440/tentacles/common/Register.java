@@ -35,7 +35,7 @@ public class Register {
         baseParser.init();
         parserMap.put(DEFAULT_DOMAIN, baseParser);
         intervalMap = new ConcurrentHashMap<>();
-        intervalMap.put(DEFAULT_DOMAIN, 0f);
+        intervalMap.put(DEFAULT_DOMAIN, 0.0f);
     }
 
     public static Register getInstance() {

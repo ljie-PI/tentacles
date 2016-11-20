@@ -18,12 +18,13 @@ public class RegisterTest {
 
     @Test
     public void testDefaultRegister() {
-        IDownloader dlr = Register.getInstance().getDownloader("www.visualbusiness.com");
+        IDownloader dlr = Register.getInstance().getDownloader("registor.visualbusiness.com");
         Assert.assertTrue(dlr instanceof BaseDownloader);
-        IParser psr = Register.getInstance().getParser("www.visualbusiness.com");
+        IParser psr = Register.getInstance().getParser("registor.visualbusiness.com");
         Assert.assertTrue(psr instanceof BaseParser);
-        float itvl = Register.getInstance().getInterval("www.visualbusiness.com");
-        Assert.assertTrue(0f == itvl);
+        float itvl = Register.getInstance().getInterval("registor.visualbusiness.com");
+        System.out.println(itvl);
+        Assert.assertTrue(0.0f == itvl);
     }
 
     class DummyDownloader implements IDownloader {
