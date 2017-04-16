@@ -1,14 +1,14 @@
 package com.lab_440.tentacles.master.scheduler;
 
 import com.lab_440.tentacles.common.IDGenerator;
-import com.lab_440.tentacles.Configuration;
-import com.lab_440.tentacles.common.item.IItem;
+import com.lab_440.tentacles.common.Configuration;
+import com.lab_440.tentacles.common.item.AbstractItem;
 import io.vertx.core.logging.Logger;
 import io.vertx.core.logging.LoggerFactory;
 
 import java.util.HashSet;
 
-public class SetDupChecker implements IDupChecker<IItem> {
+public class SetDupChecker implements IDupChecker<AbstractItem> {
 
     private Logger logger = LoggerFactory.getLogger(getClass());
 
@@ -19,7 +19,7 @@ public class SetDupChecker implements IDupChecker<IItem> {
     }
 
     @Override
-    public boolean isDuplicated(IItem item) {
+    public boolean isDuplicated(AbstractItem item) {
         String id = IDGenerator.generateID(item.identity());
         return !itemSet.add(id);
     }

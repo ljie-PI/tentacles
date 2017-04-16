@@ -1,9 +1,8 @@
 package com.lab_440.tentacles.master.handlers;
 
-import com.lab_440.tentacles.common.item.RequestItem;
-import com.lab_440.tentacles.master.scheduler.IScheduler;
 import com.lab_440.tentacles.common.ProcessStatus;
-import com.lab_440.tentacles.common.item.IItem;
+import com.lab_440.tentacles.common.item.AbstractItem;
+import com.lab_440.tentacles.master.scheduler.IScheduler;
 import io.vertx.core.Handler;
 import io.vertx.core.json.JsonObject;
 import io.vertx.core.logging.Logger;
@@ -14,9 +13,9 @@ public class ReplyHandler implements Handler<RoutingContext> {
 
     private Logger logger = LoggerFactory.getLogger(getClass());
 
-    private IScheduler<IItem> scheduler;
+    private IScheduler<AbstractItem> scheduler;
 
-    public ReplyHandler(IScheduler<IItem> scheduler) {
+    public ReplyHandler(IScheduler<AbstractItem> scheduler) {
         this.scheduler = scheduler;
     }
 
@@ -24,17 +23,12 @@ public class ReplyHandler implements Handler<RoutingContext> {
     public void handle(RoutingContext ctx) {
         String resp = "OK";
         if (scheduler != null) {
-            JsonObject jobj = ctx.getBodyAsJson();
-            String status = jobj.getString("status",
+            JsonObject jObj = ctx.getBodyAsJson();
+            String status = jObj.getString("status",
                     ProcessStatus.NOT_RETURN.toString());
-            String url = jobj.getString("url", "");
+            String url = jObj.getString("url", "");
             if (status.equals(ProcessStatus.NOT_RETURN.toString())) {
-                int retried = scheduler.retry(new RequestItem().fromJsonObject(jobj));
-                if (retried > 0) {
-                    resp = "Failed to fetch " + url + " after " + retried + " retries";
-                } else {
-                    resp = "Failed to fetch " + url + ", will retry";
-                }
+                resp = "Failed to fetch " + url;
                 logger.error(resp);
             } else if (status.equals(ProcessStatus.BLOCKED.toString())) {
                 resp = "Request to " + url + " is BLOCKED";

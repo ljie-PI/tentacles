@@ -1,16 +1,16 @@
 package com.lab_440.tentacles.slave;
 
-import com.lab_440.tentacles.slave.parser.IParser;
-import com.lab_440.tentacles.Configuration;
-import com.lab_440.tentacles.common.IDGenerator;
-import com.lab_440.tentacles.common.ProcessStatus;
-import com.lab_440.tentacles.common.item.IItem;
+import com.lab_440.tentacles.common.*;
+import com.lab_440.tentacles.common.item.AbstractItem;
 import com.lab_440.tentacles.common.item.RequestItem;
 import com.lab_440.tentacles.common.regex.ContentTypeMatcher;
-import com.lab_440.tentacles.common.Register;
 import com.lab_440.tentacles.slave.downloader.IDownloader;
+import com.lab_440.tentacles.slave.downloader.IProxiable;
+import com.lab_440.tentacles.slave.parser.IParser;
 import io.vertx.core.Vertx;
-import io.vertx.core.http.HttpClient;
+import io.vertx.core.eventbus.DeliveryOptions;
+import io.vertx.core.eventbus.EventBus;
+import io.vertx.core.http.HttpClientResponse;
 import io.vertx.core.logging.Logger;
 import io.vertx.core.logging.LoggerFactory;
 
@@ -24,52 +24,35 @@ public class Downloadable {
 
     private Logger logger = LoggerFactory.getLogger(getClass());
 
-    private final String DEFAULT_DOMAIN = "default_domain";
-
-    private HttpClient httpClient;
+    private Executor executor;
     private RequestItem request;
     private String url;
     private String domain;
     private IDownloader downloader;
     private IParser parser;
     private Type type;
-    private List<String> extUrls;
-    private List<IItem> items;
+    private List<String> followUrls;
+    private List<AbstractItem> items;
+    private int retryTimes;
     private ProcessStatus status;
-    private long redialCount;
 
-    public Downloadable(HttpClient httpClient, RequestItem request) {
-        this.httpClient = httpClient;
+    public Downloadable(Executor executor, RequestItem request) {
+        this.executor = executor;
         this.request = request;
-        url = request.getUrl();
-        String[] segs = url.split("/");
-        if (segs.length < 3) {
-            domain = DEFAULT_DOMAIN;
-        } else {
-            domain = segs[2];
-        }
+        this.url = request.getUrl();
+        this.domain = request.getDomain();
         downloader = Register.getInstance().getDownloader(domain);
         parser = Register.getInstance().getParser(domain);
-        extUrls = new ArrayList<>();
+        followUrls = new ArrayList<>();
         items = new ArrayList<>();
+        retryTimes = executor.getConf().getRetryTimes();
         status = null;
-    }
-
-    public String getUrl() {
-        return url;
-    }
-
-    public String getDomain() {
-        return domain;
-    }
-
-    public RequestItem getRequest() {
-        return request;
     }
 
     /**
      * get filename from url
-     * @return  filename
+     *
+     * @return filename
      */
     public String getFilename() {
         String[] parts = url.split("/");
@@ -79,75 +62,76 @@ public class Downloadable {
         return parts[parts.length - 1];
     }
 
-    public void process(CrawlerExecutor crawlerExecutor) {
-        Vertx vertx = crawlerExecutor.getVertx();
-        redialCount = RedialCount.get();
+    public void process(String processUrl) {
         try {
-            downloader.download(httpClient, url,
+            downloader.get(processUrl,
                     resp -> {
                         switch (resp.statusCode()) {
                             case 301:
                             case 302:
                             case 303:
-                                status = ProcessStatus.REDIRECT;
-                                String followUrl = resp.getHeader("Location");
-                                if (followUrl == null || followUrl.isEmpty() || followUrl.equals(url)) {
-                                    logger.error("Failed to download " + url + ", because redirection to invalid url");
-                                } else {
-                                    extUrls.add(followUrl);
-                                }
-                                type = Type.REDIRECT;
-                                processResult(crawlerExecutor);
+                                processRedirection(resp, processUrl);
                                 break;
                             case 200:
                                 status = ProcessStatus.OK;
                                 String contentType = resp.getHeader("Content-Type");
                                 type = ContentTypeMatcher.match(contentType);
                                 if (type == Type.IMAGE || type == Type.AUDIO) {
-                                    Configuration conf = new Configuration()
-                                            .fromJsonObject(vertx.getOrCreateContext().config());
-                                    String filePath = conf.getFilestorePath() + "/" + type + "/" + getFilename();
-                                    new AsyncFileStore(vertx).asyncStore(resp, filePath,
-                                            res -> {
-                                                processResult(crawlerExecutor);
-                                                logger.info("Successfully download " + url);
-                                            }
-                                    );
+                                    processBinary(resp);
                                 } else if (type == Type.TEXT) {
-                                    resp.bodyHandler(
-                                            buffer -> {
-                                                try {
-                                                    logger.info("----- " + buffer.toString());
-                                                    parser.parse(url, buffer.toString());
-                                                } catch (Exception e) {
-                                                    logger.error("Failed to parse " + url);
-                                                    logger.error(e.getMessage());
-                                                } finally {
-                                                    processResult(crawlerExecutor);
-                                                }
-                                            }
-                                    );
+                                    processText(resp);
                                 }
                                 break;
                             default:
                                 status = ProcessStatus.NOT_RETURN;
-                                processResult(crawlerExecutor);
+                                processResult();
                                 break;
                         }
                         resp.exceptionHandler(
                                 err -> {
                                     status = ProcessStatus.NOT_RETURN;
-                                    logger.error("Exception happened when downloading " + url);
-                                    logger.error(err.getMessage());
-                                    processResult(crawlerExecutor);
-                                }
-                        );
-                    }
-            );
+                                    logger.error("Exception happened when downloading {}: {}", url, err.getMessage());
+                                    processResult();
+                                });
+                    });
         } catch (Exception e) {
-            logger.error("Failed to download " + url);
-            logger.error(e.getMessage());
-            processResult(crawlerExecutor);
+            logger.error("Failed to download {}: {}", url, e.getMessage());
+            processResult();
+        }
+    }
+
+    private void processText(HttpClientResponse resp) {
+        resp.bodyHandler(
+                buffer -> {
+                    try {
+                        parser.parse(url, buffer.toString());
+                    } catch (Exception e) {
+                        logger.error("Failed to parse {}: {}", url, e.getMessage());
+                    } finally {
+                        processResult();
+                    }
+                });
+    }
+
+    private void processBinary(HttpClientResponse resp) {
+        Vertx vertx = executor.getVertx();
+        Configuration conf = new Configuration(vertx.getOrCreateContext().config());
+        String filePath = conf.getFileStorePath() + "/" + type + "/" + getFilename();
+        AsyncFileStore.asyncStore(vertx, resp, filePath,
+                res -> {
+                    processResult();
+                    logger.info("Successfully download {} file: {}", type.toString(), url);
+                });
+    }
+
+    private void processRedirection(HttpClientResponse resp, String url) {
+        status = ProcessStatus.REDIRECT;
+        String followUrl = resp.getHeader("Location");
+        if (followUrl == null || followUrl.isEmpty() || followUrl.equals(url)) {
+            logger.error("Failed to download {}, because redirection to invalid url", url);
+        } else {
+            this.url = followUrl;
+            process(followUrl);
         }
     }
 
@@ -155,59 +139,72 @@ public class Downloadable {
      * Process extracted items, follow urls according to type,
      * And if requests are blocked by some domain, will try ADSL redial
      */
-    private void processResult(CrawlerExecutor crawlerExecutor) {
+    private void processResult() {
         ProcessStatus parserStatus = parser.getStatus();
         status = parserStatus != null ? parserStatus : status;
         logger.info("Processing " + url + "(" + status + ")");
         if (status == ProcessStatus.OK) {
             items = parser.getItems();
-            extUrls = parser.getFollowUrls();
-            reply(crawlerExecutor);
+            followUrls = parser.getFollowUrls();
+            reply();
         } else if (status == ProcessStatus.BLOCKED) {
-            crawlerExecutor.processBlcoked();
+            changeProxy();
+            process(url);
         } else if (status == ProcessStatus.NOT_RETURN) {
-            if (crawlerExecutor.getSchedulerStatus(getDomain()) == DomainScheduler.Status.PAUSED
-                    || redialCount != RedialCount.get()) {
-                request.setIsRetry(true);
-                crawlerExecutor.scheduleOne(request);
-            }
+            retry();
         }
-        storeItems(crawlerExecutor);
-        followLinks(crawlerExecutor);
+        storeItems();
+        followLinks();
+    }
+
+    private void changeProxy() {
+        if (downloader instanceof IProxiable) {
+            ((IProxiable) downloader).changeProxy();
+        }
+    }
+
+    /**
+     * Retry send request item to retry queue of planner
+     */
+    private void retry() {
+        int retried = request.getRetried();
+        if (retried < retryTimes) {
+            request.setRetried(retried + 1);
+            EventBus eb = executor.getEventBus();
+            eb.send(MessageAddress.RETRY_URL_LISTENER, request);
+        } else {
+            logger.error("Failed to download {} after {} retries!", url, retryTimes);
+        }
     }
 
     /**
      * Store parsed items
-     * @param crawlerExecutor
      */
-    private void storeItems(CrawlerExecutor crawlerExecutor) {
+    private void storeItems() {
         if (items.size() == 0) {
             return;
         }
-        crawlerExecutor.storeItems(items);
+        executor.storeItems(items);
     }
 
     /**
      * Upload extracted links
-     * @param crawlerExecutor
      */
-    private void followLinks(CrawlerExecutor crawlerExecutor) {
-        if (extUrls.size() == 0) return;
-        crawlerExecutor.followLinks(extUrls);
+    private void followLinks() {
+        if (followUrls.size() == 0) return;
+        executor.followLinks(followUrls);
     }
 
     /**
      * Reply master with processing result
-     * @param crawlerExecutor
      */
-    private void reply(CrawlerExecutor crawlerExecutor) {
-        crawlerExecutor.reply(url, status);
+    private void reply() {
+        executor.reply(url, status);
     }
 
     public enum Type {
         TEXT,
         IMAGE,
-        AUDIO,
-        REDIRECT
+        AUDIO
     }
 }

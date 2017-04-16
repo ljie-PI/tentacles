@@ -1,8 +1,8 @@
 package com.lab_440.tentacles.slave.parser;
 
-import com.lab_440.tentacles.common.item.ResultItem;
 import com.lab_440.tentacles.common.ProcessStatus;
-import com.lab_440.tentacles.common.item.IItem;
+import com.lab_440.tentacles.common.item.GeneralResultAbstractItem;
+import com.lab_440.tentacles.common.item.AbstractItem;
 import de.jetwick.snacktory.ArticleTextExtractor;
 import de.jetwick.snacktory.JResult;
 import io.vertx.core.logging.Logger;
@@ -21,7 +21,7 @@ public class BaseParser implements IParser {
     private String url;
     private String page;
     private ProcessStatus status;
-    private List<IItem> items;
+    private List<AbstractItem> items;
     private List<String> followUrls;
     private List<ParseMethod> parseMethods;
     private ArticleTextExtractor extractor;
@@ -36,8 +36,8 @@ public class BaseParser implements IParser {
                     = methods[i].getAnnotation(ParseRule.class);
             if (annotation != null) {
                 ParseMethod parseMethod = new ParseMethod(methods[i],
-                                                    annotation.priority(),
-                                                    Pattern.compile(annotation.uriPattern()));
+                        annotation.priority(),
+                        Pattern.compile(annotation.uriPattern()));
                 priQueue.add(parseMethod);
             }
         }
@@ -57,7 +57,7 @@ public class BaseParser implements IParser {
         this.page = page;
         items.clear();
         followUrls.clear();
-        for (ParseMethod rule: parseMethods) {
+        for (ParseMethod rule : parseMethods) {
             Pattern ptn = rule.getUriPattern();
             if (ptn.matcher(url).find()) {
                 rule.getMethod().invoke(this);
@@ -71,8 +71,12 @@ public class BaseParser implements IParser {
         return status;
     }
 
+    public void setStatus(ProcessStatus status) {
+        this.status = status;
+    }
+
     @Override
-    public List<IItem> getItems() {
+    public List<AbstractItem> getItems() {
         return items;
     }
 
@@ -84,7 +88,7 @@ public class BaseParser implements IParser {
     @ParseRule(priority = 999, uriPattern = ".*")
     public void parseGeneral() throws Exception {
         JResult jres = extractor.extractContent(getPage());
-        ResultItem item = new ResultItem();
+        GeneralResultAbstractItem item = new GeneralResultAbstractItem();
         item.setUrl(getUrl());
         item.setTitle(jres.getTitle());
         item.setDate(jres.getDate());
@@ -100,15 +104,11 @@ public class BaseParser implements IParser {
         return page;
     }
 
-    public void addItem(IItem item) {
+    public void addItem(AbstractItem item) {
         items.add(item);
     }
 
     public void followUrl(String url) {
         followUrls.add(url);
-    }
-
-    public void setStatus(ProcessStatus status) {
-        this.status = status;
     }
 }

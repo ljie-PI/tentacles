@@ -1,6 +1,6 @@
 package com.lab_440.tentacles.master.datastore;
 
-import com.lab_440.tentacles.Configuration;
+import com.lab_440.tentacles.common.Configuration;
 
 import java.lang.reflect.Constructor;
 
@@ -12,7 +12,7 @@ public class DatastoreHelper {
         if (instance == null) {
             synchronized (DatastoreHelper.class) {
                 if (instance == null) {
-                    Class<?> clazz = Class.forName(conf.getDatastoreClass());
+                    Class<?> clazz = Class.forName(conf.getDataStoreClass());
                     Constructor datastoreConstructor = clazz.getConstructor(Configuration.class);
                     instance = (IDatastore) datastoreConstructor.newInstance(conf);
                 }

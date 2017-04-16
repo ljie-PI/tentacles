@@ -2,33 +2,34 @@ package com.lab_440.tentacles.master.scheduler;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Set;
 
 public interface IScheduler<E> {
 
     public void setDupChecker(IDupChecker<E> dupChecker);
 
-    public boolean add(E item);
+    public boolean add(String domain, E item);
 
-    default public int addBatch(List<E> items) {
+    public default int addBatch(String domain, List<E> items) {
         int n = 0;
-        for (E item: items) {
-            n += (add(item) ? 1 : 0);
+        for (E item : items) {
+            n += (add(domain, item) ? 1 : 0);
         }
         return n;
     }
 
-    public E poll();
+    public E poll(String domain);
 
-    default public List<E> pollBatch(int cnt) {
-        List<E> retList = new ArrayList<E>();
+    public default List<E> pollBatch(String domain, int cnt) {
+        List<E> retList = new ArrayList<>();
         for (int i = 0; i < cnt; i++) {
-            E item = poll();
+            E item = poll(domain);
             if (item != null)
                 retList.add(item);
         }
         return retList;
     }
 
-    public int retry(E item);
+    public List<E> pollBatch(Set<String> exclude, int cnt);
 
 }

@@ -21,6 +21,10 @@ public class DownloaderTest {
 
     public class DummyDownloader extends BaseDownloader {
 
+        public DummyDownloader(Vertx vertx) {
+            super(vertx);
+        }
+
         @Processor(priority = 2)
         public void testMethod2(Request request) {
             executed++;
@@ -35,20 +39,18 @@ public class DownloaderTest {
 
     }
 
-    @Test(timeout = 3000)
+    @Test(timeout = 5000)
     public void testBaseDownloader(TestContext context) throws Exception {
-        HttpClient httpClient = Vertx.vertx().createHttpClient();
-        IDownloader downloader = new BaseDownloader();
+        IDownloader downloader = new BaseDownloader(Vertx.vertx());
         downloader.init();
-        downloader.setHTTPMethod(HttpMethod.GET);
         Async async = context.async();
-        downloader.download(httpClient, "http://www.visualbusiness.com",
+        downloader.get("https://www.baidu.com/",
                 resp -> {
                     resp.bodyHandler(
                         res -> {
                             String s = res.toString();
-                            context.assertTrue(s.startsWith("\uFEFF<!DOCTYPE html>"));
-                            context.assertTrue(s.contains("微景天下官网"));
+                            context.assertTrue(s.startsWith("<!DOCTYPE html>"));
+                            context.assertTrue(s.contains("百度一下，你就知道"));
                             async.complete();
                         }
                     );
@@ -59,20 +61,18 @@ public class DownloaderTest {
         );
     }
 
-    @Test(timeout = 3000)
+    @Test(timeout = 5000)
     public void testInheritDownloader(TestContext context) throws Exception {
-        HttpClient httpClient = Vertx.vertx().createHttpClient();
-        IDownloader downloader = this.new DummyDownloader();
+        IDownloader downloader = this.new DummyDownloader(Vertx.vertx());
         downloader.init();
-        downloader.setHTTPMethod(HttpMethod.GET);
         Async async = context.async();
-        downloader.download(httpClient, "http://www.visualbusiness.com",
+        downloader.get("https://www.baidu.com/",
                 resp -> {
                     resp.bodyHandler(
                             res -> {
                                 String s = res.toString();
-                                context.assertTrue(s.startsWith("\uFEFF<!DOCTYPE html>"));
-                                context.assertTrue(s.contains("微景天下官网"));
+                                context.assertTrue(s.startsWith("<!DOCTYPE html>"));
+                                context.assertTrue(s.contains("百度一下，你就知道"));
                                 async.complete();
                             }
                     );

@@ -1,10 +1,8 @@
 package com.lab_440.tentacles.slave.downloader;
 
 import io.vertx.core.Handler;
-import io.vertx.core.http.HttpClient;
-import io.vertx.core.http.HttpClientRequest;
-import io.vertx.core.http.HttpClientResponse;
-import io.vertx.core.http.HttpMethod;
+import io.vertx.core.Vertx;
+import io.vertx.core.http.*;
 import io.vertx.core.logging.Logger;
 import io.vertx.core.logging.LoggerFactory;
 
@@ -17,8 +15,14 @@ public class BaseDownloader implements IDownloader {
 
     private Logger logger = LoggerFactory.getLogger(getClass());
 
-    private HttpMethod httpMethod = HttpMethod.GET;
     private List<Method> processMethods;
+    private HttpClient httpClient;
+    private HttpClient httpsClient;
+
+    public BaseDownloader(Vertx vertx) {
+        httpClient = vertx.createHttpClient();
+        httpsClient = vertx.createHttpClient(new HttpClientOptions().setSsl(true));
+    }
 
     @Override
     public void init() {
@@ -42,27 +46,39 @@ public class BaseDownloader implements IDownloader {
     }
 
     @Override
-    public void download(HttpClient httpClient,
+    public void get(String url,
+                    Handler<HttpClientResponse> handler) throws Exception {
+        if (url.startsWith("https://")) {
+            request(httpsClient, HttpMethod.GET, url, handler);
+        } else {
+            request(httpClient, HttpMethod.GET, url, handler);
+        }
+    }
+
+    @Override
+    public void post(String url,
+                     Handler<HttpClientResponse> handler) throws Exception {
+        if (url.startsWith("https://")) {
+            request(httpsClient, HttpMethod.POST, url, handler);
+        } else {
+            request(httpClient, HttpMethod.POST, url, handler);
+        }
+    }
+
+    private void request(HttpClient httpClient,
+                         HttpMethod httpMethod,
                          String url,
                          Handler<HttpClientResponse> handler) throws Exception {
         HttpClientRequest request = httpClient.requestAbs(httpMethod, url, handler);
         request.setTimeout(3000);
         Request reqWrapper = new Request(request);
-        for (Method method: processMethods) {
+        for (Method method : processMethods) {
             method.invoke(this, reqWrapper);
         }
         reqWrapper.onError(
-                err -> {
-                    logger.error(err.getMessage());
-                }
+                err -> logger.error(err.getMessage())
         );
         reqWrapper.end();
-    }
-
-    @Override
-    public IDownloader setHTTPMethod(HttpMethod httpMethod) {
-        this.httpMethod = httpMethod;
-        return this;
     }
 
     @Processor(priority = 100)

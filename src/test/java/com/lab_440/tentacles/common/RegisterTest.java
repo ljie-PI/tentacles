@@ -1,14 +1,13 @@
 package com.lab_440.tentacles.common;
 
-import com.lab_440.tentacles.slave.downloader.IDownloader;
-import com.lab_440.tentacles.slave.parser.IParser;
-import com.lab_440.tentacles.common.item.IItem;
+import com.lab_440.tentacles.common.item.AbstractItem;
 import com.lab_440.tentacles.slave.downloader.BaseDownloader;
+import com.lab_440.tentacles.slave.downloader.IDownloader;
 import com.lab_440.tentacles.slave.parser.BaseParser;
+import com.lab_440.tentacles.slave.parser.IParser;
 import io.vertx.core.Handler;
 import io.vertx.core.http.HttpClient;
 import io.vertx.core.http.HttpClientResponse;
-import io.vertx.core.http.HttpMethod;
 import org.junit.Assert;
 import org.junit.Test;
 
@@ -16,59 +15,107 @@ import java.util.List;
 
 public class RegisterTest {
 
+    private TestParser testParser = new TestParser();
+    private TestDownloader testDownloader = new TestDownloader();
+    private Register register = Register.getInstance();
+    private String domain;
+
     @Test
-    public void testDefaultRegister() {
-        IDownloader dlr = Register.getInstance().getDownloader("registor.visualbusiness.com");
-        Assert.assertTrue(dlr instanceof BaseDownloader);
-        IParser psr = Register.getInstance().getParser("registor.visualbusiness.com");
-        Assert.assertTrue(psr instanceof BaseParser);
-        float itvl = Register.getInstance().getInterval("registor.visualbusiness.com");
-        System.out.println(itvl);
-        Assert.assertTrue(0.0f == itvl);
+    public void testGetInstance() {
+        Register r1 = Register.getInstance();
+        Register r2 = Register.getInstance();
+        Assert.assertTrue(r1 == r2);
     }
 
-    class DummyDownloader implements IDownloader {
-        private HttpMethod httpMethod;
-        @Override
-        public void init() {}
+    @Test
+    public void testRegister1() {
+        domain = "domain1";
+        register.regist(domain, testDownloader, testParser, 100, 100);
+        Assert.assertTrue(register.getParser(domain) instanceof TestParser);
+        Assert.assertTrue(register.getDownloader(domain) instanceof TestDownloader);
+        Assert.assertEquals(100, register.getInterval(domain));
+        Assert.assertEquals(100, register.getUrlBS(domain));
+    }
 
+    @Test
+    public void testRegister2() {
+        domain = "domain2";
+        register.regist(domain, testDownloader, testParser);
+        Assert.assertTrue(register.getParser(domain) instanceof TestParser);
+        Assert.assertTrue(register.getDownloader(domain) instanceof TestDownloader);
+        Assert.assertEquals(0, register.getInterval(domain));
+        Assert.assertEquals(0, register.getUrlBS(domain));
+    }
+
+    @Test
+    public void testRegister3() {
+        domain = "domain3";
+        register.regist(domain, testParser);
+        Assert.assertTrue(register.getParser(domain) instanceof TestParser);
+        Assert.assertTrue(register.getDownloader(domain) == null);
+        Assert.assertEquals(0, register.getInterval(domain));
+        Assert.assertEquals(0, register.getUrlBS(domain));
+    }
+
+    @Test
+    public void testRegister4() {
+        domain = "domain4";
+        register.regist(domain, testDownloader);
+        Assert.assertTrue(register.getParser(domain) == null);
+        Assert.assertTrue(register.getDownloader(domain) instanceof TestDownloader);
+        Assert.assertEquals(0, register.getInterval(domain));
+        Assert.assertEquals(0, register.getUrlBS(domain));
+    }
+
+    @Test
+    public void testRegister5() {
+        domain = "domain5";
+        register.regist(domain, 100, 50);
+        Assert.assertTrue(register.getParser(domain) == null);
+        Assert.assertTrue(register.getDownloader(domain) == null);
+        Assert.assertEquals(100, register.getInterval(domain));
+        Assert.assertEquals(50, register.getUrlBS(domain));
+    }
+
+    class TestParser implements IParser {
         @Override
-        public IDownloader setHTTPMethod(HttpMethod httpMethod) {
-            this.httpMethod = httpMethod;
-            return this;
+        public void init() {
         }
 
         @Override
-        public void download(HttpClient httpclient,
-                             String url,
-                             Handler<HttpClientResponse> handler)
-                throws Exception {}
+        public void parse(String url, String page) throws Exception {
+        }
+
+        @Override
+        public ProcessStatus getStatus() {
+            return null;
+        }
+
+        @Override
+        public List<AbstractItem> getItems() {
+            return null;
+        }
+
+        @Override
+        public List<String> getFollowUrls() {
+            return null;
+        }
     }
 
-    class DummyParser implements IParser {
-        @Override
-        public void init() {}
-        @Override
-        public void parse(String url, String page) throws Exception {}
-        @Override
-        public ProcessStatus getStatus() { return null; }
-        @Override
-        public List<IItem> getItems() { return null; }
-        @Override
-        public List<String> getFollowUrls() { return null; }
-    }
+    class TestDownloader implements IDownloader {
 
-    @Test
-    public void testRegisterAndGet() {
-        Register.getInstance().registerDownloader("www.visualbusiness.com", new DummyDownloader());
-        IDownloader dlr = Register.getInstance().getDownloader("www.visualbusiness.com");
-        Assert.assertTrue(dlr instanceof DummyDownloader);
-        Register.getInstance().registerParser("www.visualbusiness.com", new DummyParser());
-        IParser psr = Register.getInstance().getParser("www.visualbusiness.com");
-        Assert.assertTrue(psr instanceof DummyParser);
-        Register.getInstance().registerInterval("www.visualbusiness.com", 1000);
-        float itvl = Register.getInstance().getInterval("www.visualbusiness.com");
-        Assert.assertTrue(1000f == itvl);
-    }
+        @Override
+        public void init() {
+        }
 
+        @Override
+        public void get(String url, Handler<HttpClientResponse> handler)
+                throws Exception {
+        }
+
+        @Override
+        public void post(String url, Handler<HttpClientResponse> handler)
+                throws Exception {
+        }
+    }
 }

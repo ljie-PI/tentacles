@@ -38,4 +38,12 @@ public class Request {
     public void appendCookie(String cookie) {
         request.putHeader("Cookie", cookie);
     }
+
+    /**
+     * return vertx request in case of operating the raw request
+     * @return
+     */
+    public HttpClientRequest getVertxRequest() {
+        return request;
+    }
 }

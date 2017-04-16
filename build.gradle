@@ -1,5 +1,5 @@
 group "com.lab-440"
-version "0.1.0"
+version "2.0.0"
 
 apply plugin: "java"
 apply plugin: "application"
@@ -35,8 +35,6 @@ dependencies {
     testCompile "junit:junit:4.12"
     testCompile "io.vertx:vertx-unit:3.3.3"
 }
-
-mainClassName = "com.visualbusiness.tentacles.app.Crawler"
 
 shadowJar {
     classifier = "with-dependencies"

@@ -45,14 +45,13 @@ public class RemoteCall {
 
     /**
      * Get non-duplicated url batch from master
-     * @param batchSize specify how many urls in a batch
+     * @param domainBS  specify how many urls in a batch, for each domain
      * @param onSucc    execute when getting status succeeds
      * @param onError   execute when error occurs
      */
-    public void fetchUrls(int batchSize,
+    public void fetchUrls(JsonObject domainBS,
                           Handler<Buffer> onSucc, Handler<Throwable> onError) {
-        String url = FETCH_URLS_URI + "?bs=" + batchSize;
-        get(url, onSucc, onError);
+        post(FETCH_URLS_URI, domainBS.encode(), onSucc, onError);
     }
 
     /**
@@ -79,13 +78,13 @@ public class RemoteCall {
 
     /**
      * Reply to master with url and status
-     * @param jobj
+     * @param jObj
      * @param onSucc
      * @param onError
      */
-    public void reply(JsonObject jobj,
+    public void reply(JsonObject jObj,
                       Handler<Buffer> onSucc, Handler<Throwable> onError) {
-        post(REPLY_URI, jobj.encode(), onSucc, onError);
+        post(REPLY_URI, jObj.encode(), onSucc, onError);
     }
 
     /**

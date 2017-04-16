@@ -1,7 +1,7 @@
 package com.lab_440.tentacles.master.datastore;
 
 import com.lab_440.tentacles.master.scheduler.RedisPool;
-import com.lab_440.tentacles.Configuration;
+import com.lab_440.tentacles.common.Configuration;
 import io.vertx.core.json.JsonObject;
 import io.vertx.core.logging.Logger;
 import io.vertx.core.logging.LoggerFactory;
@@ -11,14 +11,15 @@ public class RedisDatastore implements IDatastore {
 
     private Logger logger = LoggerFactory.getLogger(getClass());
 
-    private final String DATASTORE_LIST_KEY = "crawler_datastore_key";
+    private final String DATASTORE_LIST_KEY = "tentacles_datastore_key";
 
     private RedisPool pool;
 
     public RedisDatastore(Configuration conf) {
         String host = conf.getRedisHost();
         int port = conf.getRedisPort();
-        pool = RedisPool.getOrCreate(host, port);
+        String passwd = conf.getRedisPasswd();
+        pool = RedisPool.getOrCreate(host, port, passwd);
     }
 
     @Override

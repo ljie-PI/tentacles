@@ -9,10 +9,10 @@ public interface IDownloader {
 
     public void init();
 
-    public IDownloader setHTTPMethod(HttpMethod httpMethod);
+    public void get(String url,
+                  Handler<HttpClientResponse> handler) throws Exception;
 
-    public void download(HttpClient httpclient,
-                         String url,
-                         Handler<HttpClientResponse> handler) throws Exception;
+    public void post(String url,
+                  Handler<HttpClientResponse> handler) throws Exception;
 
 }

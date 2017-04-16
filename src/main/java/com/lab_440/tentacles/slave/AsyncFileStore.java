@@ -8,13 +8,10 @@ import io.vertx.core.file.OpenOptions;
 import io.vertx.core.streams.Pump;
 import io.vertx.core.streams.ReadStream;
 
+import java.io.File;
+import java.nio.file.Path;
+
 public class AsyncFileStore {
-
-    private Vertx vertx;
-
-    public AsyncFileStore(Vertx vertx) {
-        this.vertx = vertx;
-    }
 
     /**
      * Asynchronously store content from source to filePath,
@@ -23,19 +20,30 @@ public class AsyncFileStore {
      * @param filePath
      * @param onEnd
      */
-    public void asyncStore(ReadStream<Buffer> source,
+    public static void asyncStore(Vertx vertx,
+                           ReadStream<Buffer> source,
                            String filePath,
                            Handler<Void> onEnd) {
+        checkDir(filePath);
         source.pause();
         vertx.fileSystem().open(filePath,
-                new OpenOptions(),
+                new OpenOptions().setWrite(true).setCreate(true),
                 fres -> {
                     AsyncFile afile = fres.result();
                     Pump pump = Pump.pump(source, afile);
                     source.endHandler(onEnd);
                     pump.start();
                     source.resume();
-                }
-        );
+                });
+    }
+
+    private static void checkDir(String filePath) {
+        String dirStr = filePath.substring(0, filePath.lastIndexOf("/"));
+        File dir = new File(dirStr);
+        synchronized (AsyncFileStore.class) {
+            if (!dir.exists()) {
+                dir.mkdirs();
+            }
+        }
     }
 }

@@ -1,11 +1,13 @@
 package com.lab_440.tentacles.master;
 
-import com.lab_440.tentacles.Configuration;
-import com.lab_440.tentacles.CrawlerController;
+import com.lab_440.tentacles.common.Configuration;
+import com.lab_440.tentacles.common.Domains;
 import com.lab_440.tentacles.common.ProcessStatus;
 import com.lab_440.tentacles.common.RemoteCall;
-import com.lab_440.tentacles.common.item.IItem;
+import com.lab_440.tentacles.common.item.AbstractItem;
 import com.lab_440.tentacles.common.item.RequestItem;
+import com.lab_440.tentacles.master.datastore.DatastoreHelper;
+import com.lab_440.tentacles.master.datastore.ListDatastore;
 import com.lab_440.tentacles.master.scheduler.SchedulerHelper;
 import io.vertx.core.Vertx;
 import io.vertx.core.json.JsonArray;
@@ -19,17 +21,18 @@ import org.junit.Test;
 import org.junit.runner.RunWith;
 
 import java.io.File;
+import java.util.List;
 
 @RunWith(VertxUnitRunner.class)
 public class HandlerTest {
 
-    private static CrawlerController crawlerController;
+    private static MasterRunner masterRunner;
     private static Configuration conf;
     private static Vertx vertx;
     private static String filePath;
 
     @BeforeClass
-    public static void deployMasterVerticle(TestContext context) {
+    public static void setUp(TestContext context) {
         conf = new Configuration(
                 System.getProperty("user.dir") + "/src/test/resources/master_test.properties"
         );
@@ -40,8 +43,8 @@ public class HandlerTest {
         File filestore = new File(filePath);
         if (filestore.exists()) filestore.delete();
 
-        crawlerController = new CrawlerController();
-        crawlerController.deploy(conf);
+        masterRunner = new MasterRunner();
+        masterRunner.runWithConf(conf);
 
         // keep running after deployment finished
         Async async = context.async();
@@ -50,8 +53,8 @@ public class HandlerTest {
     }
 
     @AfterClass
-    public static void undeployVerticle() {
-        crawlerController.undeploy();
+    public static void tearDown() {
+        masterRunner.stop();
     }
 
     @Test
@@ -70,20 +73,37 @@ public class HandlerTest {
     @Test
     public void testFetchUrls(TestContext context) {
         for (int i = 0; i < 10; i++) {
-            JsonObject jobj = new JsonObject().put("url", "test_fetch_url" + i);
-            RequestItem item = new RequestItem().fromJsonObject(jobj);
-            SchedulerHelper.getInstance().add(item);
+            SchedulerHelper.getInstance().add("www.example.com",
+                    makeRequestItem("http://www.example.com/test_fetch_url" + i));
+            SchedulerHelper.getInstance().add("www.test.com",
+                    makeRequestItem("http://www.test.com/test_fetch_url" + i));
         }
         Async async = context.async();
+        JsonObject postObj = new JsonObject();
+        postObj.put("www.example.com", 10);
+        postObj.put(Domains.DEFAULT_DOMAIN, 10);
         RemoteCall rc = new RemoteCall(vertx, conf.getMasterHost(), conf.getMasterPort());
-        rc.fetchUrls(10,
+        rc.fetchUrls(postObj,
                 resp -> {
-                    JsonArray jarr = new JsonArray(resp.toString());
-                    context.assertEquals(10, jarr.size());
-                    context.assertEquals("{\"url\":\"test_fetch_url0\",\"is_retry\":false}",
-                            jarr.getJsonObject(0).toString());
-                    context.assertEquals("{\"url\":\"test_fetch_url9\",\"is_retry\":false}",
-                            jarr.getJsonObject(9).toString());
+                    JsonArray jArr = new JsonArray(resp.toString());
+                    context.assertEquals(20, jArr.size());
+
+                    context.assertEquals("http://www.example.com/test_fetch_url0",
+                            jArr.getJsonObject(0).getString("url"));
+                    context.assertEquals(false, jArr.getJsonObject(0).getBoolean("is_repeat", false));
+
+                    context.assertEquals("http://www.example.com/test_fetch_url9",
+                            jArr.getJsonObject(9).getString("url"));
+                    context.assertEquals(false, jArr.getJsonObject(9).getBoolean("is_repeat", false));
+
+                    context.assertEquals("http://www.test.com/test_fetch_url0",
+                            jArr.getJsonObject(10).getString("url"));
+                    context.assertEquals(false, jArr.getJsonObject(10).getBoolean("is_repeat", false));
+
+                    context.assertEquals("http://www.test.com/test_fetch_url9",
+                            jArr.getJsonObject(19).getString("url"));
+                    context.assertEquals(false, jArr.getJsonObject(19).getBoolean("is_repeat", false));
+
                     async.complete();
                 },
                 err -> context.fail(err.getMessage())
@@ -92,17 +112,28 @@ public class HandlerTest {
 
     @Test
     public void testFetchUrlsWithInsufficient(TestContext context) {
-         IItem item = new RequestItem()
-                .decode("{\"url\":\"test_fetch_with_insufficient_url\"}");
-        SchedulerHelper.getInstance().add(item);
+        SchedulerHelper.getInstance().add("www.example.com",
+                makeRequestItem("http://www.example.com/test_fetch_with_insufficient_url"));
+        SchedulerHelper.getInstance().add(Domains.DEFAULT_DOMAIN,
+                makeRequestItem("http://www.test.com/test_fetch_with_insufficient_url"));
         Async async = context.async();
+        JsonObject postObj = new JsonObject();
+        postObj.put("www.example.com", 10);
+        postObj.put(Domains.DEFAULT_DOMAIN, 10);
         RemoteCall rc = new RemoteCall(vertx, conf.getMasterHost(), conf.getMasterPort());
-        rc.fetchUrls(10,
+        rc.fetchUrls(postObj,
                 resp -> {
-                    JsonArray jarr = new JsonArray(resp.toString());
-                    context.assertEquals(1, jarr.size());
-                    context.assertEquals("{\"url\":\"test_fetch_with_insufficient_url\",\"is_retry\":false}",
-                            jarr.getJsonObject(0).toString());
+                    JsonArray jArr = new JsonArray(resp.toString());
+                    context.assertEquals(2, jArr.size());
+
+                    context.assertEquals("http://www.example.com/test_fetch_with_insufficient_url",
+                            jArr.getJsonObject(0).getString("url"));
+                    context.assertEquals(false, jArr.getJsonObject(0).getBoolean("is_repeat", false));
+
+                    context.assertEquals("http://www.test.com/test_fetch_with_insufficient_url",
+                            jArr.getJsonObject(1).getString("url"));
+                    context.assertEquals(false, jArr.getJsonObject(1).getBoolean("is_repeat", false));
+
                     async.complete();
                 },
                 err -> context.fail(err.getMessage())
@@ -112,20 +143,51 @@ public class HandlerTest {
     @Test
     public void testFollowLinks(TestContext context) {
         for (int i = 0; i < 5; i++) {
-            JsonObject jobj = new JsonObject().put("url", "follow_links_url" + i);
-            RequestItem item = new RequestItem().fromJsonObject(jobj);
-            SchedulerHelper.getInstance().add(item);
+            SchedulerHelper.getInstance().add("www.example.com",
+                    makeRequestItem("http://www.example.com/follow_links_url" + i));
         }
         Async async = context.async();
-        JsonArray jarr = new JsonArray();
+        JsonArray jArr = new JsonArray();
         for (int i = 4; i < 7; i++) {
-            JsonObject jobj = new JsonObject().put("url", "follow_links_url" + i);
-            jarr.add(jobj);
+            JsonObject jObj = new JsonObject().put("url", "http://www.example.com/follow_links_url" + i);
+            jArr.add(jObj);
         }
         RemoteCall rc = new RemoteCall(vertx, conf.getMasterHost(), conf.getMasterPort());
-        rc.followLinks(jarr,
+        rc.followLinks(jArr,
                 resp -> {
                     context.assertEquals("2", resp.toString());
+                    List<AbstractItem> urls = SchedulerHelper.getInstance().pollBatch("www.example.com", 10);
+                    context.assertEquals(7, urls.size());
+                    urls = SchedulerHelper.getInstance().pollBatch("www.example.com", 10);
+                    context.assertEquals(0, urls.size());
+                    async.complete();
+                },
+                err -> context.fail(err.getMessage())
+        );
+    }
+
+    @Test
+    public void testFollowDupLinks(TestContext context) {
+        for (int i = 0; i < 5; i++) {
+            SchedulerHelper.getInstance().add("www.example.com",
+                    makeRequestItem("http://www.example.com/follow_dup_links_url" + i));
+        }
+        Async async = context.async();
+        JsonArray jArr = new JsonArray();
+        for (int i = 4; i < 7; i++) {
+            JsonObject jObj = new JsonObject()
+                    .put("url", "http://www.example.com/follow_dup_links_url" + i)
+                    .put("is_repeat", true);
+            jArr.add(jObj);
+        }
+        RemoteCall rc = new RemoteCall(vertx, conf.getMasterHost(), conf.getMasterPort());
+        rc.followLinks(jArr,
+                resp -> {
+                    context.assertEquals("3", resp.toString());
+                    List<AbstractItem> urls = SchedulerHelper.getInstance().pollBatch("www.example.com", 10);
+                    context.assertEquals(8, urls.size());
+                    urls = SchedulerHelper.getInstance().pollBatch("www.example.com", 10);
+                    context.assertEquals(0, urls.size());
                     async.complete();
                 },
                 err -> context.fail(err.getMessage())
@@ -135,7 +197,7 @@ public class HandlerTest {
     @Test
     public void testReplyOK(TestContext context) {
         JsonObject jobj = new JsonObject();
-        jobj.put("url", "ok_url")
+        jobj.put("url", "http://www.example.com/ok_url")
                 .put("status", ProcessStatus.OK.toString());
         Async async = context.async();
         RemoteCall rc = new RemoteCall(vertx, conf.getMasterHost(), conf.getMasterPort());
@@ -151,43 +213,30 @@ public class HandlerTest {
     @Test
     public void testReplyNOTRETURN(TestContext context) {
         JsonObject jobj = new JsonObject();
-        jobj.put("url", "not_return_url")
+        jobj.put("url", "http://www.example.com/not_return_url")
                 .put("status", ProcessStatus.NOT_RETURN.toString());
-        Async async1 = context.async();
+        Async async = context.async();
         RemoteCall rc = new RemoteCall(vertx, conf.getMasterHost(), conf.getMasterPort());
         rc.reply(jobj,
                 resp -> {
-                    context.assertEquals("Failed to fetch not_return_url, will retry",
+                    context.assertEquals("Failed to fetch http://www.example.com/not_return_url",
                             resp.toString());
-                    async1.complete();
+                    async.complete();
                 },
                 err -> context.fail(err.getMessage())
-        );
-        Async async2 = context.async();
-        vertx.setTimer(1000,
-                dummy -> {
-                    rc.reply(jobj,
-                            resp -> {
-                                context.assertEquals("Failed to fetch not_return_url after 1 retries",
-                                        resp.toString());
-                                async2.complete();
-                            },
-                            err -> context.fail(err.getMessage())
-                    );
-                }
         );
     }
 
     @Test
     public void testReplyBLOCKED(TestContext context) {
         JsonObject jobj = new JsonObject();
-        jobj.put("url", "blocked_url")
+        jobj.put("url", "http://www.example.com/blocked_url")
                 .put("status", ProcessStatus.BLOCKED.toString());
         Async async = context.async();
         RemoteCall rc = new RemoteCall(vertx, conf.getMasterHost(), conf.getMasterPort());
         rc.reply(jobj,
                 resp -> {
-                    context.assertEquals("Request to blocked_url is BLOCKED", resp.toString());
+                    context.assertEquals("Request to http://www.example.com/blocked_url is BLOCKED", resp.toString());
                     async.complete();
                 },
                 err -> context.fail(err.getMessage())
@@ -197,13 +246,13 @@ public class HandlerTest {
     @Test
     public void testReplyTMPLCHANGED(TestContext context) {
         JsonObject jobj = new JsonObject();
-        jobj.put("url", "tmpl_changed_url")
+        jobj.put("url", "http://www.example.com/tmpl_changed_url")
                 .put("status", ProcessStatus.TMPL_CHANGED.toString());
         Async async = context.async();
         RemoteCall rc = new RemoteCall(vertx, conf.getMasterHost(), conf.getMasterPort());
         rc.reply(jobj,
                 resp -> {
-                    context.assertEquals("Template of tmpl_changed_url is CHANGED", resp.toString());
+                    context.assertEquals("Template of http://www.example.com/tmpl_changed_url is CHANGED", resp.toString());
                     async.complete();
                 },
                 err -> context.fail(err.getMessage())
@@ -212,23 +261,32 @@ public class HandlerTest {
 
     @Test
     public void testStoreItems(TestContext context) {
-        JsonArray jarr = new JsonArray();
+        JsonArray jArr = new JsonArray();
         for (int i = 0; i < 10; i++) {
             JsonObject jobj = new JsonObject()
                     .put("url", "store_url" + i)
                     .put("title", "title" + i)
                     .put("desc", "desc" + i)
                     .put("content", "content" + i);
-            jarr.add(jobj);
+            jArr.add(jobj);
         }
         Async async = context.async();
         RemoteCall rc = new RemoteCall(vertx, conf.getMasterHost(), conf.getMasterPort());
-        rc.storeItems(jarr,
+        rc.storeItems(jArr,
                 resp -> {
                     context.assertEquals("{\"status\":\"OK\"}", resp.toString());
+                    ListDatastore storer = (ListDatastore) DatastoreHelper.getInstance();
+                    context.assertEquals(10, storer.getSize());
                     async.complete();
                 },
                 err -> context.fail(err.getMessage())
         );
+    }
+
+    private RequestItem makeRequestItem(String s) {
+        JsonObject jObj = new JsonObject().put("url", s);
+        RequestItem item = new RequestItem();
+        item.fromJsonObject(jObj);
+        return item;
     }
 }

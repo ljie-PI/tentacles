@@ -16,10 +16,10 @@ public class StoreItemsHandler implements Handler<RoutingContext> {
 
     @Override
     public void handle(RoutingContext ctx) {
-        JsonObject jobj = new JsonObject();
+        JsonObject jObj = new JsonObject();
         if (dataStore == null) {
-            jobj.put("status", "FAIL");
-            jobj.put("msg", "Datastore not initilized");
+            jObj.put("status", "FAIL");
+            jObj.put("msg", "Datastore not initilized");
         } else {
             JsonArray items = ctx.getBodyAsJsonArray();
             int expected = items.size();
@@ -30,12 +30,12 @@ public class StoreItemsHandler implements Handler<RoutingContext> {
                 }
             }
             if (expected != actual) {
-                jobj.put("status", "INCOMPLETE");
-                jobj.put("msg", "Expect to store " + expected + " items, actually stored " + actual + " items");
+                jObj.put("status", "INCOMPLETE");
+                jObj.put("msg", "Expect to store " + expected + " items, actually stored " + actual + " items");
             } else {
-                jobj.put("status", "OK");
+                jObj.put("status", "OK");
             }
         }
-        ctx.response().end(jobj.encode());
+        ctx.response().end(jObj.encode());
     }
 }

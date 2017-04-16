@@ -1,8 +1,8 @@
 package com.lab_440.tentacles.slave;
 
 import com.lab_440.tentacles.common.ProcessStatus;
-import com.lab_440.tentacles.common.item.IItem;
-import com.lab_440.tentacles.common.item.ResultItem;
+import com.lab_440.tentacles.common.item.GeneralResultAbstractItem;
+import com.lab_440.tentacles.common.item.AbstractItem;
 import com.lab_440.tentacles.slave.parser.BaseParser;
 import com.lab_440.tentacles.slave.parser.IParser;
 import com.lab_440.tentacles.slave.parser.ParseRule;
@@ -20,7 +20,7 @@ import java.util.List;
 public class ParserTest {
 
     private static String html;
-    private static ArticleTextExtractor  extractor;
+    private static ArticleTextExtractor extractor;
 
     @BeforeClass
     public static void setup() throws IOException {
@@ -42,30 +42,13 @@ public class ParserTest {
         Assert.assertTrue(txt.endsWith("这也正是新时期“三农”的希望和未来所在。"));
     }
 
-    public class DummyParser extends BaseParser {
-        @Override
-        @ParseRule(uriPattern = "dummy_url", priority = 1)
-        public void parseGeneral() throws Exception {
-            JResult jres = extractor.extractContent(getPage());
-            ResultItem item = new ResultItem();
-            item.setUrl(getUrl());
-            item.setTitle(jres.getTitle());
-            item.setDate(jres.getDate());
-            item.setContent(jres.getText());
-            addItem(item);
-            addItem(item);
-            followUrl("another_url");
-            setStatus(ProcessStatus.OK);
-        }
-    }
-
     @Test
     public void testBaseParser() throws Exception {
         IParser parser = new BaseParser();
         parser.init();
         parser.parse("dummy_url_1", html);
         Assert.assertEquals("OK", ProcessStatus.OK.toString());
-        List<IItem> items = parser.getItems();
+        List<AbstractItem> items = parser.getItems();
         Assert.assertEquals(1, items.size());
         Assert.assertEquals("dummy_url_1", items.get(0).toJsonObject().getString("url"));
         String txt = items.get(0).toJsonObject().getString("content");
@@ -81,7 +64,7 @@ public class ParserTest {
         parser.init();
         parser.parse("dummy_url_2", html);
         Assert.assertEquals("OK", ProcessStatus.OK.toString());
-        List<IItem> items = parser.getItems();
+        List<AbstractItem> items = parser.getItems();
         Assert.assertEquals(2, items.size());
         Assert.assertEquals("dummy_url_2", items.get(0).toJsonObject().getString("url"));
         String txt = items.get(0).toJsonObject().getString("content");
@@ -90,5 +73,22 @@ public class ParserTest {
         List<String> followUrls = parser.getFollowUrls();
         Assert.assertEquals(1, followUrls.size());
         Assert.assertEquals("another_url", followUrls.get(0));
+    }
+
+    public class DummyParser extends BaseParser {
+        @Override
+        @ParseRule(uriPattern = "dummy_url", priority = 1)
+        public void parseGeneral() throws Exception {
+            JResult jres = extractor.extractContent(getPage());
+            GeneralResultAbstractItem item = new GeneralResultAbstractItem();
+            item.setUrl(getUrl());
+            item.setTitle(jres.getTitle());
+            item.setDate(jres.getDate());
+            item.setContent(jres.getText());
+            addItem(item);
+            addItem(item);
+            followUrl("another_url");
+            setStatus(ProcessStatus.OK);
+        }
     }
 }
