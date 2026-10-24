@@ -194,8 +194,9 @@ def config_check(ctx: typer.Context) -> None:
 def pipelines_list(ctx: typer.Context) -> None:
     """列出 pipeline 及当前待报告数量。"""
     _run(ctx, lambda s: s.list_pipelines(), lambda rows, out, when: out.print(_table(
-        "Pipelines", ["id", "persona", "processor", "schedule", "enabled", "pending", "status"],
-        [[r.id, r.persona, r.processor, r.schedule, r.enabled, r.pending, r.last_status] for r in rows])))
+        "Pipelines", ["id", "persona", "processor", "schedule", "next run", "next filter", "enabled", "pending", "status"],
+        [[r.id, r.persona, r.processor, r.schedule, when(r.next_run_at), when(r.filter_next_run_at),
+          r.enabled, r.pending, r.last_status] for r in rows])))
 
 
 def _render_pipeline(result, out: Console, when: TimeFmt) -> None:
@@ -364,17 +365,18 @@ def sources_fetch(ctx: typer.Context,
 def tick(ctx: typer.Context) -> None:
     """执行所有到期任务；被占用的任务返回 busy。"""
     _run(ctx, lambda s: s.tick(), lambda rows, out, when: out.print(_table(
-        "Tick", ["source", "status", "new", "dup", "error"],
-        [[r.source_id, r.status, r.new, r.dup, r.error] for r in rows])))
+        "Tick", ["kind", "target", "status", "new", "dup", "report", "error"],
+        [[r.kind, r.target, r.status, r.new if r.kind == 'fetch' else None,
+          r.dup if r.kind == 'fetch' else None, r.report_id, r.error] for r in rows])))
 
 
 @scheduler_app.command("status")
 def scheduler_status(ctx: typer.Context) -> None:
     """列出任务频率、上次/下次运行时间、运行状态及最近错误。"""
     _run(ctx, lambda s: s.scheduler_status(), lambda rows, out, when: out.print(_table(
-        "Scheduler", ["kind", "target", "schedule", "last run", "next run", "running", "status", "error"],
+        "Scheduler", ["kind", "target", "schedule", "last run", "next run", "running", "pending", "status", "error"],
         [[r.kind, r.target, r.schedule, when(r.last_run_at), when(r.next_run_at), r.running,
-          r.last_status, r.last_error] for r in rows])))
+          r.pending, r.last_status, r.last_error] for r in rows])))
 
 
 # ---- items ------------------------------------------------------------------

@@ -8,6 +8,7 @@ import logging
 import os
 import sqlite3
 import threading
+from time import monotonic, sleep
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -187,7 +188,14 @@ def _migrate_v6(conn: sqlite3.Connection) -> None:
                  ' AND c.item_id = evaluations.item_id)')
 
 
-MIGRATIONS: list[Callable[[sqlite3.Connection], None]] = [_migrate_v1, _migrate_v2, _migrate_v3, _migrate_v4, _migrate_v5, _migrate_v6]
+def _migrate_v7(conn: sqlite3.Connection) -> None:
+    conn.execute("""CREATE TABLE pipeline_schedule_state (
+        kind TEXT NOT NULL CHECK (kind IN ('filter', 'pipeline')), target TEXT NOT NULL,
+        active INTEGER NOT NULL CHECK (active IN (0, 1)), PRIMARY KEY (kind, target)
+    )""")
+
+
+MIGRATIONS: list[Callable[[sqlite3.Connection], None]] = [_migrate_v1, _migrate_v2, _migrate_v3, _migrate_v4, _migrate_v5, _migrate_v6, _migrate_v7]
 
 _ITEM_COLUMNS = ("id, source_id, kind, external_id, url, title, author, summary, content,"
                  " published, fetched_at, fingerprint, meta")
@@ -206,12 +214,44 @@ class Store:
         try:
             self._conn.row_factory = sqlite3.Row
             self._conn.create_function("casefold", 1, str.casefold, deterministic=True)
-            self._conn.execute("PRAGMA journal_mode = WAL")
             self._conn.execute("PRAGMA busy_timeout = 5000")
+            self._enable_wal()
             self._migrate()
         except BaseException:
             self._conn.close()
             raise
+
+    def _enable_wal(self) -> None:
+        """Retry initial mode-switch races within a five-second IO budget.
+
+        A transient lock upgrade can fail without invoking SQLite's busy handler.
+        The monotonic resource budget is independent of the domain clock.
+        """
+        deadline = monotonic() + 5
+        last_error: sqlite3.OperationalError | None = None
+        while True:
+            remaining = deadline - monotonic()
+            if remaining <= 0:
+                if last_error is not None:
+                    raise last_error
+                raise sqlite3.OperationalError('database initialization lock timeout')
+            # A retry must not start another full five-second native wait.
+            self._conn.execute(f'PRAGMA busy_timeout = {max(1, int(remaining * 1000))}')
+            try:
+                self._conn.execute('PRAGMA journal_mode = WAL')
+            except sqlite3.OperationalError as exc:
+                # Error names are available on newer Python; 3.10 needs text.
+                name = str(getattr(exc, 'sqlite_errorname', '') or '')
+                message = str(exc).casefold()
+                transient = name.startswith(('SQLITE_BUSY', 'SQLITE_LOCKED')) or 'locked' in message or 'busy' in message
+                remaining = deadline - monotonic()
+                if not transient or remaining <= 0:
+                    raise
+                last_error = exc
+                sleep(min(0.01, remaining))
+            else:
+                self._conn.execute('PRAGMA busy_timeout = 5000')
+                return
 
     def _migrate(self) -> None:
         """Each migration (DDL included) runs in one explicit transaction, so a
@@ -467,6 +507,31 @@ class Store:
                 [(task.kind, task.target, to_iso(now)) for task in tasks])
             for task in tasks:
                 self._reconcile_completed_task(task)
+
+    def sync_pipeline_schedules(self, tasks: list[Task], now: datetime) -> None:
+        """Enroll scheduled pipeline roles without confusing them with manual locks.
+
+        A never-run cron job begins at first activation, not when its reusable
+        manual lock happened to be registered. Executed tasks retain progress.
+        Only supplied identities are touched; a history-only config is harmless.
+        """
+        if not tasks:
+            return
+        with self._lock, self._conn:
+            self._conn.execute('BEGIN IMMEDIATE')
+            for task in tasks:
+                self._conn.execute('INSERT OR IGNORE INTO task_state (kind, target, first_seen_at) VALUES (?, ?, ?)',
+                                   (task.kind, task.target, to_iso(now)))
+                state = self._reconcile_completed_task(task)
+                previous = self._conn.execute('SELECT active FROM pipeline_schedule_state WHERE kind = ? AND target = ?',
+                                              (task.kind, task.target)).fetchone()
+                was_active = bool(previous['active']) if previous is not None else False
+                if task.enabled and not was_active and state.last_run_at is None and state.token is None:
+                    self._conn.execute('UPDATE task_state SET first_seen_at = ? WHERE kind = ? AND target = ?',
+                                       (to_iso(now), task.kind, task.target))
+                self._conn.execute('INSERT INTO pipeline_schedule_state VALUES (?, ?, ?)'
+                    ' ON CONFLICT (kind, target) DO UPDATE SET active = excluded.active'
+                    ' WHERE active != excluded.active', (task.kind, task.target, task.enabled))
 
     def get_task_state(self, task: Task) -> TaskState:
         with self._lock:

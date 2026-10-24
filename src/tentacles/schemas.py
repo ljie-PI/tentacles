@@ -9,7 +9,7 @@ from typing import Any, Generic, Literal, TypeVar
 from pydantic import BaseModel, Field
 
 from tentacles.models import Item, ItemKind
-from tentacles.pipelines.models import Evaluation, StageScore
+from tentacles.pipelines.models import Evaluation, StageScore, PipelineOutcome
 from tentacles.llm.types import TokenUsage as TokenUsage
 
 T = TypeVar("T")
@@ -51,6 +51,28 @@ class FetchOutcome(BaseModel):
     stats: dict[str, Any] = {}
 
 
+class TickOutcome(BaseModel):
+    kind: Literal['fetch', 'filter', 'pipeline']
+    target: str
+    status: Literal['ok', 'error', 'busy', 'no_new']
+    run_id: int = 0
+    source_id: str | None = None
+    pipeline_id: str | None = None
+    new: int = 0
+    dup: int = 0
+    report_id: str | None = None
+    stats: dict[str, Any] = Field(default_factory=dict)
+    error: str | None = None
+
+    @classmethod
+    def of_fetch(cls, outcome: FetchOutcome) -> 'TickOutcome':
+        return cls(kind='fetch', target=outcome.source_id, **outcome.model_dump())
+
+    @classmethod
+    def of_pipeline(cls, kind: Literal['filter', 'pipeline'], outcome: PipelineOutcome) -> 'TickOutcome':
+        return cls(kind=kind, target=outcome.pipeline_id, **outcome.model_dump())
+
+
 class TaskView(BaseModel):
     kind: str
     target: str
@@ -61,6 +83,7 @@ class TaskView(BaseModel):
     running: bool
     last_status: str | None
     last_error: str | None
+    pending: int | None = None
 
 
 class ItemView(BaseModel):

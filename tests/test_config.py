@@ -117,3 +117,24 @@ def test_invalid_schedules_fail_at_config_loading(write_config, open_service, sc
                                      'schedule': schedule}]})
     with pytest.raises(ConfigError, match=r'sources\[0\].schedule'):
         open_service(path)
+
+
+def test_simultaneous_first_opens_can_enable_wal_and_initialize_the_database(write_config):
+    import asyncio
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
+    for trial in range(4):
+        path = write_config({'app': {'data_dir': f'../parallel-{trial}'}}, name=f'parallel-{trial}.yaml')
+        ready = threading.Barrier(12)
+
+        def open_once(_):
+            ready.wait(timeout=5)
+            service = TentaclesService.open(path, env={})
+            try:
+                return service.check_config().ok
+            finally:
+                asyncio.run(service.aclose())
+
+        with ThreadPoolExecutor(max_workers=12) as executor:
+            assert all(executor.map(open_once, range(12)))

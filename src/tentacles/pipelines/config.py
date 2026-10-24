@@ -59,6 +59,7 @@ class PipelineSpec(BaseModel):
     sources: list[str] = Field(min_length=1)
     window: str = '24h'
     schedule: str = '1d'
+    filter_schedule: str | None = None
     enabled: bool = True
     max_items: int = Field(default=500, ge=1, le=5000)
     filters: list[StageSpec] = Field(default_factory=list)
@@ -74,8 +75,10 @@ class PipelineSpec(BaseModel):
             raise ValueError('window is too large') from None
         return value.strip()
 
-    @field_validator('schedule')
+    @field_validator('schedule', 'filter_schedule')
     @classmethod
-    def _schedule(cls, value: str) -> str:
+    def _schedule(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
         Schedule.parse(value)
         return value.strip()

@@ -7,7 +7,7 @@ import logging
 import json
 from datetime import datetime
 from pathlib import Path
-from typing import Callable, Mapping, Any
+from typing import Callable, Mapping, Any, Literal
 from zoneinfo import ZoneInfo
 from uuid import uuid4
 
@@ -19,7 +19,7 @@ from tentacles.net import HttpPool
 from tentacles.llm.registry import ModelRegistry
 from tentacles.llm.config import Stage
 from tentacles.llm.json import extract_json
-from tentacles.schemas import ConfigCheck, FetchOutcome, ItemDetail, ItemView, Page, RunView, SourceView, TaskView, ModelView, Completion, ModelTest
+from tentacles.schemas import ConfigCheck, FetchOutcome, ItemDetail, ItemView, Page, RunView, SourceView, TaskView, ModelView, Completion, ModelTest, TickOutcome
 from tentacles.sources.runner import fetch_source
 from tentacles.asyncutil import run_store_call
 from tentacles.store import ItemQuery, Store
@@ -83,10 +83,14 @@ class TentaclesService:
         return self.pipelines.list_pipelines()
 
     async def filter_pipeline(self, pipeline_id: str, *, reevaluate: bool = False) -> PipelineOutcome:
-        return await self.pipelines.filter(pipeline_id, reevaluate=reevaluate)
+        result = await self.pipelines.filter(pipeline_id, reevaluate=reevaluate)
+        assert result is not None  # manual operations bypass the due check
+        return result
 
     async def run_pipeline(self, pipeline_id: str) -> PipelineOutcome:
-        return await self.pipelines.run(pipeline_id)
+        result = await self.pipelines.run(pipeline_id)
+        assert result is not None
+        return result
 
     def list_reports(self, *, pipeline: str | None = None, limit: int = 50, offset: int = 0) -> Page[ReportView]:
         if not 1 <= limit <= 500 or offset < 0:
@@ -199,20 +203,36 @@ class TentaclesService:
             specs = [s for s in self.config.sources if s.enabled]
         return await self._fetch_batch(specs, due_only=False)
 
-    async def tick(self) -> list[FetchOutcome]:
-        """Execute enabled, due source tasks, reporting occupied leases as busy."""
-        return await self._fetch_batch([s for s in self.config.sources if s.enabled], due_only=True)
+    async def tick(self) -> list[TickOutcome]:
+        """Drain concurrent fetches, then due filters, then due pipeline runs."""
+        fetched = await self._fetch_batch([s for s in self.config.sources if s.enabled], due_only=True)
+        outcomes = [TickOutcome.of_fetch(outcome) for outcome in fetched]
+        busy_sources = {outcome.source_id for outcome in fetched if outcome.status == 'busy'}
+        deferred = {spec.id for spec in self.config.pipelines if busy_sources.intersection(spec.sources)}
+        for task in self.pipelines.scheduled_tasks():
+            # Another tick may still own an upstream fetch. Do not advance a
+            # dependent schedule against an incomplete snapshot of its inputs.
+            if task.target in deferred:
+                continue
+            kind: Literal['filter', 'pipeline'] = 'filter' if task.kind == 'filter' else 'pipeline'
+            result = (await self.pipelines.filter(task.target, due_only=True) if kind == 'filter'
+                      else await self.pipelines.run(task.target, due_only=True))
+            if result is not None:
+                outcomes.append(TickOutcome.of_pipeline(kind, result))
+        return outcomes
 
     def scheduler_status(self) -> list[TaskView]:
         now = to_utc(self._clock())
         views = []
-        for task in self._tasks.values():
+        pending = self.pipelines.pending_counts(now)
+        for task in [*self._tasks.values(), *self.pipelines.scheduled_tasks()]:
             state = self.store.get_task_state(task)
             views.append(TaskView(
                 kind=task.kind, target=task.target, schedule=task.schedule, enabled=task.enabled,
                 last_run_at=state.last_run_at,
                 next_run_at=state.next_run(task) if task.enabled else None,
-                running=state.running(now), last_status=state.last_status, last_error=state.last_error))
+                running=state.running(now), last_status=state.last_status, last_error=state.last_error,
+                pending=pending.get(task.target) if task.kind != 'fetch' else None))
         return views
 
     async def _fetch_task(self, spec: SourceSpec, http: HttpPool, *, due_only: bool) -> FetchOutcome | None:

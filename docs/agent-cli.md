@@ -173,7 +173,9 @@ tentacles --json persona export default | jq -r . > persona-snapshot.yaml
 
 返回配置中的 pipeline 数组，包括 id/name/persona/sources/schedule/enabled/processor、
 当前 Persona 版本和窗口内的待报告数量 `pending`，以及上次运行时间、最近状态/错误。
-当前 pipeline 只支持手动运行，`schedule` 尚未接入 `tick`（后续 #24）；手动命名调用可执行禁用的 pipeline。
+`next_run_at` 是下次处理时间；`filter_schedule` / `filter_next_run_at` 是可选的只过滤频率/下次时间。
+禁用 pipeline 的下次时间为 null，未配置 filter_schedule 时不创建独立的过滤调度任务。
+`tick` 只自动执行启用的任务；手动命名调用仍可执行禁用的 pipeline。
 
 ### `pipelines filter ID [--reevaluate]`
 
@@ -189,6 +191,7 @@ pipelines:
     sources: [news]
     window: 24h
     schedule: '@daily'
+    filter_schedule: 30m
     filters:
       - type: keyword
         include: [robotics]
@@ -308,32 +311,54 @@ show 返回完整报告：id/pipeline_id/persona_version/kind/title/markdown/ite
 
 ### `tick`
 
-并发抓取所有启用且已到期的信息源（最多四个同时执行），返回与 `sources fetch` 相同的数组。
-未到期/禁用的源不出现在结果中；没有到期任务时返回 `[]`。
-每项 `status` 为 `ok`、`error` 或 `busy`。部分失败或锁被占用时仍退出 0，应逐项检查。
+一次执行启用且已到期的任务，严格分三个阶段：
+
+1. 并发抓取到期来源（最多四个同时），等全部结束。
+2. 按配置顺序依次执行到期的 `filter_schedule` 任务。
+3. 按配置顺序依次执行到期的 pipeline `schedule` 任务。
+
+无到期任务返回 `[]`；未到期/禁用的任务不出现在数组中。
+抓取返回 busy 表示其他调用仍在更新输入：依赖该来源的 pipeline 本轮延期，不创建运行记录、不推进下游频率；
+不依赖它的 pipeline 照常执行。部分普通失败不会中断其他任务；
+用户取消则停止本轮并等待 IO 清理。status 是 ok / error / busy，pipeline 无新内容为 no_new。
+仍退出 0，调用方应逐项检查 status。模型支持的 pipeline 会实际调用服务商，可能产生费用。
+
+每项现在包含 **kind**（fetch/filter/pipeline）和 **target**（来源或 pipeline ID）。
+fetch 项保留 source_id/new/dup；filter/pipeline 项含 pipeline_id/report_id/stats。手动 sources fetch 的输出不变。
 
 ```json
-[{"source_id": "news", "run_id": 9, "status": "ok", "new": 0, "dup": 0,
-  "error": null, "stats": {"entries": 0, "too_old": 0, "fetched": 0, "new": 0, "dup": 0}},
- {"source_id": "locked", "run_id": 0, "status": "busy", "new": 0, "dup": 0,
-  "error": null, "stats": {}}]
+[{"kind":"fetch","target":"news","status":"ok","run_id":9,
+  "source_id":"news","pipeline_id":null,"new":3,"dup":0,"report_id":null,"stats":{},"error":null},
+ {"kind":"filter","target":"daily","status":"ok","run_id":10,
+  "source_id":null,"pipeline_id":"daily","new":0,"dup":0,"report_id":null,"stats":{"evaluated":3},"error":null},
+ {"kind":"pipeline","target":"daily","status":"no_new","run_id":11,
+  "source_id":null,"pipeline_id":"daily","new":0,"dup":0,"report_id":null,"stats":{"no_new":true},"error":null}]
 ```
 
-任务首次出现时间、上次开始时间和最近状态保存在 SQLite。间隔任务首次立即到期，
-cron 首次等到下一个触发点；成功/失败都按开始时间推进频率。锁默认一小时过期，
-过期后即使原间隔未到也可重试，旧持锁者不能覆盖新任务的条目、游标或状态。
-可以每 30 秒通过系统 cron/launchd 执行此命令（README 有示例）。
+每条启用的 pipeline 都有一个运行任务；只有 filter_schedule 非 null 才有独立过滤任务。
+二者频率都支持正整数间隔、三个别名和五段 cron，按 app.timezone 计算。
+间隔首次立即到期；从未执行过的 pipeline cron 从首次启用/加入该调度频率时等待下个触发点。
+首次启用前已有手动执行记录时，沿用真实的上次开始时间；重启、频率修改不会丢进度。
+配置修改在下次打开 Service/CLI 时生效；常驻服务需要重启以读取新配置。
+
+任务锁默认一小时过期；过期后即使原间隔未到也可重试。手动与调度入口复用一次原子获取，不会重复锁住自己。
+运行内部仍会过滤一次（已有评估走缓存）；过滤锁忙时跳过该步，直接处理已通过项。
+内部过滤会更新其真实开始时间，之后只过滤频率也据此计算。成功、失败、无新内容都推进任务时间，避免轮询风暴。
+旧持锁者不能覆盖替代任务的数据，消费账本保证跨版本、频繁过滤也不会重复报告。
+
+可以每 30 秒通过 cron/launchd 执行本命令（README 有示例）。
 
 ### `scheduler status`
 
-列出配置中全部源的任务状态。`last_run_at` 为最近完成任务的开始时间，
-`running` 表示锁尚未到期；`last_status` 为 `ok` / `error` 或尚未运行时的 null。
-`next_run_at` 用当前配置的频率计算，禁用任务为 null；修改频率后下次打开 Service 即生效。
+列出来源任务（含禁用来源）及启用 pipeline 的实际调度任务。没有 filter_schedule 的手动过滤锁不作为调度任务列出。
+last_run_at 是最近已完成任务的**开始时间**，running 表示锁未到期，last_status 为 ok/error 或尚未运行时的 null。
+next_run_at 使用当前频率计算；禁用来源为 null。filter/pipeline 的 pending 是当前窗口、当前 Persona 版本的待报告数量，
+fetch 的 pending 为 null。同一 pipeline 的两个调度角色显示相同 pending。
 
 ```json
-[{"kind": "fetch", "target": "news", "schedule": "30m", "enabled": true,
-  "last_run_at": "2026-10-25T00:10:00Z", "next_run_at": "2026-10-25T00:40:00Z",
-  "running": false, "last_status": "ok", "last_error": null}]
+[{"kind":"pipeline","target":"daily","schedule":"@daily","enabled":true,
+  "last_run_at":null,"next_run_at":"2026-10-25T16:00:00Z","running":false,
+  "last_status":null,"last_error":null,"pending":2}]
 ```
 
 ### `items list`
