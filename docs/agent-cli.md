@@ -51,8 +51,8 @@
 列出命名模型及可安全公开的配置，不调用服务商，不输出密钥及额外请求体。
 
 ```json
-[{"name": "fast", "provider": "openai", "kind": "chat", "model": "deepseek-chat",
-  "base_url": "https://api.deepseek.com/v1", "key_configured": false}]
+[{"name": "fast", "provider": "openai", "kind": "chat", "model": "deepseek-flash",
+  "base_url": "https://api.deepseek.com", "key_configured": false}]
 ```
 
 ### `models test NAME`
@@ -62,7 +62,7 @@
 返回可用性、总耗时（含重试等待）、最多 500 字符的样例、实际模型、用量和提供方返回的 cost（缺省为 null）。
 
 ```json
-{"name": "fast", "ok": true, "latency_ms": 120.0, "sample": "OK", "model": "deepseek-chat",
+{"name": "fast", "ok": true, "latency_ms": 120.0, "sample": "OK", "model": "deepseek-flash",
  "usage": {"input_tokens": 12, "output_tokens": 1, "total_tokens": 13}, "cost": null, "error": null}
 ```
 

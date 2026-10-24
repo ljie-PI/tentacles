@@ -16,8 +16,8 @@ app:
 models:
   fast:
     provider: openai
-    model: deepseek-chat
-    base_url: https://api.deepseek.com/v1
+    model: deepseek-flash
+    base_url: https://api.deepseek.com
     api_key: ${DEEPSEEK_API_KEY:-}
     max_tokens: 4096
     timeout: 60
