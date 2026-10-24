@@ -350,3 +350,57 @@ def test_cancelled_commit_drains_io_and_keeps_an_already_committed_success(write
             await service.aclose()
 
     asyncio.run(scenario())
+
+
+def test_same_profile_shortcut_cannot_commit_with_a_newer_profiles_tags(write_config):
+    import threading
+    from datetime import datetime, timezone
+    from test_models import model_config, chat_reply
+    from tentacles.errors import Conflict
+    path = write_config(model_config())
+
+    async def scenario():
+        armed = False
+        entered, release = threading.Event(), threading.Event()
+        observer = None
+
+        def clock():
+            # Gate the external clock once the public run history shows this
+            # edit in progress, not by mocking a method or counting internal calls.
+            if armed and any(r.status == 'running' for r in observer.list_runs(kind='persona')):
+                entered.set()
+                if not release.wait(3):
+                    raise TimeoutError('concurrent edit did not finish')
+            return datetime.now(timezone.utc)
+
+        def respond(request):
+            body = json.loads(json.loads(request.content)['messages'][-1]['content'])
+            fresh = tags(*(f'{body["profile"]}{i}' for i in range(5)))
+            payload = {'tags': fresh} if 'old_tags' not in body else {
+                'keep': [], 'add': fresh, 'remove': [t['tag'] for t in body['old_tags']]}
+            return httpx.Response(200, json=chat_reply(json.dumps(payload)))
+
+        one = TentaclesService.open(path, env={}, clock=clock, transport=httpx.MockTransport(respond))
+        observer = TentaclesService.open(path, env={}, transport=httpx.MockTransport(respond))
+        task = None
+        try:
+            await observer.set_persona('default', profile='A')
+            armed = True
+            task = asyncio.create_task(one.set_persona('default', profile='A', include_add=['AI']))
+            assert await asyncio.to_thread(entered.wait, 2)
+            newer = await observer.set_persona('default', profile='B')
+            release.set()
+            with pytest.raises(Conflict):
+                await task
+            latest = observer.get_persona('default')
+            assert latest.version == newer.version == 2 and latest.profile == 'B'
+            assert all(tag.tag.startswith('B') for tag in latest.tags)
+            assert len(observer.persona_history('default')) == 2
+        finally:
+            release.set()
+            if task is not None:
+                await asyncio.gather(task, return_exceptions=True)
+            await one.aclose()
+            await observer.aclose()
+
+    asyncio.run(scenario())

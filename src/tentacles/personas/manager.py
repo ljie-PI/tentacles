@@ -120,9 +120,9 @@ class PersonaManager:
 
     async def _extract_tags(self, edit: PersonaEdit) -> None:
         old = await run_store_call(self._store.get_persona, edit.name)
+        edit.expected_version = old.version if old else 0
         if old is not None and edit.profile == old.profile:
             return
-        edit.expected_version = old.version if old else 0
         assert edit.profile is not None
         old_tags = old.tags if old else []
         system, messages = tag_messages(edit.profile, old_tags)

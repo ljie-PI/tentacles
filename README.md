@@ -81,8 +81,8 @@ tentacles persona export default > default-snapshot.yaml
 仅修改关键词/备注或 profile 未变化时也不会调用模型。
 
 关键词去重/删除不区分大小写（Unicode casefold），保留最早的拼写和顺序。
-每次编辑写成新版本；回滚同样追加版本。并发关键词编辑会合并；慢速标签抽取期间如果 persona 已被修改，
-旧结果返回 `conflict`，请刷新后重试。导出的是完整版本快照，不是只有 profile 的文本，也不会直接覆盖任何文件。
+每次编辑写成新版本；回滚同样追加版本。并发的纯关键词编辑会合并。提供 profile 且未跳过标签时，
+若提交前 persona 已被修改（包括内容相同的快捷路径），旧请求返回 `conflict`，请刷新后重试。导出的是完整版本快照，不是只有 profile 的文本，也不会直接覆盖任何文件。
 
 ## 自动抓取
 
