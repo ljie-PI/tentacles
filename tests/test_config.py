@@ -71,3 +71,14 @@ def test_config_path_comes_from_env_when_not_given(write_config, open_service):
         assert svc.check_config().sources == 1
     finally:
         svc.store.close()
+
+
+@pytest.mark.parametrize("schedule", ["every hour", "1hr", "* * *", "0 8 * * * *", "x 8 * * *"])
+def test_malformed_schedules_are_rejected(write_config, schedule):
+    with pytest.raises(ConfigError, match=r"sources\[0\].schedule"):
+        TentaclesService.open(write_config({"sources": [src(schedule=schedule)]}), env={})
+
+
+@pytest.mark.parametrize("schedule", ["90s", "30m", "@daily", "0 8,20 * * *", "*/15 9-18 * * 1-5"])
+def test_wellformed_schedules_are_accepted(write_config, open_service, schedule):
+    assert open_service(write_config({"sources": [src(schedule=schedule)]})).config.sources[0].schedule == schedule

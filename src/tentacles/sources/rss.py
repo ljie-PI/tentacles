@@ -93,7 +93,7 @@ class RssSource(Source):
         if parsed.bozo and not parsed.entries:
             raise UpstreamError(f"cannot parse feed {opts.url}: {parsed.bozo_exception}")
 
-        cutoff = ctx.now - timedelta(days=opts.max_age_days) if opts.max_age_days else None
+        cutoff = None if opts.max_age_days is None else ctx.now - timedelta(days=opts.max_age_days)
         items, too_old = [], 0
         for entry in parsed.entries:
             item = entry_to_item(entry, self.spec.id)

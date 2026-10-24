@@ -139,3 +139,15 @@ def test_unknown_source_is_not_found(write_config, open_service):
     svc = open_service(write_config(rss_config()))
     with pytest.raises(NotFound):
         asyncio.run(svc.fetch_sources(["nope"]))
+
+
+def test_max_age_zero_keeps_only_undated_entries(web, write_config, open_service):
+    web.serve(FEED, rss_feed(
+        {"title": "Yesterday", "link": "https://news.example.com/y", "pubDate": "Mon, 01 Jan 2024 00:00:00 GMT"},
+        {"title": "Undated", "link": "https://news.example.com/u"},
+    ))
+    svc = open_service(write_config(rss_config(max_age_days=0)))
+
+    asyncio.run(svc.fetch_sources())
+
+    assert [i.title for i in svc.list_items().items] == ["Undated"]

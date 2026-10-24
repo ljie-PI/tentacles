@@ -6,6 +6,7 @@ from __future__ import annotations
 import re
 from datetime import datetime, timedelta, timezone
 from typing import overload
+from zoneinfo import ZoneInfo
 
 _DURATION = re.compile(r"^(\d+)([smhdw])$")
 _UNITS = {"s": "seconds", "m": "minutes", "h": "hours", "d": "days", "w": "weeks"}
@@ -48,11 +49,13 @@ def parse_duration(s: str) -> timedelta:
     return timedelta(**{_UNITS[m.group(2)]: int(m.group(1))})
 
 
-def parse_since(s: str, now: datetime) -> datetime:
-    """A duration back from `now`, or an ISO8601 timestamp."""
+def parse_since(s: str, now: datetime, tz: ZoneInfo | None = None) -> datetime:
+    """A duration back from `now`, or an ISO8601 timestamp. A timestamp without
+    an offset is read in `tz` (the configured display timezone), else UTC."""
     if is_duration(s):
         return now - parse_duration(s)
     try:
-        return to_utc(datetime.fromisoformat(s))
+        dt = datetime.fromisoformat(s)
+        return to_utc(dt.replace(tzinfo=tz) if dt.tzinfo is None and tz else dt)
     except ValueError:
         raise ValueError(f"invalid time {s!r} (expected a duration like 24h or an ISO timestamp)")

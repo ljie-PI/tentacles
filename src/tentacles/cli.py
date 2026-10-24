@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -19,13 +20,37 @@ from zoneinfo import ZoneInfo
 import typer
 from pydantic import BaseModel
 from rich.console import Console
+from rich.markup import escape
 from rich.table import Table
+from rich.text import Text
+from typer._click.exceptions import UsageError
+from typer.core import TyperGroup
 
 from tentacles.errors import TentaclesError, exit_code
 from tentacles.service import TentaclesService
 
+def _json_requested(argv: list[str]) -> bool:
+    return "--json" in argv or os.environ.get("TENTACLES_JSON", "").lower() in {"1", "true", "yes", "on"}
+
+
+class _JsonErrorsGroup(TyperGroup):
+    """In JSON mode, argument/usage errors caught by click also become a JSON error
+    object on stdout (exit 2) instead of a usage message on stderr."""
+
+    def main(self, args=None, prog_name=None, complete_var=None, standalone_mode=True, **extra):
+        if not _json_requested(list(sys.argv[1:] if args is None else args)):
+            return super().main(args, prog_name, complete_var, standalone_mode, **extra)
+        try:
+            rv = super().main(args, prog_name, complete_var, standalone_mode=False, **extra)
+        except UsageError as exc:
+            typer.echo(json.dumps({"error": {"code": "invalid", "message": exc.format_message()}},
+                                  ensure_ascii=False))
+            sys.exit(2)
+        sys.exit(rv if isinstance(rv, int) else 0)
+
+
 app = typer.Typer(help="tentacles — 个人信息与新闻管理系统", no_args_is_help=True,
-                  pretty_exceptions_enable=False)
+                  pretty_exceptions_enable=False, cls=_JsonErrorsGroup)
 config_app = typer.Typer(help="配置", no_args_is_help=True)
 sources_app = typer.Typer(help="信息源", no_args_is_help=True)
 items_app = typer.Typer(help="条目", no_args_is_help=True)
@@ -99,7 +124,7 @@ def _fail(state: State, code: str, message: str) -> None:
     if state.json:
         typer.echo(json.dumps({"error": {"code": code, "message": message}}, ensure_ascii=False))
     else:
-        Console(stderr=True).print(f"[red]error[/red] ({code}): {message}")
+        Console(stderr=True).print(f"[red]error[/red] ({code}): {escape(message)}")
     raise typer.Exit(exit_code(code))
 
 
@@ -108,7 +133,7 @@ def _table(title: str, columns: list[str], rows: list[list[Any]]) -> Table:
     for c in columns:
         t.add_column(c)
     for r in rows:
-        t.add_row(*("" if v is None else str(v) for v in r))
+        t.add_row(*(Text("" if v is None else str(v)) for v in r))  # 外部文本不当作 markup
     return t
 
 
@@ -128,7 +153,7 @@ def _time(dt) -> str:
 def config_check(ctx: typer.Context) -> None:
     """校验配置文件。"""
     _run(ctx, lambda s: s.check_config(),
-         lambda r, out: out.print(f"[green]ok[/green] {r.path}（{r.sources} 个信息源）"))
+         lambda r, out: out.print(f"[green]ok[/green] {escape(r.path)}（{r.sources} 个信息源）"))
 
 
 # ---- sources ----------------------------------------------------------------
@@ -176,8 +201,9 @@ def items_list(
 def items_show(ctx: typer.Context, item_id: str = typer.Argument(..., help="条目 id")) -> None:
     """查看条目详情（含正文）。"""
     def render(d, out: Console) -> None:
-        out.print(f"[bold]{d.title}[/bold]\n{d.source_id} · {_time(d.published or d.fetched_at)} · {d.url}\n")
-        out.print(d.content or d.summary)
+        out.print(Text(d.title, style="bold"))
+        out.print(f"{d.source_id} · {_time(d.published or d.fetched_at)} · {d.url}\n", markup=False)
+        out.print(d.content or d.summary, markup=False)
     _run(ctx, lambda s: s.get_item(item_id), render)
 
 

@@ -72,8 +72,13 @@ CREATE TABLE runs (
 """
 
 
+# 旧版 feeds.yaml 中的中文源名 -> 新配置里的信息源 id
+_LEGACY_SOURCE_IDS = {"少数派": "sspai", "BBC中文": "bbc-zh", "界面新闻": "jiemian"}
+
+
 def _migrate_v1(conn: sqlite3.Connection) -> None:
-    conn.executescript(_V1)
+    for stmt in filter(str.strip, _V1.split(";")):
+        conn.execute(stmt)
     legacy = conn.execute(
         "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'articles'").fetchone()
     if not legacy:
@@ -81,12 +86,15 @@ def _migrate_v1(conn: sqlite3.Connection) -> None:
     # 旧版 RSS 文章表一次性导入为条目；旧表保留不删
     for r in conn.execute("SELECT url, source, title, summary, published, fetched_at, fingerprint "
                           "FROM articles").fetchall():
+        source_id = _LEGACY_SOURCE_IDS.get(r[1], r[1])
         conn.execute(
             "INSERT OR IGNORE INTO items (id, source_id, kind, external_id, url, title, summary,"
             " published, fetched_at, fingerprint) VALUES (?, ?, 'rss', ?, ?, ?, ?, ?, ?, ?)",
-            (item_id(r[1], r[0]), r[1], r[0], r[0], r[2], r[3] or "",
+            (item_id(source_id, r[0]), source_id, r[0], r[0], r[2], r[3] or "",
              _legacy_time(r[4]), _legacy_time(r[5]), r[6]),
         )
+    conn.execute("INSERT INTO source_state (source_id, total_items)"
+                 " SELECT source_id, COUNT(*) FROM items GROUP BY source_id")
 
 
 def _legacy_time(s: str | None) -> str | None:
@@ -112,12 +120,19 @@ class Store:
         self._migrate()
 
     def _migrate(self) -> None:
+        """Each migration (DDL included) runs in one explicit transaction, so a
+        failure leaves the schema at the previous version and is retryable."""
         with self._lock:
             version = self._conn.execute("PRAGMA user_version").fetchone()[0]
             for i, step in enumerate(MIGRATIONS[version:], start=version + 1):
-                with self._conn:
+                self._conn.execute("BEGIN")
+                try:
                     step(self._conn)
                     self._conn.execute(f"PRAGMA user_version = {i}")
+                except BaseException:
+                    self._conn.rollback()
+                    raise
+                self._conn.commit()
 
     def close(self) -> None:
         with self._lock:
@@ -135,13 +150,7 @@ class Store:
         dup = 0
         with self._lock, self._conn:
             for it in items:
-                exists = self._conn.execute(
-                    "SELECT 1 FROM items WHERE (source_id = ? AND external_id = ?)"
-                    " OR (? != '' AND url = ?)"
-                    " OR (? != 'email' AND kind != 'email' AND fingerprint = ?) LIMIT 1",
-                    (it.source_id, it.external_id, it.url, it.url, it.kind, it.fingerprint),
-                ).fetchone()
-                if exists:
+                if self._is_duplicate(it):
                     dup += 1
                     continue
                 self._conn.execute(
@@ -152,6 +161,26 @@ class Store:
                 )
                 new.append(it.id)
         return new, dup
+
+    # 三条规则各走自己的索引；合成一个 OR 查询会退化为全表扫描
+    _DUP_BY_ID = "SELECT 1 FROM items WHERE source_id = ? AND external_id = ?"
+    _DUP_BY_URL = "SELECT 1 FROM items WHERE url = ? AND url != ''"
+    _DUP_BY_FP = "SELECT 1 FROM items WHERE fingerprint = ? AND kind != 'email'"
+
+    def _is_duplicate(self, it: Item) -> bool:
+        c = self._conn
+        if c.execute(self._DUP_BY_ID, (it.source_id, it.external_id)).fetchone():
+            return True
+        if it.url and c.execute(self._DUP_BY_URL, (it.url,)).fetchone():
+            return True
+        return it.kind != "email" and bool(c.execute(self._DUP_BY_FP, (it.fingerprint,)).fetchone())
+
+    def explain_duplicate_lookup(self) -> list[str]:
+        """Query plans of the duplicate checks (diagnostics: they must not scan)."""
+        with self._lock:
+            return [" ".join(str(r[-1]) for r in self._conn.execute(f"EXPLAIN QUERY PLAN {q}", args))
+                    for q, args in ((self._DUP_BY_ID, ("s", "e")), (self._DUP_BY_URL, ("u",)),
+                                    (self._DUP_BY_FP, ("f",)))]
 
     def get_item(self, item_id_: str) -> Item | None:
         with self._lock:
@@ -174,8 +203,10 @@ class Store:
             where.append(f"{_SORT_TIME} < ?")
             args.append(to_iso(q.until))
         if q.search:
-            where.append("(title LIKE ? OR summary LIKE ? OR author LIKE ?)")
-            args += [f"%{q.search}%"] * 3
+            pattern = "%" + q.search.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+            where.append("(title LIKE ? ESCAPE '\\' OR summary LIKE ? ESCAPE '\\'"
+                         " OR author LIKE ? ESCAPE '\\')")
+            args += [pattern] * 3
         cond = " AND ".join(where)
         with self._lock:
             total = self._conn.execute(f"SELECT COUNT(*) FROM items WHERE {cond}", args).fetchone()[0]

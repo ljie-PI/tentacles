@@ -97,3 +97,35 @@ def test_human_mode_renders_tables(cli, web):
 
     assert result.exit_code == 0
     assert "Readable" in result.stdout
+
+
+def test_titles_with_brackets_render_literally(cli, web):
+    web.serve(FEED, rss_feed({"title": "Ask HN: tips for [/r/programming] [video]",
+                              "link": "https://news.example.com/b"}))
+    cli("sources", "fetch")
+    item_id = payload(cli("items", "list"))["items"][0]["id"]
+
+    listed = cli("items", "list", json_mode=False)
+    shown = cli("items", "show", item_id, json_mode=False)
+
+    assert listed.exit_code == 0 and shown.exit_code == 0
+    assert "[video]" in shown.stdout and "[/r/programming]" in shown.stdout
+
+
+@pytest.mark.parametrize("args", [("items", "list", "--limit", "abc"), ("items", "show"), ("bogus",)])
+def test_usage_errors_are_json_in_json_mode(cli, args):
+    result = cli(*args)
+
+    assert result.exit_code == 2
+    assert payload(result)["error"]["code"] == "invalid"
+
+
+def test_naive_since_is_read_in_the_configured_timezone(cli, web, write_config):
+    # 2026-10-24 01:00 上海时间 == 2026-10-23 17:00 UTC
+    web.serve(FEED, rss_feed({"title": "Early", "link": "https://news.example.com/e",
+                              "pubDate": "Fri, 23 Oct 2026 17:00:00 GMT"}))
+    cli("sources", "fetch")
+
+    result = cli("items", "list", "--since", "2026-10-24T00:00")
+
+    assert [i["title"] for i in payload(result)["items"]] == ["Early"]

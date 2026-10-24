@@ -6,6 +6,7 @@ import asyncio
 from datetime import datetime
 from pathlib import Path
 from typing import Callable, Mapping
+from zoneinfo import ZoneInfo
 
 import httpx
 
@@ -110,6 +111,6 @@ class TentaclesService:
         if value is None or isinstance(value, datetime):
             return value
         try:
-            return parse_since(value, self._clock())
+            return parse_since(value, self._clock(), ZoneInfo(self.config.app.timezone))
         except ValueError as exc:
             raise ConfigError(str(exc)) from exc
