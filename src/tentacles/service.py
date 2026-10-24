@@ -72,7 +72,22 @@ class TentaclesService:
                 async with sem:
                     return await fetch_source(spec, store=self.store, http=http, clock=self._clock)
 
-            return list(await asyncio.gather(*(one(s) for s in specs)))
+            tasks = [asyncio.create_task(one(s)) for s in specs]
+            try:
+                return list(await asyncio.gather(*tasks))
+            except BaseException:
+                # gather can return as soon as a semaphore waiter is cancelled,
+                # while active sources are still draining their database workers.
+                for task in tasks:
+                    task.cancel()
+                cleanup = asyncio.gather(*tasks, return_exceptions=True)
+                while not cleanup.done():
+                    try:
+                        await asyncio.shield(cleanup)
+                    except asyncio.CancelledError:
+                        pass  # repeated cancellation must not interrupt resource cleanup
+                cleanup.result()
+                raise
 
     # ---- items --------------------------------------------------------------
 

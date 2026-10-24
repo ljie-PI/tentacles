@@ -99,12 +99,8 @@ async def fetch_source(spec: SourceSpec, *, store: Store, http: HttpPool,
 def _record_failure(store: Store, source_id: str, run_id: int | None, error: str, now: datetime,
                     clock: Callable[[], datetime]) -> None:
     """Best effort: the store itself may be what failed (e.g. database locked).
-    The stored cursor is re-read so a failure never overwrites it."""
+    Only status fields are updated, so a concurrent success keeps its cursor."""
     try:
-        state = store.get_source_state(source_id)
-        state.last_fetch_at, state.last_status, state.last_error = now, "error", error
-        store.save_source_state(state)
-        if run_id is not None:
-            store.finish_run(run_id, status="failed", now=clock(), error=error)
+        store.save_fetch_failure(source_id, run_id, started_at=now, finished_at=clock(), error=error)
     except Exception:  # noqa: BLE001
         log.exception("could not record failure of fetch run %s", run_id)

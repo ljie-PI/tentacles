@@ -596,3 +596,133 @@ def test_cancellation_during_a_success_commit_keeps_the_completed_run(web, write
     finally:
         release.set()
         asyncio.run(svc.aclose())
+
+
+@pytest.mark.parametrize("cancel_again", [False, True])
+def test_cancelling_many_sources_drains_fetches_before_the_service_closes(web, write_config, cancel_again):
+    import sqlite3
+    import threading
+    from tentacles.service import TentaclesService
+
+    path = write_config({"sources": [
+        {"id": sid, "type": "rss", "url": f"https://{sid}.example.org/rss", "schedule": "1h"}
+        for sid in ("a", "b", "c", "d", "e")]})
+    waiting = None
+    blocked = None
+    locker = None
+    timer = None
+
+    async def handler(request):
+        nonlocal locker, timer
+        if request.url.host != "b.example.org":
+            waiting.set()
+            await asyncio.Event().wait()
+        await waiting.wait()
+        locker = sqlite3.connect(svc.config.db_path, check_same_thread=False)
+        locker.execute("BEGIN IMMEDIATE")
+        timer = threading.Timer(0.3, locker.commit)
+        timer.start()
+        blocked.set()
+        return httpx.Response(200, content=rss_feed(
+            {"title": "Interrupted bulletin", "link": "https://news.example.com/multi-cancel"}).encode())
+
+    svc = TentaclesService.open(path, transport=httpx.MockTransport(handler), env={})
+
+    async def cancel_and_close():
+        nonlocal waiting, blocked
+        waiting, blocked = asyncio.Event(), asyncio.Event()
+        task = asyncio.create_task(svc.fetch_sources())
+        await blocked.wait()
+        await asyncio.sleep(0.05)
+        task.cancel()
+        if cancel_again:
+            asyncio.get_running_loop().call_later(0.03, task.cancel)
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        # This is the CLI's lifecycle: immediately close the Service after an operation returns.
+        await svc.aclose()
+        await asyncio.sleep(0.05)
+
+    try:
+        asyncio.run(cancel_and_close())
+        reopened = TentaclesService.open(path, env={})
+        try:
+            runs = reopened.list_runs()
+            assert len(runs) == 4
+            assert all(run.status == "failed" and run.finished_at is not None for run in runs)
+            states = {s.id: s for s in reopened.list_sources()}
+            assert all(states[run.target].last_status == "error" for run in runs)
+            assert all(states[run.target].last_error for run in runs)
+        finally:
+            asyncio.run(reopened.aclose())
+    finally:
+        if timer is not None:
+            timer.join()
+        if locker is not None:
+            locker.close()
+        asyncio.run(svc.aclose())
+
+
+def test_a_concurrent_failure_does_not_overwrite_a_successful_cursor(write_config):
+    import sqlite3
+    import threading
+    from datetime import datetime, timezone
+    from tentacles.service import TentaclesService
+
+    path = write_config(rss_config())
+    committing = threading.Event()
+    finish_pending = threading.Event()
+    headers = []
+
+    def clock():
+        if finish_pending.is_set():
+            committing.set()
+        return datetime.now(timezone.utc)
+
+    def success(request):
+        headers.append(request.headers.get("if-none-match"))
+        version = len(headers)
+        if version == 2:
+            finish_pending.set()
+        return httpx.Response(200, headers={"etag": f"v{version}"}, content=rss_feed(
+            {"title": f"Bulletin {version}", "link": f"https://news.example.com/race/{version}"}).encode())
+
+    async def failure(request):
+        assert await asyncio.to_thread(committing.wait, 2)
+        await asyncio.sleep(0.03)
+        return httpx.Response(500)
+
+    good = TentaclesService.open(path, transport=httpx.MockTransport(success), env={}, clock=clock)
+    bad = TentaclesService.open(path, transport=httpx.MockTransport(failure), env={})
+    connection = sqlite3.connect(good.config.db_path)
+    try:
+        asyncio.run(good.fetch_sources())
+        # A slow external database trigger makes a successful write overlap the failed fetch.
+        connection.executescript("""
+            CREATE TRIGGER slow_success BEFORE UPDATE OF cursor ON source_state
+            WHEN NEW.last_status = 'ok' BEGIN
+                SELECT sum(x) FROM (
+                    WITH RECURSIVE counter(x) AS (
+                        VALUES(0) UNION ALL SELECT x + 1 FROM counter WHERE x < 2000000
+                    ) SELECT x FROM counter
+                );
+            END;
+        """)
+
+        async def race():
+            failed = asyncio.create_task(bad.fetch_sources())
+            await asyncio.sleep(0.03)
+            succeeded, failed = await asyncio.gather(good.fetch_sources(), failed)
+            assert succeeded[0].status == "ok"
+            assert failed[0].status == "error"
+
+        asyncio.run(race())
+        connection.execute("DROP TRIGGER slow_success")
+        connection.commit()
+        asyncio.run(good.fetch_sources())
+        assert headers == [None, "v1", "v2"]
+        assert {r.status for r in good.list_runs()} == {"ok", "failed"}
+    finally:
+        connection.close()
+        asyncio.run(good.aclose())
+        asyncio.run(bad.aclose())

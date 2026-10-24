@@ -277,29 +277,34 @@ class Store:
         return SourceState(source_id, json.loads(row["cursor"]), from_iso(row["last_fetch_at"]),
                            row["last_status"], row["last_error"], row["total_items"])
 
-    def save_source_state(self, st: SourceState) -> None:
-        """Saves cursor and status; insertion updates counts in its own transaction."""
-        with self._lock, self._conn:
-            self._save_source_state(st)
-
-    def _save_source_state(self, st: SourceState) -> None:
-        self._conn.execute(
-            "INSERT INTO source_state (source_id, cursor, last_fetch_at, last_status,"
-            " last_error, total_items) VALUES (?, ?, ?, ?, ?, ?)"
-            " ON CONFLICT (source_id) DO UPDATE SET cursor = excluded.cursor,"
-            " last_fetch_at = excluded.last_fetch_at, last_status = excluded.last_status,"
-            " last_error = excluded.last_error",
-            (st.source_id, json.dumps(st.cursor, ensure_ascii=False), to_iso(st.last_fetch_at),
-             st.last_status, st.last_error, st.total_items),
-        )
-
     def save_fetch_success(self, st: SourceState, run_id: int, *, now: datetime,
                            stats: dict[str, Any]) -> None:
         """Advance the cursor and finish its run together, or neither on failure."""
         with self._lock, self._conn:
             self._conn.execute("BEGIN IMMEDIATE")
-            self._save_source_state(st)
+            self._conn.execute(
+                "INSERT INTO source_state (source_id, cursor, last_fetch_at, last_status,"
+                " last_error, total_items) VALUES (?, ?, ?, ?, ?, ?)"
+                " ON CONFLICT (source_id) DO UPDATE SET cursor = excluded.cursor,"
+                " last_fetch_at = excluded.last_fetch_at, last_status = excluded.last_status,"
+                " last_error = excluded.last_error",
+                (st.source_id, json.dumps(st.cursor, ensure_ascii=False), to_iso(st.last_fetch_at),
+                 st.last_status, st.last_error, st.total_items),
+            )
             self._finish_run(run_id, status="ok", now=now, stats=stats)
+
+    def save_fetch_failure(self, source_id: str, run_id: int | None, *, started_at: datetime,
+                           finished_at: datetime, error: str) -> None:
+        """Record failure without overwriting a cursor committed by another fetch."""
+        with self._lock, self._conn:
+            self._conn.execute("BEGIN IMMEDIATE")
+            self._conn.execute(
+                "INSERT INTO source_state (source_id, last_fetch_at, last_status, last_error)"
+                " VALUES (?, ?, 'error', ?) ON CONFLICT (source_id) DO UPDATE SET"
+                " last_fetch_at = excluded.last_fetch_at, last_status = excluded.last_status,"
+                " last_error = excluded.last_error", (source_id, to_iso(started_at), error))
+            if run_id is not None:
+                self._finish_run(run_id, status="failed", now=finished_at, error=error)
 
     # ---- runs ---------------------------------------------------------------
 
@@ -310,11 +315,6 @@ class Store:
                 (kind, target, to_iso(now)))
         assert cur.lastrowid is not None
         return cur.lastrowid
-
-    def finish_run(self, run_id: int, *, status: str, now: datetime, stats: dict[str, Any] | None = None,
-                   cost: float | None = None, error: str | None = None) -> None:
-        with self._lock, self._conn:
-            self._finish_run(run_id, status=status, now=now, stats=stats, cost=cost, error=error)
 
     def _finish_run(self, run_id: int, *, status: str, now: datetime, stats: dict[str, Any] | None = None,
                     cost: float | None = None, error: str | None = None) -> None:
