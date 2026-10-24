@@ -85,8 +85,8 @@ sources:
   - {id: nytimes-world, type: rss, url: "https://rss.nytimes.com/services/xml/rss/nyt/World.xml", schedule: 1h}
   - {id: cnbc-top, type: rss, url: "https://search.cnbc.com/rs/search/combinedcms/view.xml?partnerId=wrss01", schedule: 1h}
 
-# 当前手动执行：tentacles pipelines filter daily-tech / pipelines run daily-tech。
-# schedule 表示处理频率；pipeline 的 tick 自动调度在下一批 #24 接入。
+# tick 会先抓取、再只过滤、最后运行到期的 pipeline；模型调用可能产生费用。
+# 也可手动执行 pipelines filter/run ID；enabled: false 关闭自动执行。
 pipelines:
   - id: daily-tech
     name: 每日科技日报
@@ -94,6 +94,7 @@ pipelines:
     sources: [solidot, 36kr, sspai, bbc-zh, jiemian, hacker-news, techcrunch, the-verge, ars-technica, nytimes-world, cnbc-top]
     window: 24h
     schedule: '@daily'
+    filter_schedule: 30m      # 可省略；此处更频繁地只过滤，到午夜再生成日报
     max_items: 500
     filters:
       - type: keyword

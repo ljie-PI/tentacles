@@ -2,7 +2,7 @@
 
 个人信息与新闻管理系统：从多种信息源抓取内容，按个人 persona 过滤，再用 LLM 加工成日报、深度报道或邮件简报。整体设计见 [#18](https://github.com/ljie-PI/tentacles/issues/18)，实施进度见它的子 issue。
 
-> 目前已完成骨架：配置驱动的 RSS 抓取、去重入库、条目查询、运行记录、持久化调度、命名模型注册表/连通性测试、版本化 Persona 管理，以及 keyword 级联过滤和 digest 日报。pipeline 自动调度、其他过滤/处理、邮件和网页源、Web 端将陆续加入。
+> 目前已完成骨架：配置驱动的 RSS 抓取、去重入库、条目查询、运行记录、持久化调度、命名模型注册表/连通性测试、版本化 Persona 管理，以及 keyword 级联过滤和 digest 日报。pipeline 自动调度已接入；其他过滤/处理、邮件和网页源、Web 端将陆续加入。
 
 ## 快速开始
 
@@ -38,7 +38,7 @@ tentacles items list --since 24h  # 查看最近 24 小时的条目
 | `tentacles sources fetch [ID...]` | 立即抓取信息源，不写 ID 时抓取全部启用的源 |
 | `tentacles items list` | 列出条目，可按来源、时间、关键词筛选，支持分页 |
 | `tentacles items show ID` | 查看条目详情 |
-| `tentacles tick` | 并发执行到期的信息源任务 |
+| `tentacles tick` | 先并发抓取，再依次过滤、依次运行到期 pipeline |
 | `tentacles scheduler status` | 查看任务频率、到期时间、运行状态 |
 | `tentacles pipelines list/filter/run ID` | 查看 pipeline、只过滤或生成报告 |
 | `tentacles reports list/show ID` | 查看报告列表和全文 |
@@ -99,7 +99,11 @@ tentacles reports list --pipeline daily-tech
 tentacles reports show REPORT_ID
 ```
 
-当前 `tick` 只自动抓取来源；pipeline 的 `schedule` 是频率元数据，自动到期执行将在 #24 接入。
+`tick` 按顺序执行全部到期任务：先并发抓取，再逐条只过滤，最后逐条运行 pipeline。
+每条启用的 pipeline 按 `schedule` 处理；可选 `filter_schedule` 提供更频繁的只过滤轮次。
+`pipelines list` 和 `scheduler status` 显示下次执行时间与当前待报告数量。
+**注意：`tick` 现在可能调用配置中的模型并产生费用。** 关闭自动运行可设置 pipeline `enabled: false`；
+只想抓取可用 `sources fetch`。
 过滤和运行各有独立的持久化锁；运行遇到过滤锁被占用时，会直接处理之前已通过的条目。
 消费记录独立于 Persona 版本，同一 pipeline 中的条目只消费一次。报告失败时保留未报告状态，修复问题后可以重试。
 报告存入 SQLite，同时按 pipeline 写入 `reports_dir` 下的 Markdown 文件（新文件默认私有权限）。
@@ -124,13 +128,16 @@ cron 支持 `*`、范围、步长、列表（如 `0,30 9-17/2 * * 1-5`），星�
 
 间隔任务首次立即到期，cron 首次等待下一个触发点。状态保存在 SQLite 中，重启不会重置；
 修改频率后以持久化的上次开始时间（尚未执行则用首次出现时间）重新计算。
-成功和失败均推进到期时间。`sources fetch` 忽略频率立即执行（也推进调度时间），
+成功和失败均推进到期时间。配置变更在下次打开 Service/CLI 进程后生效，常驻服务需重启。
+从未执行过的 pipeline cron 在首次启用（或首次添加只过滤频率）时，等到下一个触发点；
+已有手动运行历史则保留上次开始时间，不重置进度。`sources fetch` 忽略频率立即执行（也推进调度时间），
 但与 `tick` 共用原子任务锁；锁被占用时返回 `busy`，一小时后过期可抢占。
 
 ### launchd 示例（macOS）
 
 保存为 `~/Library/LaunchAgents/local.tentacles.tick.plist`，把下面所有路径替换成你的绝对路径。
-launchd 每 30 秒启动一次短进程，不需要另行运行常驻调度器；进程之间用 SQLite 锁防止重复抓取。
+launchd 每 30 秒启动一次短进程，不需要另行运行常驻调度器；SQLite 锁防止重复执行同一任务。
+到期的 pipeline 也会运行，因此启用 digest 等处理器前请确认模型配置和费用。
 日志目录需要预先存在。密钥继续通过配置目录的 `.env` 加载，不要写进 plist。
 
 ```xml

@@ -40,8 +40,10 @@ class PipelineManager:
                  clock: Callable[[], datetime]):
         self._config, self._store, self._models, self._clock = config, store, models, clock
         self._specs = {spec.id: spec for spec in config.pipelines}
-        self._tasks = {(kind, spec.id): Task(kind, spec.id, spec.schedule, config.app.timezone, spec.enabled)
-                       for spec in config.pipelines for kind in ('filter', 'pipeline')}
+        self._tasks = {(kind, spec.id): Task(kind, spec.id,
+                            spec.filter_schedule if kind == 'filter' and spec.filter_schedule else spec.schedule,
+                            config.app.timezone, spec.enabled and (kind != 'filter' or spec.filter_schedule is not None))
+                       for kind in ('filter', 'pipeline') for spec in config.pipelines}
         for spec in config.pipelines:
             if spec.processor.prompt_file is not None:
                 load_prompt(config.resolve(spec.processor.prompt_file))
@@ -54,23 +56,38 @@ class PipelineManager:
                     raise ConfigError(f'pipeline {spec.id!r}: processor requires an existing chat model') from None
 
     def initialize(self) -> None:
-        self._store.register_tasks(list(self._tasks.values()), to_utc(self._clock()))
+        self._store.sync_pipeline_schedules(list(self._tasks.values()), to_utc(self._clock()))
+
+    def scheduled_tasks(self) -> list[Task]:
+        return [task for task in self._tasks.values() if task.enabled]
 
     def spec(self, pipeline_id: str) -> PipelineSpec:
         if pipeline_id not in self._specs:
             raise NotFound(f'unknown pipeline {pipeline_id!r}')
         return self._specs[pipeline_id]
 
-    def list_pipelines(self) -> list[PipelineView]:
-        views = []
-        now = to_utc(self._clock())
+    def pending_counts(self, now: datetime) -> dict[str, int]:
+        counts = {}
         for spec in self._specs.values():
             persona = self._store.get_persona(spec.persona)
             assert persona is not None
-            state = self._store.get_task_state(self._tasks['pipeline', spec.id])
+            counts[spec.id] = self._store.pending_count(self._query(spec, persona, now, spec.processor.max_items))
+        return counts
+
+    def list_pipelines(self) -> list[PipelineView]:
+        views = []
+        now = to_utc(self._clock())
+        pending = self.pending_counts(now)
+        for spec in self._specs.values():
+            task = self._tasks['pipeline', spec.id]
+            filter_task = self._tasks['filter', spec.id]
+            state = self._store.get_task_state(task)
+            filter_state = self._store.get_task_state(filter_task)
             views.append(PipelineView(id=spec.id, name=spec.name, persona=spec.persona,
                 sources=spec.sources, schedule=spec.schedule, enabled=spec.enabled, processor=spec.processor.type,
-                pending=self._store.pending_count(self._query(spec, persona, now, spec.processor.max_items)),
+                pending=pending[spec.id], filter_schedule=spec.filter_schedule,
+                next_run_at=state.next_run(task) if task.enabled else None,
+                filter_next_run_at=filter_state.next_run(filter_task) if filter_task.enabled else None,
                 last_run_at=state.last_run_at, last_status=state.last_status, last_error=state.last_error))
         return views
 
@@ -78,14 +95,18 @@ class PipelineManager:
         return PipelineQuery(spec.id, spec.sources, persona.version, now - parse_duration(spec.window), now, limit)
 
     async def _execute(self, spec: PipelineSpec, kind: str,
-                       work: Callable[[_Operation], Awaitable[None]]) -> PipelineOutcome:
+                       work: Callable[[_Operation], Awaitable[None]], *, due_only: bool = False) -> PipelineOutcome | None:
         task = self._tasks[kind, spec.id]
         operation = _Operation(task, uuid4().hex, to_utc(self._clock()),
                                PipelineOutcome(pipeline_id=spec.id, status='ok'))
+        needs_cleanup = True
         try:
             claim = await run_store_call(self._store.claim_task, task, operation.token,
-                                         operation.started_at, force=True)
-            if claim.status == 'busy':
+                                         operation.started_at, force=not due_only)
+            if claim.status != 'ready':
+                needs_cleanup = False
+                if claim.status == 'not_due':
+                    return None
                 operation.outcome.status = 'busy'
             else:
                 assert claim.run_id is not None
@@ -105,14 +126,15 @@ class PipelineManager:
             if not isinstance(exc, Exception):
                 raise
         finally:
-            if not operation.completed and operation.outcome.status != 'busy':
+            if needs_cleanup and not operation.completed:
                 try:
                     await run_store_call(self._store.finish_task, task, operation.token, to_utc(self._clock()))
                 except Exception as failure:
                     log.warning('could not release pipeline lease (%s)', type(failure).__name__)
         return operation.outcome
 
-    async def filter(self, pipeline_id: str, *, persona: PersonaView | None = None, reevaluate: bool = False) -> PipelineOutcome:
+    async def filter(self, pipeline_id: str, *, persona: PersonaView | None = None, reevaluate: bool = False,
+                     due_only: bool = False) -> PipelineOutcome | None:
         spec = self.spec(pipeline_id)
 
         async def work(op: _Operation) -> None:
@@ -134,15 +156,16 @@ class PipelineManager:
                 self._store.save_evaluations(results, op.outcome.run_id, to_utc(self._clock()), stats)
                 op.completed = True
             await run_store_call(commit)
-        return await self._execute(spec, 'filter', work)
+        return await self._execute(spec, 'filter', work, due_only=due_only)
 
-    async def run(self, pipeline_id: str) -> PipelineOutcome:
+    async def run(self, pipeline_id: str, *, due_only: bool = False) -> PipelineOutcome | None:
         spec = self.spec(pipeline_id)
 
         async def work(op: _Operation) -> None:
             persona = await run_store_call(self._store.get_persona, spec.persona)
             assert persona is not None
             filtered = await self.filter(pipeline_id, persona=persona)
+            assert filtered is not None
             op.outcome.stats = {**filtered.stats, 'filter_status': filtered.status}
             if filtered.status == 'error':
                 raise UpstreamError('pipeline filter failed')
@@ -183,4 +206,4 @@ class PipelineManager:
                 op.outcome.report_id = report.id
                 op.completed = True
             await run_store_call(publish)
-        return await self._execute(spec, 'pipeline', work)
+        return await self._execute(spec, 'pipeline', work, due_only=due_only)

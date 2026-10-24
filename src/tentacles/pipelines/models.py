@@ -76,6 +76,9 @@ class PipelineView(BaseModel):
     enabled: bool
     processor: str
     pending: int
+    filter_schedule: str | None = None
+    next_run_at: datetime | None = None
+    filter_next_run_at: datetime | None = None
     last_run_at: datetime | None
     last_status: str | None
     last_error: str | None

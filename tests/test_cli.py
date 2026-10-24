@@ -285,3 +285,30 @@ def test_pipeline_and_report_commands_and_item_filters_are_json_contracts(cli, w
 def test_pipeline_usage_and_lookup_errors_are_structured(cli, args, code):
     result = cli(*args)
     assert result.exit_code == code and payload(result)['error']['code'] == ('not_found' if code == 3 else 'invalid')
+
+
+def test_tick_contract_includes_pipeline_kinds_and_scheduler_pending_counts(cli, web, write_config):
+    from test_pipeline_scheduler import scheduled_config
+    from test_pipelines import three_entries
+    path = write_config(scheduled_config())
+    web.serve(FEED, three_entries())
+    result = cli('tick', config=path)
+    assert result.exit_code == 0
+    rows = payload(result)
+    assert [r['kind'] for r in rows] == ['fetch', 'filter', 'pipeline']
+    assert [r['target'] for r in rows] == ['news', 'daily', 'daily']
+    assert rows[0]['source_id'] == 'news' and rows[-1]['pipeline_id'] == 'daily'
+    assert payload(cli('tick', config=path)) == []
+    tasks = payload(cli('scheduler', 'status', config=path))
+    assert {t['kind'] for t in tasks} == {'fetch', 'filter', 'pipeline'}
+    assert all(t['pending'] == 0 for t in tasks if t['kind'] != 'fetch')
+    [pipeline] = payload(cli('pipelines', 'list', config=path))
+    assert pipeline['next_run_at'] and pipeline['filter_next_run_at'] and pipeline['filter_schedule'] == '30m'
+    assert cli('scheduler', 'status', config=path, json_mode=False).exit_code == 0
+    assert cli('pipelines', 'list', config=path, json_mode=False).exit_code == 0
+    assert cli('tick', config=path, json_mode=False).exit_code == 0
+    other = scheduled_config()
+    other['pipelines'][0]['id'] = 'other'
+    other_path = write_config(other, name='other.yaml')
+    human = cli('tick', config=other_path, json_mode=False)
+    assert human.exit_code == 0 and 'other' in human.stdout and 'filter' in human.stdout

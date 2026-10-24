@@ -187,7 +187,14 @@ def _migrate_v6(conn: sqlite3.Connection) -> None:
                  ' AND c.item_id = evaluations.item_id)')
 
 
-MIGRATIONS: list[Callable[[sqlite3.Connection], None]] = [_migrate_v1, _migrate_v2, _migrate_v3, _migrate_v4, _migrate_v5, _migrate_v6]
+def _migrate_v7(conn: sqlite3.Connection) -> None:
+    conn.execute("""CREATE TABLE pipeline_schedule_state (
+        kind TEXT NOT NULL CHECK (kind IN ('filter', 'pipeline')), target TEXT NOT NULL,
+        active INTEGER NOT NULL CHECK (active IN (0, 1)), PRIMARY KEY (kind, target)
+    )""")
+
+
+MIGRATIONS: list[Callable[[sqlite3.Connection], None]] = [_migrate_v1, _migrate_v2, _migrate_v3, _migrate_v4, _migrate_v5, _migrate_v6, _migrate_v7]
 
 _ITEM_COLUMNS = ("id, source_id, kind, external_id, url, title, author, summary, content,"
                  " published, fetched_at, fingerprint, meta")
@@ -467,6 +474,31 @@ class Store:
                 [(task.kind, task.target, to_iso(now)) for task in tasks])
             for task in tasks:
                 self._reconcile_completed_task(task)
+
+    def sync_pipeline_schedules(self, tasks: list[Task], now: datetime) -> None:
+        """Enroll scheduled pipeline roles without confusing them with manual locks.
+
+        A never-run cron job begins at first activation, not when its reusable
+        manual lock happened to be registered. Executed tasks retain progress.
+        Only supplied identities are touched; a history-only config is harmless.
+        """
+        if not tasks:
+            return
+        with self._lock, self._conn:
+            self._conn.execute('BEGIN IMMEDIATE')
+            for task in tasks:
+                self._conn.execute('INSERT OR IGNORE INTO task_state (kind, target, first_seen_at) VALUES (?, ?, ?)',
+                                   (task.kind, task.target, to_iso(now)))
+                state = self._reconcile_completed_task(task)
+                previous = self._conn.execute('SELECT active FROM pipeline_schedule_state WHERE kind = ? AND target = ?',
+                                              (task.kind, task.target)).fetchone()
+                was_active = bool(previous['active']) if previous is not None else False
+                if task.enabled and not was_active and state.last_run_at is None and state.token is None:
+                    self._conn.execute('UPDATE task_state SET first_seen_at = ? WHERE kind = ? AND target = ?',
+                                       (to_iso(now), task.kind, task.target))
+                self._conn.execute('INSERT INTO pipeline_schedule_state VALUES (?, ?, ?)'
+                    ' ON CONFLICT (kind, target) DO UPDATE SET active = excluded.active'
+                    ' WHERE active != excluded.active', (task.kind, task.target, task.enabled))
 
     def get_task_state(self, task: Task) -> TaskState:
         with self._lock:
