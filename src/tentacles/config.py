@@ -160,9 +160,11 @@ def load_config(path: Path | str | None = None, *, env: Mapping[str, str] | None
     if not config_path.is_file():
         raise ConfigError(f"config file not found: {config_path}")
     try:
-        raw = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+        raw = yaml.safe_load(config_path.read_text(encoding="utf-8"))
     except yaml.YAMLError as exc:
         raise ConfigError(f"invalid YAML in {config_path}: {exc}") from exc
+    if raw is None:
+        raw = {}
     if not isinstance(raw, dict):
         raise ConfigError(f"{config_path}: top level must be a mapping")
 

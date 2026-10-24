@@ -100,3 +100,9 @@ def test_home_relative_paths_expand(write_config, open_service, tmp_path, monkey
     svc = open_service(write_config({"app": {"data_dir": "~/tentacles-data"}, "sources": []}))
 
     assert svc.config.db_path == tmp_path / "home" / "tentacles-data" / "tentacles.db"
+
+
+@pytest.mark.parametrize("text", ["[]", "false", "0", '""'])
+def test_falsey_non_mapping_configs_are_invalid(write_config, text):
+    with pytest.raises(ConfigError, match="top level must be a mapping"):
+        TentaclesService.open(write_config(text), env={})

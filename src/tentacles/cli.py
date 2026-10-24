@@ -45,6 +45,12 @@ class _JsonErrorsGroup(TyperGroup):
     """In JSON mode, argument/usage errors caught by click also become a JSON error
     object on stdout (exit 2) instead of a usage message on stderr."""
 
+    def parse_args(self, ctx, args):
+        json_mode = ctx.find_root().params.get("json_mode") or _json_requested(args)
+        if not args and self.no_args_is_help and json_mode:
+            raise UsageError("Missing command.", ctx)
+        return super().parse_args(ctx, args)
+
     def main(self, args=None, prog_name=None, complete_var=None, standalone_mode=True, **extra):
         if not _json_requested(list(sys.argv[1:] if args is None else args)):
             return super().main(args, prog_name, complete_var, standalone_mode, **extra)
@@ -66,10 +72,10 @@ def _emit_error(code: str, message: str, status: int) -> None:
 
 app = typer.Typer(help="tentacles — 个人信息与新闻管理系统", no_args_is_help=True,
                   pretty_exceptions_enable=False, cls=_JsonErrorsGroup)
-config_app = typer.Typer(help="配置", no_args_is_help=True)
-sources_app = typer.Typer(help="信息源", no_args_is_help=True)
-items_app = typer.Typer(help="条目", no_args_is_help=True)
-runs_app = typer.Typer(help="运行记录", no_args_is_help=True)
+config_app = typer.Typer(help="配置", no_args_is_help=True, cls=_JsonErrorsGroup)
+sources_app = typer.Typer(help="信息源", no_args_is_help=True, cls=_JsonErrorsGroup)
+items_app = typer.Typer(help="条目", no_args_is_help=True, cls=_JsonErrorsGroup)
+runs_app = typer.Typer(help="运行记录", no_args_is_help=True, cls=_JsonErrorsGroup)
 app.add_typer(config_app, name="config")
 app.add_typer(sources_app, name="sources")
 app.add_typer(items_app, name="items")

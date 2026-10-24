@@ -159,3 +159,15 @@ def test_interrupt_in_json_mode_still_yields_one_json_value(cli, web):
 
     assert result.exit_code == 130
     assert payload(result)["error"]["code"] == "aborted"
+
+
+@pytest.mark.parametrize("group", [(), ("config",), ("sources",), ("items",), ("runs",)])
+@pytest.mark.parametrize("env_mode", [False, True])
+def test_missing_subcommands_are_json_errors(write_config, group, env_mode):
+    path = write_config({"sources": []})
+    args = ["--config", str(path), *([] if env_mode else ["--json"]), *group]
+    result = CliRunner().invoke(app, args, env={"TENTACLES_JSON": "1" if env_mode else "0"})
+
+    assert result.exit_code == 2
+    assert payload(result)["error"]["code"] == "invalid"
+    assert "Usage:" not in result.stdout

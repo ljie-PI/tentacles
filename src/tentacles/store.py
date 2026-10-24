@@ -102,7 +102,21 @@ def _legacy_time(s: str | None) -> str | None:
     return to_iso(from_iso(s)) if s else None
 
 
-MIGRATIONS: list[Callable[[sqlite3.Connection], None]] = [_migrate_v1]
+def _migrate_v2(conn: sqlite3.Connection) -> None:
+    conn.execute("CREATE TABLE suppressed_items (source_id TEXT NOT NULL, external_id TEXT NOT NULL,"
+                 " PRIMARY KEY (source_id, external_id))")
+    # Older skeleton builds kept a bounded list in each source's cursor.
+    for row in conn.execute("SELECT source_id, cursor FROM source_state").fetchall():
+        cursor = json.loads(row[1])
+        suppressed = cursor.pop("_suppressed", [])
+        conn.executemany("INSERT OR IGNORE INTO suppressed_items VALUES (?, ?)",
+                         [(row[0], external_id) for external_id in suppressed])
+        conn.execute("UPDATE source_state SET cursor = ?, total_items ="
+                     " (SELECT COUNT(*) FROM items WHERE source_id = ?) WHERE source_id = ?",
+                     (json.dumps(cursor, ensure_ascii=False), row[0], row[0]))
+
+
+MIGRATIONS: list[Callable[[sqlite3.Connection], None]] = [_migrate_v1, _migrate_v2]
 
 _ITEM_COLUMNS = ("id, source_id, kind, external_id, url, title, author, summary, content,"
                  " published, fetched_at, fingerprint, meta")
@@ -115,10 +129,15 @@ class Store:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
         self._conn = sqlite3.connect(self.path, check_same_thread=False)
-        self._conn.row_factory = sqlite3.Row
-        self._conn.execute("PRAGMA journal_mode = WAL")
-        self._conn.execute("PRAGMA busy_timeout = 5000")
-        self._migrate()
+        try:
+            self._conn.row_factory = sqlite3.Row
+            self._conn.create_function("casefold", 1, str.casefold, deterministic=True)
+            self._conn.execute("PRAGMA journal_mode = WAL")
+            self._conn.execute("PRAGMA busy_timeout = 5000")
+            self._migrate()
+        except BaseException:
+            self._conn.close()
+            raise
 
     def _migrate(self) -> None:
         """Each migration (DDL included) runs in one explicit transaction, so a
@@ -145,7 +164,8 @@ class Store:
 
     # ---- items -------------------------------------------------------------
 
-    def upsert_items(self, items: Iterable[Item]) -> tuple[list[str], int]:
+    def upsert_items(self, items: Iterable[Item], *,
+                     suppressed: Iterable[Item] = ()) -> tuple[list[str], int]:
         """Insert items that aren't duplicates; returns (new ids, duplicate count).
 
         Duplicate = same (source, external id), or same non-empty url, or same
@@ -153,6 +173,7 @@ class Store:
         """
         new: list[str] = []
         dup = 0
+        counts: dict[str, int] = {}
         with self._lock, self._conn:
             for it in items:
                 if self._is_duplicate(it):
@@ -165,15 +186,25 @@ class Store:
                      it.fingerprint, json.dumps(it.meta, ensure_ascii=False)),
                 )
                 new.append(it.id)
+                counts[it.source_id] = counts.get(it.source_id, 0) + 1
+            self._conn.executemany(
+                "INSERT INTO source_state (source_id, total_items) VALUES (?, ?)"
+                " ON CONFLICT (source_id) DO UPDATE SET total_items = total_items + excluded.total_items",
+                list(counts.items()))
+            self._conn.executemany("INSERT OR IGNORE INTO suppressed_items VALUES (?, ?)",
+                                   [(it.source_id, it.external_id) for it in suppressed])
         return new, dup
 
     # 三条规则各走自己的索引；合成一个 OR 查询会退化为全表扫描
+    _SUPPRESSED = "SELECT 1 FROM suppressed_items WHERE source_id = ? AND external_id = ?"
     _DUP_BY_ID = "SELECT 1 FROM items WHERE source_id = ? AND external_id = ?"
     _DUP_BY_URL = "SELECT 1 FROM items WHERE url = ? AND url != ''"
     _DUP_BY_FP = "SELECT 1 FROM items WHERE fingerprint = ? AND kind != 'email'"
 
     def _is_duplicate(self, it: Item) -> bool:
         c = self._conn
+        if c.execute(self._SUPPRESSED, (it.source_id, it.external_id)).fetchone():
+            return True
         if c.execute(self._DUP_BY_ID, (it.source_id, it.external_id)).fetchone():
             return True
         if it.url and c.execute(self._DUP_BY_URL, (it.url,)).fetchone():
@@ -186,19 +217,13 @@ class Store:
         with self._lock:
             c = self._conn
             return [it for it in items
-                    if not c.execute(self._DUP_BY_ID, (it.source_id, it.external_id)).fetchone()
+                    if not c.execute(self._SUPPRESSED, (it.source_id, it.external_id)).fetchone()
+                    and not c.execute(self._DUP_BY_ID, (it.source_id, it.external_id)).fetchone()
                     and not (it.url and c.execute(self._DUP_BY_URL, (it.url,)).fetchone())]
 
     def source_ids(self) -> set[str]:
         with self._lock:
             return {r[0] for r in self._conn.execute("SELECT DISTINCT source_id FROM items")}
-
-    def explain_duplicate_lookup(self) -> list[str]:
-        """Query plans of the duplicate checks (diagnostics: they must not scan)."""
-        with self._lock:
-            return [" ".join(str(r[-1]) for r in self._conn.execute(f"EXPLAIN QUERY PLAN {q}", args))
-                    for q, args in ((self._DUP_BY_ID, ("s", "e")), (self._DUP_BY_URL, ("u",)),
-                                    (self._DUP_BY_FP, ("f",)))]
 
     def recent_titles(self, *, exclude_source: str, since: datetime) -> list[str]:
         """Titles of non-email items other sources stored since `since`."""
@@ -229,10 +254,9 @@ class Store:
             where.append(f"{_SORT_TIME} < ?")
             args.append(to_iso(q.until))
         if q.search:
-            pattern = "%" + q.search.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
-            where.append("(title LIKE ? ESCAPE '\\' OR summary LIKE ? ESCAPE '\\'"
-                         " OR author LIKE ? ESCAPE '\\')")
-            args += [pattern] * 3
+            where.append("(instr(casefold(title), ?) > 0 OR instr(casefold(summary), ?) > 0"
+                         " OR instr(casefold(author), ?) > 0)")
+            args += [q.search.casefold()] * 3
         cond = " AND ".join(where)
         with self._lock:
             total = self._conn.execute(f"SELECT COUNT(*) FROM items WHERE {cond}", args).fetchone()[0]
@@ -254,16 +278,8 @@ class Store:
         return SourceState(source_id, json.loads(row["cursor"]), from_iso(row["last_fetch_at"]),
                            row["last_status"], row["last_error"], row["total_items"])
 
-    def add_source_items(self, source_id: str, n: int) -> None:
-        """Atomic increment, so concurrent fetchers can't lose each other's counts."""
-        with self._lock, self._conn:
-            self._conn.execute(
-                "INSERT INTO source_state (source_id, total_items) VALUES (?, ?)"
-                " ON CONFLICT (source_id) DO UPDATE SET total_items = total_items + excluded.total_items",
-                (source_id, n))
-
     def save_source_state(self, st: SourceState) -> None:
-        """Saves cursor and fetch status; total_items only changes via add_source_items."""
+        """Saves cursor and status; upsert_items updates counts in the insertion transaction."""
         with self._lock, self._conn:
             self._conn.execute(
                 "INSERT INTO source_state (source_id, cursor, last_fetch_at, last_status,"

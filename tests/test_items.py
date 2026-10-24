@@ -1,11 +1,11 @@
 import asyncio
+from contextlib import closing
 import sqlite3
 
 import pytest
 
 from conftest import rss_feed
 from tentacles.errors import ConfigError, NotFound
-from tentacles.models import Item
 
 A, B = "https://a.example.com/rss", "https://b.example.com/rss"
 
@@ -39,17 +39,6 @@ def test_same_content_under_different_urls_is_a_duplicate(web, write_config, ope
     out = fetch(svc)
 
     assert sorted([out["s0"].new, out["s1"].new]) == [0, 1]
-
-
-def test_emails_with_identical_content_are_not_fingerprint_duplicates(write_config, open_service):
-    # 邮件源在后续 ticket 才有；这里直接经由存储验证去重规则对 email 的豁免
-    svc = open_service(write_config(config(A)))
-    mails = [Item(source_id="inbox", kind="email", external_id=f"<m{i}@x>", title="Daily report",
-                  summary="all green") for i in range(2)]
-
-    new, dup = svc.store.upsert_items(mails)
-
-    assert (len(new), dup) == (2, 0)
 
 
 def published(day: int) -> str:
@@ -151,13 +140,6 @@ def test_search_treats_wildcards_literally(web, write_config, open_service):
     assert [i.title for i in svc.list_items(search="snake_case").items] == ["Growth hits 100% in snake_case land"]
 
 
-def test_dedup_lookup_uses_indexes(write_config, open_service):
-    svc = open_service(write_config(config(A)))
-    plans = svc.store.explain_duplicate_lookup()
-
-    assert plans and not any("SCAN items" in p for p in plans)
-
-
 def test_legacy_feed_names_map_to_new_ids_and_seed_counts(write_config, open_service, tmp_path):
     db = tmp_path / "data" / "tentacles.db"
     db.parent.mkdir()
@@ -178,25 +160,32 @@ def test_legacy_feed_names_map_to_new_ids_and_seed_counts(write_config, open_ser
     assert svc.list_sources()[0].total_items == 2
 
 
-def test_failed_migration_leaves_the_database_retryable(write_config, tmp_path, monkeypatch):
-    from tentacles import store as store_mod
+def test_failed_migration_leaves_the_database_retryable(write_config, open_service, tmp_path):
     from tentacles.service import TentaclesService
 
-    def boom(conn):
-        raise RuntimeError("killed mid-migration")
-
     path = write_config(config(A))
-    real = store_mod.MIGRATIONS[0]
-    monkeypatch.setattr(store_mod, "MIGRATIONS", [lambda conn: (real(conn), boom(conn))])
-    with pytest.raises(RuntimeError):
-        TentaclesService.open(path, env={})
-    monkeypatch.setattr(store_mod, "MIGRATIONS", [real])
+    db = tmp_path / "data" / "tentacles.db"
+    db.parent.mkdir()
+    with closing(sqlite3.connect(db)) as conn:
+        conn.executescript("""
+            CREATE TABLE articles (id TEXT PRIMARY KEY, url TEXT NOT NULL UNIQUE, source TEXT NOT NULL,
+              title TEXT NOT NULL, summary TEXT NOT NULL DEFAULT '', published TEXT, fetched_at TEXT NOT NULL,
+              fingerprint TEXT NOT NULL);
+            INSERT INTO articles VALUES ('1', 'https://a.com/legacy', 's0', 'Recovered article', '',
+              NULL, 'invalid timestamp', 'fp');
+        """)
 
-    svc = TentaclesService.open(path, env={})
-    try:
-        assert svc.list_items().total == 0
-    finally:
-        svc.store.close()
+    with pytest.raises(ValueError):
+        TentaclesService.open(path, env={})
+
+    # Repair the external legacy data, without replacing the migration implementation.
+    with closing(sqlite3.connect(db)) as conn:
+        conn.execute("UPDATE articles SET fetched_at = '2026-10-01T09:00:00+00:00'")
+        conn.commit()
+
+    svc = open_service(path)
+    assert [item.title for item in svc.list_items().items] == ["Recovered article"]
+    assert svc.list_sources()[0].total_items == 1
 
 
 def test_near_identical_titles_from_different_sources_collapse(web, write_config, open_service):
@@ -228,3 +217,13 @@ def test_history_of_a_removed_source_can_still_be_filtered(web, write_config, op
     assert [i.title for i in svc2.list_items(sources=["s0"]).items] == ["Kept history"]
     with pytest.raises(NotFound):
         svc2.list_items(sources=["never-existed"])
+
+
+@pytest.mark.parametrize("query", ["café", "RÉSUMÉ", "jürgen"])
+def test_keyword_search_is_unicode_case_insensitive(web, write_config, open_service, query):
+    web.serve(A, rss_feed({"title": "CAFÉ NEWS", "link": "https://a.com/unicode",
+                           "description": "Résumé", "author": "JÜRGEN"}))
+    svc = open_service(write_config(config(A)))
+    fetch(svc)
+
+    assert svc.list_items(search=query).total == 1

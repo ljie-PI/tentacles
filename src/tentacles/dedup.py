@@ -1,5 +1,5 @@
 """Same-story deduplication: URL/fingerprint handled in the store, here we
-collapse near-identical titles that came from different outlets."""
+collapse near-identical titles within a batch and across different outlets."""
 
 from __future__ import annotations
 
@@ -64,7 +64,8 @@ def dedup_articles(articles: list[Item], threshold: float = 0.72) -> list[Item]:
 def split_similar(items: list[Item], titles: list[str],
                   threshold: float = 0.72) -> tuple[list[Item], list[Item]]:
     """Split items into (kept, similar): `similar` nearly match one of `titles`
-    (stories already seen from other outlets). Titles are tokenized once."""
+    (stories already seen from other outlets) or an earlier kept item in this
+    batch. Titles are tokenized once."""
     seen = [(s, _tokenize(s)) for s in titles]
     kept, similar = [], []
     for it in items:
@@ -73,4 +74,5 @@ def split_similar(items: list[Item], titles: list[str],
             similar.append(it)
         else:
             kept.append(it)
+            seen.append((it.title, tokens))
     return kept, similar

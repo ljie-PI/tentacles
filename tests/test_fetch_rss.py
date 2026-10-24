@@ -170,7 +170,7 @@ def test_runs_record_real_start_and_finish_times(web, write_config):
         svc.store.close()
 
 
-def test_a_series_of_similar_titles_in_one_feed_is_kept(web, write_config, open_service):
+def test_similar_titles_in_one_batch_keep_the_first_entry(web, write_config, open_service):
     web.serve(FEED, rss_feed(
         {"title": "Python 3.13.2 released", "link": "https://news.example.com/3132"},
         {"title": "Python 3.13.1 released", "link": "https://news.example.com/3131"},
@@ -179,7 +179,8 @@ def test_a_series_of_similar_titles_in_one_feed_is_kept(web, write_config, open_
 
     [outcome] = asyncio.run(svc.fetch_sources())
 
-    assert (outcome.new, outcome.dup) == (2, 0)
+    assert (outcome.new, outcome.dup) == (1, 1)
+    assert svc.list_items().items[0].title == "Python 3.13.2 released"
 
 
 def test_cancelled_fetch_marks_the_run_failed(web, write_config, open_service):
@@ -275,3 +276,180 @@ def test_an_empty_body_is_reported_as_not_a_feed(web, write_config, open_service
     [outcome] = asyncio.run(svc.fetch_sources())
 
     assert outcome.status == "error" and outcome.error.startswith("cannot parse feed")
+
+
+def test_description_only_feeds_retain_the_complete_body(web, write_config, open_service):
+    body = "x" * 2100 + "THE_END"
+    web.serve(FEED, rss_feed({"title": "Full article", "link": "https://news.example.com/full",
+                              "description": body}))
+    svc = open_service(write_config(rss_config()))
+
+    asyncio.run(svc.fetch_sources())
+    detail = svc.get_item(svc.list_items().items[0].id)
+
+    assert len(detail.summary) <= 2000
+    assert detail.content == body
+
+
+def test_guid_only_entries_without_a_link_are_kept_and_deduplicated(web, write_config, open_service):
+    web.serve(FEED, '''<rss version="2.0"><channel><title>News</title><item>
+        <title>Private bulletin</title><guid isPermaLink="false">internal-42</guid>
+        <description>Full bulletin body</description></item></channel></rss>''')
+    svc = open_service(write_config(rss_config()))
+
+    first = asyncio.run(svc.fetch_sources())[0]
+    second = asyncio.run(svc.fetch_sources())[0]
+
+    assert (first.new, second.new, second.dup) == (1, 0, 1)
+    detail = svc.get_item(svc.list_items().items[0].id)
+    assert detail.external_id == "internal-42"
+    assert detail.url == ""
+    assert detail.content == "Full bulletin body"
+
+
+def test_more_than_500_suppressed_entries_stay_suppressed_after_restart(web, write_config):
+    from datetime import datetime, timedelta, timezone
+    from tentacles.service import TentaclesService
+
+    now = [datetime(2026, 10, 25, tzinfo=timezone.utc)]
+    other = "https://other.example.org/rss"
+    for url, name in [(other, "other"), (FEED, "news")]:
+        web.serve(url, rss_feed(*[
+            {"title": f"Bulletin {i:06x}", "link": f"https://{name}.example.org/{i}",
+             "guid": f"{name}-{i}", "description": f"{name} coverage"}
+            for i in range(501)]))
+    path = write_config({"sources": [
+        {"id": "news", "type": "rss", "url": FEED, "schedule": "30m"},
+        {"id": "other", "type": "rss", "url": other, "schedule": "30m"}]})
+    svc = TentaclesService.open(path, transport=web.transport(), env={}, clock=lambda: now[0])
+    try:
+        assert asyncio.run(svc.fetch_sources(["other"]))[0].new == 501
+        first = asyncio.run(svc.fetch_sources(["news"]))[0]
+        assert (first.new, first.dup) == (0, 501)
+    finally:
+        asyncio.run(svc.aclose())
+
+    now[0] += timedelta(days=3)
+    svc = TentaclesService.open(path, transport=web.transport(), env={}, clock=lambda: now[0])
+    try:
+        after_restart = asyncio.run(svc.fetch_sources(["news"]))[0]
+        assert (after_restart.new, after_restart.dup) == (0, 501)
+    finally:
+        asyncio.run(svc.aclose())
+
+
+def test_similar_titles_in_different_batches_of_one_source_are_kept(web, write_config, open_service):
+    svc = open_service(write_config(rss_config()))
+    for version in ("3.13.2", "3.13.1"):
+        web.serve(FEED, rss_feed({"title": f"Python {version} released",
+                                  "link": f"https://news.example.com/{version}"}))
+        assert asyncio.run(svc.fetch_sources())[0].new == 1
+    assert svc.list_items().total == 2
+
+
+def test_repeated_entries_in_one_feed_do_not_suppress_the_first_copy(web, write_config, open_service):
+    entry = {"title": "A repeated headline", "link": "https://news.example.com/repeated", "guid": "same"}
+    web.serve(FEED, rss_feed(entry, entry))
+    svc = open_service(write_config(rss_config()))
+
+    result = asyncio.run(svc.fetch_sources())[0]
+
+    assert (result.new, result.dup, svc.list_items().total) == (1, 1, 1)
+
+
+def test_cancelling_a_blocked_insert_does_not_lose_source_counts(web, write_config, open_service):
+    import sqlite3
+    import threading
+    import pytest
+
+    svc = open_service(write_config(rss_config()))
+    locker = sqlite3.connect(svc.config.db_path, check_same_thread=False)
+    timers = []
+    first = True
+
+    def handler(request):
+        nonlocal first
+        if first:
+            first = False
+            locker.execute("BEGIN IMMEDIATE")
+            timer = threading.Timer(0.2, locker.commit)
+            timers.append(timer)
+            timer.start()
+            asyncio.get_running_loop().call_later(0.05, task.cancel)
+        return httpx.Response(200, content=rss_feed(
+            {"title": "A cancellation story", "link": "https://news.example.com/cancel"}).encode())
+
+    web.handle(FEED, handler)
+
+    async def cancel_fetch():
+        nonlocal task
+        task = asyncio.create_task(svc.fetch_sources())
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    task = None
+    try:
+        asyncio.run(cancel_fetch())
+        assert svc.list_items().total == 1
+        assert svc.list_sources()[0].total_items == 1
+        assert svc.list_runs()[0].status == "failed"
+        assert asyncio.run(svc.fetch_sources())[0].new == 0
+        assert svc.list_sources()[0].total_items == 1
+    finally:
+        for timer in timers:
+            timer.join()
+        locker.close()
+
+
+def test_cancelling_a_blocked_run_start_leaves_no_running_record(web, write_config, open_service):
+    import sqlite3
+    import threading
+    import pytest
+
+    svc = open_service(write_config(rss_config()))
+    locker = sqlite3.connect(svc.config.db_path, check_same_thread=False)
+    locker.execute("BEGIN IMMEDIATE")
+    timer = threading.Timer(0.2, locker.commit)
+    timer.start()
+
+    async def cancel_start():
+        task = asyncio.create_task(svc.fetch_sources())
+        await asyncio.sleep(0.05)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    try:
+        asyncio.run(cancel_start())
+        [run] = svc.list_runs()
+        assert run.status == "failed"
+    finally:
+        timer.join()
+        locker.close()
+
+
+def test_existing_skeleton_databases_keep_suppression_and_repair_counts(web, write_config, open_service, tmp_path):
+    import sqlite3
+    from pathlib import Path
+
+    db = tmp_path / "data" / "tentacles.db"
+    db.parent.mkdir()
+    conn = sqlite3.connect(db)
+    try:
+        conn.executescript((Path(__file__).parent / "fixtures" / "skeleton-v1.sql").read_text())
+    finally:
+        conn.close()
+    web.serve(FEED, '<rss version="2.0"><channel><title>News</title><item>'
+                    '<title>A suppressed bulletin</title><guid isPermaLink="false">remembered-guid</guid>'
+                    '<link>https://news.example.com/remembered</link></item></channel></rss>')
+    path = write_config({"sources": [
+        {"id": "news", "type": "rss", "url": FEED, "schedule": "1h"},
+        {"id": "other", "type": "rss", "url": "https://other.example.org/rss", "schedule": "1h"}]})
+    svc = open_service(path)
+
+    assert asyncio.run(svc.fetch_sources(["news"]))[0].new == 0
+    assert svc.list_items().total == 1
+    assert {s.id: s.total_items for s in svc.list_sources()} == {"news": 0, "other": 1}
+    asyncio.run(svc.aclose())
+    reopened = open_service(path)
+    assert asyncio.run(reopened.fetch_sources(["news"]))[0].new == 0

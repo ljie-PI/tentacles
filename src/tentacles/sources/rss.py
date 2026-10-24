@@ -56,7 +56,7 @@ def _entry_published(entry) -> datetime | None:
 def entry_to_item(entry, source_id: str) -> Item | None:
     link = (entry.get("link") or "").strip()
     title = (entry.get("title") or "").strip()
-    if not link or not title:
+    if not title or not (link or entry.get("id")):
         return None
     content = entry.content[0].value if entry.get("content") else ""
     summary = entry.get("summary") or entry.get("description") or content
@@ -68,7 +68,7 @@ def entry_to_item(entry, source_id: str) -> Item | None:
         title=title,
         author=entry.get("author") or "",
         summary=truncate(html_to_text(summary), 2000),
-        content=html_to_text(content),
+        content=html_to_text(content or summary),
         published=_entry_published(entry),
     )
 
