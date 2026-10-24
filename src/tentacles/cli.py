@@ -22,6 +22,7 @@ import typer
 from pydantic import BaseModel
 from rich.console import Console
 from rich.markup import escape
+from rich.markdown import Markdown
 from rich.table import Table
 from rich.text import Text
 try:  # typer >= 0.27 内置 click；更早的版本依赖外部 click
@@ -30,7 +31,7 @@ except ImportError:  # pragma: no cover
     from click.exceptions import ClickException, UsageError  # type: ignore[no-redef]
 from typer.core import TyperGroup
 
-from tentacles.errors import TentaclesError, exit_code
+from tentacles.errors import ConfigError, TentaclesError, exit_code
 from tentacles.service import TentaclesService
 
 # 与 click 布尔参数的环境变量取值保持一致
@@ -78,6 +79,8 @@ items_app = typer.Typer(help="条目", no_args_is_help=True, cls=_JsonErrorsGrou
 runs_app = typer.Typer(help="运行记录", no_args_is_help=True, cls=_JsonErrorsGroup)
 scheduler_app = typer.Typer(help="调度器", no_args_is_help=True, cls=_JsonErrorsGroup)
 models_app = typer.Typer(help="命名模型", no_args_is_help=True, cls=_JsonErrorsGroup)
+persona_app = typer.Typer(help="Persona 与版本管理", no_args_is_help=True, cls=_JsonErrorsGroup)
+app.add_typer(persona_app, name="persona")
 app.add_typer(models_app, name="models")
 app.add_typer(scheduler_app, name="scheduler")
 app.add_typer(config_app, name="config")
@@ -179,6 +182,92 @@ def config_check(ctx: typer.Context) -> None:
     """校验配置文件。"""
     _run(ctx, lambda s: s.check_config(),
          lambda r, out, when: out.print(f"[green]ok[/green] {escape(r.path)}（{r.sources} 个信息源）"))
+
+
+# ---- persona ----------------------------------------------------------------
+
+def _render_persona(view, out: Console, when: TimeFmt) -> None:
+    out.print(Text(f"{view.name} v{view.version} · {view.source} · {when(view.created_at)}", style="bold"))
+    out.print(Markdown(view.profile))
+    out.print(Text(f"include: {', '.join(view.include)}\nexclude: {', '.join(view.exclude)}"))
+    if view.tags:
+        out.print(_table("Interest tags", ["tag", "description"],
+                         [[tag.tag, tag.description] for tag in view.tags]))
+    if view.note:
+        out.print(Text(view.note))
+    if view.tag_error:
+        out.print(Text(view.tag_error, style="yellow"))
+
+
+@persona_app.command("list")
+def persona_list(ctx: typer.Context) -> None:
+    """列出每个 persona 的最新版本。"""
+    _run(ctx, lambda s: s.list_personas(), lambda rows, out, when: out.print(_table(
+        "Personas", ["name", "version", "source", "created", "tags", "tag status"],
+        [[r.name, r.version, r.source, when(r.created_at), len(r.tags), r.tag_status] for r in rows])))
+
+
+@persona_app.command("show")
+def persona_show(ctx: typer.Context, name: str = typer.Argument(...),
+                 version: Optional[int] = typer.Option(None, min=1)) -> None:
+    """查看最新或指定版本的完整内容。"""
+    _run(ctx, lambda s: s.get_persona(name, version), _render_persona)
+
+
+@persona_app.command("history")
+def persona_history(ctx: typer.Context, name: str = typer.Argument(...)) -> None:
+    """按版本号倒序列出历史。"""
+    _run(ctx, lambda s: s.persona_history(name), lambda rows, out, when: out.print(_table(
+        "Persona history", ["version", "source", "created", "note", "tag status"],
+        [[r.version, r.source, when(r.created_at), r.note, r.tag_status] for r in rows])))
+
+
+@persona_app.command("export")
+def persona_export(ctx: typer.Context, name: str = typer.Argument(...),
+                   version: Optional[int] = typer.Option(None, min=1)) -> None:
+    """导出完整 YAML 版本快照；JSON 模式返回一个包含 YAML 的字符串。"""
+    _run(ctx, lambda s: s.export_persona(name, version),
+         lambda content, out, when: typer.echo(content, nl=False))
+
+
+@persona_app.command("set")
+def persona_set(
+    ctx: typer.Context,
+    name: str = typer.Argument(...),
+    text: Optional[str] = typer.Option(None, "--text", help="替换 profile 的文本"),
+    profile_file: Optional[Path] = typer.Option(None, "--file", help="UTF-8 profile 文件；- 表示标准输入"),
+    stdin: bool = typer.Option(False, "--stdin", help="从标准输入读取 profile"),
+    include: Optional[list[str]] = typer.Option(None, "--include", help="增加 include 关键词，可重复"),
+    remove_include: Optional[list[str]] = typer.Option(None, "--remove-include", help="删除 include 关键词，可重复"),
+    exclude: Optional[list[str]] = typer.Option(None, "--exclude", help="增加 exclude 关键词，可重复"),
+    remove_exclude: Optional[list[str]] = typer.Option(None, "--remove-exclude", help="删除 exclude 关键词，可重复"),
+    note: Optional[str] = typer.Option(None, help="版本备注"),
+    skip_tags: bool = typer.Option(False, help="跳过标签模型调用，保留已有标签"),
+) -> None:
+    """修改或创建 persona；成功后写成新版本。"""
+    def apply(service: TentaclesService):
+        if sum((text is not None, profile_file is not None, stdin)) > 1:
+            raise ConfigError('choose only one of --text, --file or --stdin')
+        profile = text
+        if stdin or profile_file == Path('-'):
+            profile = sys.stdin.read()
+        elif profile_file is not None:
+            try:
+                profile = profile_file.read_text(encoding='utf-8')
+            except (OSError, UnicodeError):
+                raise ConfigError(f'cannot read UTF-8 profile file {profile_file}') from None
+        return service.set_persona(name, profile=profile, include_add=include, include_remove=remove_include,
+                                   exclude_add=exclude, exclude_remove=remove_exclude,
+                                   note=note, skip_tags=skip_tags)
+    _run(ctx, apply, _render_persona)
+
+
+@persona_app.command("rollback")
+def persona_rollback(ctx: typer.Context, name: str = typer.Argument(...),
+                     version: int = typer.Argument(..., min=1),
+                     note: Optional[str] = typer.Option(None)) -> None:
+    """复制旧内容为新版本，不删除历史，也不重新抽取标签。"""
+    _run(ctx, lambda s: s.rollback_persona(name, version, note=note), _render_persona)
 
 
 # ---- models -----------------------------------------------------------------

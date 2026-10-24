@@ -2,7 +2,7 @@
 
 个人信息与新闻管理系统：从多种信息源抓取内容，按个人 persona 过滤，再用 LLM 加工成日报、深度报道或邮件简报。整体设计见 [#18](https://github.com/ljie-PI/tentacles/issues/18)，实施进度见它的子 issue。
 
-> 目前已完成骨架：配置驱动的 RSS 抓取、去重入库、条目查询、运行记录、持久化调度和命名模型注册表/连通性测试。persona、过滤、LLM 处理、邮件和网页源、Web 端将陆续加入。
+> 目前已完成骨架：配置驱动的 RSS 抓取、去重入库、条目查询、运行记录、持久化调度、命名模型注册表/连通性测试和版本化 Persona 管理。过滤、LLM 处理、邮件和网页源、Web 端将陆续加入。
 
 ## 快速开始
 
@@ -31,6 +31,9 @@ tentacles items list --since 24h  # 查看最近 24 小时的条目
 | `tentacles config check` | 校验配置 |
 | `tentacles models list` | 列出命名模型，不泄露密钥 |
 | `tentacles models test NAME` | 实际调用模型，返回可用性、延迟、样例和用量 |
+| `tentacles persona list/show/history/export` | 查看 Persona、版本历史或导出完整 YAML 快照 |
+| `tentacles persona set NAME` | 从文本/文件/stdin 修改 profile 和关键词，可跳过标签抽取 |
+| `tentacles persona rollback NAME VERSION` | 复制旧内容为新版本，不删除历史 |
 | `tentacles sources list` | 列出信息源及其抓取状态 |
 | `tentacles sources fetch [ID...]` | 立即抓取信息源，不写 ID 时抓取全部启用的源 |
 | `tentacles items list` | 列出条目，可按来源、时间、关键词筛选，支持分页 |
@@ -55,6 +58,31 @@ tentacles items list --since 24h  # 查看最近 24 小时的条目
 OpenAI 兼容接口使用 `provider: openai` 和服务的 API 根路径 `base_url`（如 `http://localhost:11434/v1`）；
 Anthropic 使用 `provider: anthropic`，OpenRouter 用 `provider: openrouter`。
 详细字段、重试规则和 JSON 输出见 [agent 命令说明](docs/agent-cli.md)。
+
+## Persona 与兴趣标签
+
+配置里的 `personas` 是初始种子，每项的 `profile`（内联文本）和 `profile_file`（UTF-8 文件）二选一。
+同名 persona 已存在时，启动会忽略种子内容及文件；数据库是唯一来源。启动导入不调用模型。
+
+```sh
+tentacles persona list
+tentacles persona show default
+tentacles persona set default --file ./my-interests.md --note "调整优先级"
+tentacles persona set default --include 机器人 --remove-exclude 科学 --note "更新关键词"
+cat ./my-interests.md | tentacles persona set work --stdin --skip-tags
+tentacles persona history default
+tentacles persona rollback default 1 --note "恢复初始方向"
+tentacles persona export default > default-snapshot.yaml
+```
+
+`set` 修改 profile 时使用 `persona` 阶段的模型抽取 5–20 个按优先级排序的标签；
+已有标签会提供给模型，语义相同应保留旧名。模型失败或标签无效时，profile 修改仍会保存，
+旧标签保持不变，版本和运行记录中标记降级。`--skip-tags` 明确禁止本次模型调用；
+仅修改关键词/备注或 profile 未变化时也不会调用模型。
+
+关键词去重/删除不区分大小写（Unicode casefold），保留最早的拼写和顺序。
+每次编辑写成新版本；回滚同样追加版本。并发关键词编辑会合并；慢速标签抽取期间如果 persona 已被修改，
+旧结果返回 `conflict`，请刷新后重试。导出的是完整版本快照，不是只有 profile 的文本，也不会直接覆盖任何文件。
 
 ## 自动抓取
 

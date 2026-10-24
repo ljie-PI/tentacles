@@ -21,6 +21,7 @@ from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, ValidationError,
 from tentacles.errors import ConfigError, NotFound
 from tentacles.schedule import Schedule
 from tentacles.llm.config import Defaults, ModelSpec, STAGES
+from tentacles.personas.models import PersonaSeed, persona_name
 
 DEFAULT_CONFIG = Path("config") / "tentacles.yaml"
 _ENV_REF = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}")
@@ -73,6 +74,7 @@ class AppConfig(BaseModel):
     sources: list[SourceSpec] = Field(default_factory=list)
     models: dict[str, ModelSpec] = Field(default_factory=dict)
     defaults: Defaults = Field(default_factory=Defaults)
+    personas: dict[str, PersonaSeed] = Field(default_factory=dict)
 
     _path: Path = PrivateAttr(default=Path(DEFAULT_CONFIG))
 
@@ -168,6 +170,9 @@ def load_config(path: Path | str | None = None, *, env: Mapping[str, str] | None
     config._path = config_path
     _check_sources(config)
     _check_models(config)
+    for name in config.personas:
+        if persona_name(name) != name:
+            raise ConfigError('personas: names must not have leading or trailing whitespace')
     return config
 
 
