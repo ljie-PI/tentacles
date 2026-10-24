@@ -1,15 +1,21 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+build/
+dist/
+.pytest_cache/
+.ruff_cache/
+
+# Env & data
+.env
+data/
+reports/
+*.log
+
+# IDE
 .idea/
 *.swp
-.gradle
-.gradletasknamecache
-build/
-*.class
-
-*.jar
-*.war
-*.ear
-
-*.working
-data/
-*.log
-hs_err_pid*
+.DS_Store
