@@ -246,3 +246,123 @@ def test_cancellation_releases_lease_and_records_failure(write_config):
             await service.aclose()
 
     asyncio.run(scenario())
+
+
+def test_a_lease_acquisition_failure_does_not_abort_other_sources(write_config):
+    import sqlite3
+    path = write_config(sources('1h', '1h'))
+    service = TentaclesService.open(path, clock=Clock(),
+        transport=httpx.MockTransport(lambda r: httpx.Response(200, text=rss_feed())))
+    connection = sqlite3.connect(service.config.db_path)
+    connection.executescript("""
+        CREATE TRIGGER reject_first_run BEFORE INSERT ON runs WHEN NEW.target = 'n0'
+        BEGIN SELECT RAISE(ABORT, 'test acquisition failure'); END;
+    """)
+
+    async def scenario():
+        try:
+            outcomes = {r.source_id: r for r in await service.tick()}
+            assert outcomes['n0'].status == 'error'
+            assert 'test acquisition failure' in outcomes['n0'].error
+            assert outcomes['n1'].status == 'ok'
+        finally:
+            connection.close()
+            await service.aclose()
+
+    asyncio.run(scenario())
+
+
+def test_completed_run_survives_interrupted_lease_release_without_early_rerun(write_config):
+    import sqlite3
+    clock = Clock()
+    path = write_config(sources('2w'))
+    transport = httpx.MockTransport(lambda r: httpx.Response(200, text=rss_feed()))
+
+    async def scenario():
+        service = TentaclesService.open(path, transport=transport, clock=clock)
+        connection = sqlite3.connect(service.config.db_path)
+        # Simulate the historical crash window: the successful run is durable,
+        # but its scheduler update is lost. Assertions remain at the Service seam.
+        connection.executescript("""
+            CREATE TRIGGER interrupt_release BEFORE UPDATE OF last_run_at ON task_state
+            BEGIN SELECT RAISE(IGNORE); END;
+        """)
+        try:
+            assert (await service.tick())[0].status == 'ok'
+            assert service.list_runs()[0].status == 'ok'
+        finally:
+            connection.execute('DROP TRIGGER interrupt_release')
+            connection.close()
+            await service.aclose()
+        clock.now += timedelta(hours=1)
+        service = TentaclesService.open(path, transport=transport, clock=clock)
+        try:
+            assert await service.tick() == []
+            [state] = service.scheduler_status()
+            assert state.last_run_at == datetime(2026, 10, 25, 0, 10, tzinfo=timezone.utc)
+            assert state.next_run_at == datetime(2026, 11, 8, 0, 10, tzinfo=timezone.utc)
+            assert state.last_status == 'ok' and not state.running
+            assert len(service.list_runs()) == 1
+        finally:
+            await service.aclose()
+
+    asyncio.run(scenario())
+
+
+def test_task_release_errors_are_isolated_and_completion_is_atomic(write_config):
+    import sqlite3
+    clock = Clock()
+    service = TentaclesService.open(write_config(sources('1h', '1h')), clock=clock,
+        transport=httpx.MockTransport(lambda r: httpx.Response(200, text=rss_feed())))
+    connection = sqlite3.connect(service.config.db_path)
+    connection.executescript("""
+        CREATE TRIGGER reject_completion BEFORE UPDATE OF last_run_at ON task_state
+        WHEN NEW.target = 'n0'
+        BEGIN SELECT RAISE(ABORT, 'test completion failure'); END;
+    """)
+
+    async def scenario():
+        try:
+            outcomes = {r.source_id: r for r in await service.tick()}
+            assert outcomes['n0'].status == 'error'
+            assert outcomes['n1'].status == 'ok'
+            # A cursor/run success cannot commit without advancing scheduling state.
+            runs = {r.target: r for r in service.list_runs()}
+            assert runs['n0'].status != 'ok'
+            assert runs['n1'].status == 'ok'
+        finally:
+            connection.close()
+            await service.aclose()
+
+    asyncio.run(scenario())
+
+
+def test_completion_failure_does_not_replace_cancellation(write_config):
+    import sqlite3
+    import pytest
+
+    async def scenario():
+        entered = asyncio.Event()
+
+        async def respond(request):
+            entered.set()
+            await asyncio.Event().wait()
+
+        service = TentaclesService.open(write_config(sources('1h')), clock=Clock(),
+                                        transport=httpx.MockTransport(respond))
+        connection = sqlite3.connect(service.config.db_path)
+        connection.executescript("""
+            CREATE TRIGGER reject_completion BEFORE UPDATE OF last_run_at ON task_state
+            BEGIN SELECT RAISE(ABORT, 'test completion failure'); END;
+        """)
+        try:
+            active = asyncio.create_task(service.tick())
+            await asyncio.wait_for(entered.wait(), 2)
+            active.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await active
+        finally:
+            connection.close()
+            await service.aclose()
+
+    asyncio.run(scenario())

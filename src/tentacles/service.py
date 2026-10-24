@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from datetime import datetime
 from pathlib import Path
 from typing import Callable, Mapping
@@ -20,6 +21,8 @@ from tentacles.asyncutil import run_store_call
 from tentacles.store import ItemQuery, Store
 from tentacles.timeutil import parse_since, utcnow, to_utc
 from tentacles.tasks import Task
+
+log = logging.getLogger(__name__)
 
 FETCH_CONCURRENCY = 4
 
@@ -99,17 +102,37 @@ class TentaclesService:
     async def _fetch_task(self, spec: SourceSpec, http: HttpPool, *, due_only: bool) -> FetchOutcome | None:
         task = self._tasks[spec.id]
         token, started_at = uuid4().hex, to_utc(self._clock())
+        outcome: FetchOutcome | None = None
+        failure: Exception | None = None
+        run_id, needs_cleanup = 0, True
         try:
             claim = await run_store_call(self.store.claim_task, task, token, started_at,
-                                      force=not due_only)
-            if claim.status == 'not_due':
-                return None
-            if claim.status == 'busy':
-                return FetchOutcome(source_id=spec.id, run_id=0, status='busy', new=0, dup=0)
-            return await fetch_source(spec, store=self.store, http=http, clock=self._clock,
-                                      run_id=claim.run_id, started_at=started_at)
+                                         force=not due_only)
+            if claim.status != 'ready':
+                needs_cleanup = False
+                if claim.status == 'busy':
+                    outcome = FetchOutcome(source_id=spec.id, run_id=0, status='busy', new=0, dup=0)
+            else:
+                run_id = claim.run_id or 0
+                outcome = await fetch_source(spec, store=self.store, http=http, clock=self._clock,
+                                             run_id=claim.run_id, started_at=started_at)
+        except Exception as exc:
+            failure = exc
         finally:
-            await run_store_call(self.store.finish_task, task, token, to_utc(self._clock()))
+            if needs_cleanup:
+                try:
+                    # The token is known even if cancellation arrived after acquisition committed.
+                    await run_store_call(self.store.finish_task, task, token, to_utc(self._clock()))
+                except Exception as exc:
+                    log.warning('could not finish task %s: %s', spec.id, exc)
+                    failure = failure or exc
+        if failure is not None:
+            error = f'{type(failure).__name__}: {failure}'
+            log.warning('fetch %s failed: %s', spec.id, error)
+            return FetchOutcome(source_id=spec.id, run_id=run_id, status='error',
+                                new=outcome.new if outcome else 0, dup=outcome.dup if outcome else 0,
+                                error=error, stats=outcome.stats if outcome else {})
+        return outcome
 
     async def _fetch_batch(self, specs: list[SourceSpec], *, due_only: bool) -> list[FetchOutcome]:
         sem = asyncio.Semaphore(FETCH_CONCURRENCY)

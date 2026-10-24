@@ -48,26 +48,24 @@ class Cron:
     days: tuple[int, ...]
     months: tuple[int, ...]
     weekdays: tuple[int, ...]
-    any_day: bool
-    any_weekday: bool
+    day_wildcard: bool
+    weekday_wildcard: bool
 
     def matches_day(self, day: date) -> bool:
         if day.month not in self.months:
             return False
         dom = day.day in self.days
         dow = (day.weekday() + 1) % 7 in self.weekdays
-        if self.any_day:
-            return dow
-        if self.any_weekday:
-            return dom
+        if self.day_wildcard or self.weekday_wildcard:
+            return dom and dow
         return dom or dow
 
     def next_after(self, after: datetime, zone: ZoneInfo) -> datetime:
         after = to_utc(after)
         day = after.astimezone(zone).date()
-        # The longest gap for a valid calendar date is eight years (Feb 29
-        # over a non-leap century). Never silently accept impossible dates.
-        for _ in range(366 * 8 + 1):
+        # Calendar dates/weekday combinations repeat over the Gregorian 400-year
+        # cycle. Wildcard steps can AND a leap day with a subset of weekdays.
+        for _ in range(366 * 400 + 1):
             if self.matches_day(day):
                 earliest: datetime | None = None
                 for hour in self.hours:
@@ -113,9 +111,9 @@ class Schedule:
             _field_values(minute, 0, 59), _field_values(hour, 0, 23),
             _field_values(day, 1, 31), _field_values(month, 1, 12),
             tuple(sorted({d % 7 for d in _field_values(weekday, 0, 7)})),
-            day == '*', weekday == '*',
+            day.startswith('*'), weekday.startswith('*'),
         )
-        if cron.any_weekday and not cron.any_day and not any(
+        if (cron.day_wildcard or cron.weekday_wildcard) and not any(
                 d <= calendar.monthrange(2000, m)[1] for m in cron.months for d in cron.days):
             raise ValueError('cron has no possible calendar date')
         return cls(cron=cron)

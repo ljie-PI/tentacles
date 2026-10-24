@@ -181,6 +181,8 @@ class Store:
             self._conn.executemany(
                 "INSERT OR IGNORE INTO task_state (kind, target, first_seen_at) VALUES (?, ?, ?)",
                 [(task.kind, task.target, to_iso(now)) for task in tasks])
+            for task in tasks:
+                self._reconcile_completed_task(task)
 
     def get_task_state(self, task: Task) -> TaskState:
         with self._lock:
@@ -196,7 +198,7 @@ class Store:
         """Serialize the due check, lease acquisition and run creation across processes."""
         with self._lock, self._conn:
             self._conn.execute("BEGIN IMMEDIATE")
-            state = self.get_task_state(task)
+            state = self._reconcile_completed_task(task)
             if state.running(now):
                 return Claim('busy')
             # An abandoned run is retried once its lease expires, even for a long interval.
@@ -235,11 +237,26 @@ class Store:
                         " last_fetch_at = excluded.last_fetch_at, last_status = excluded.last_status,"
                         " last_error = excluded.last_error",
                         (task.target, to_iso(state.started_at), error))
-            self._conn.execute(
-                "UPDATE task_state SET last_run_at = started_at, last_status = ?, last_error = ?,"
-                " token = NULL, lease_until = NULL, started_at = NULL, run_id = NULL"
-                " WHERE kind = ? AND target = ? AND token = ?",
-                ('ok' if status == 'ok' else 'error', error, task.kind, task.target, token))
+            assert state.run_id is not None
+            self._complete_task_run(state.run_id, status, error)
+
+    def _complete_task_run(self, run_id: int, status: str, error: str | None) -> None:
+        """Advance scheduling alongside run/cursor completion in the caller's transaction."""
+        self._conn.execute(
+            "UPDATE task_state SET last_run_at = started_at, last_status = ?, last_error = ?,"
+            " token = NULL, lease_until = NULL, started_at = NULL, run_id = NULL WHERE run_id = ?",
+            ('ok' if status == 'ok' else 'error', error, run_id))
+
+    def _reconcile_completed_task(self, task: Task) -> TaskState:
+        state = self.get_task_state(task)
+        if state.token is not None and state.run_id is not None:
+            run = self._conn.execute("SELECT status, error FROM runs WHERE id = ?",
+                                     (state.run_id,)).fetchone()
+            if run is not None and run['status'] != 'running':
+                # Repair a terminal run left with a lease by an interrupted older writer.
+                self._complete_task_run(state.run_id, run['status'], run['error'])
+                state = self.get_task_state(task)
+        return state
 
     # ---- items -------------------------------------------------------------
 
@@ -372,6 +389,7 @@ class Store:
                  st.last_status, st.last_error, st.total_items),
             )
             self._finish_run(run_id, status="ok", now=now, stats=stats)
+            self._complete_task_run(run_id, 'ok', None)
 
     def save_fetch_failure(self, source_id: str, run_id: int | None, *, started_at: datetime,
                            finished_at: datetime, error: str) -> None:
@@ -387,6 +405,7 @@ class Store:
                 " last_error = excluded.last_error", (source_id, to_iso(started_at), error))
             if run_id is not None:
                 self._finish_run(run_id, status="failed", now=finished_at, error=error)
+                self._complete_task_run(run_id, 'failed', error)
 
     # ---- runs ---------------------------------------------------------------
 
