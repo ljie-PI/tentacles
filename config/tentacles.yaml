@@ -11,7 +11,7 @@ app:
   reports_dir: ../reports     # 报告输出目录
 
 # 信息源。通用字段：id（唯一）、type、schedule（抓取频率：30m / 2h / 1d 等间隔，
-# 或 5 段 cron 表达式）、name（可选显示名）、enabled（默认 true）。
+# 或 @hourly/@daily/@weekly、5 段 cron 表达式）、name（可选显示名）、enabled（默认 true）。
 #
 # type: rss 的选项：
 #   url            RSS/Atom 地址（必填）

@@ -19,23 +19,10 @@ from dotenv import dotenv_values
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, ValidationError, field_validator
 
 from tentacles.errors import ConfigError, NotFound
-from tentacles.timeutil import is_duration
+from tentacles.schedule import Schedule
 
 DEFAULT_CONFIG = Path("config") / "tentacles.yaml"
 _ENV_REF = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}")
-_CRON_FIELD = re.compile(r"^[\d*/,-]+$")
-_SCHEDULE_ALIASES = {"@hourly", "@daily", "@weekly"}
-
-
-def check_schedule_shape(expr: str) -> str:
-    """Interval (30m), alias (@daily) or 5 cron fields; cron semantics are checked by the scheduler."""
-    expr = expr.strip()
-    fields = expr.split()
-    if is_duration(expr) or expr in _SCHEDULE_ALIASES or (
-            len(fields) == 5 and all(_CRON_FIELD.match(f) for f in fields)):
-        return expr
-    raise ValueError(f"invalid schedule {expr!r}: use an interval like 30m/2h/1d, "
-                     "@hourly/@daily/@weekly, or a 5-field cron expression")
 
 
 class AppSpec(BaseModel):
@@ -70,7 +57,8 @@ class SourceSpec(BaseModel):
     @field_validator("schedule")
     @classmethod
     def _schedule(cls, v: str) -> str:
-        return check_schedule_shape(v)
+        Schedule.parse(v)
+        return v.strip()
 
     @property
     def options(self) -> dict[str, Any]:

@@ -36,16 +36,29 @@ class SourceView(BaseModel):
     last_status: str | None
     last_error: str | None
     total_items: int
+    next_run_at: datetime | None = None
 
 
 class FetchOutcome(BaseModel):
     source_id: str
     run_id: int
-    status: Literal["ok", "error"]
+    status: Literal["ok", "error", "busy"]
     new: int
     dup: int
     error: str | None = None
     stats: dict[str, Any] = {}
+
+
+class TaskView(BaseModel):
+    kind: str
+    target: str
+    schedule: str
+    enabled: bool
+    last_run_at: datetime | None
+    next_run_at: datetime | None
+    running: bool
+    last_status: str | None
+    last_error: str | None
 
 
 class ItemView(BaseModel):

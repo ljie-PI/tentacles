@@ -171,3 +171,17 @@ def test_missing_subcommands_are_json_errors(write_config, group, env_mode):
     assert result.exit_code == 2
     assert payload(result)["error"]["code"] == "invalid"
     assert "Usage:" not in result.stdout
+
+
+def test_scheduler_commands_are_json_and_show_next_run(cli, web):
+    web.serve(FEED, rss_feed())
+    [task] = payload(cli('scheduler', 'status'))
+    assert task['kind'] == 'fetch' and task['target'] == 'news'
+    assert task['next_run_at'] and task['last_run_at'] is None
+    assert payload(cli('tick'))[0]['status'] == 'ok'
+    assert payload(cli('tick')) == []
+    [task] = payload(cli('scheduler', 'status'))
+    assert task['last_run_at'] and task['last_status'] == 'ok' and not task['running']
+    assert payload(cli('sources', 'list'))[0]['next_run_at'] == task['next_run_at']
+    assert 'next' in cli('sources', 'list', json_mode=False).stdout
+    assert cli('scheduler', 'status', json_mode=False).exit_code == 0
