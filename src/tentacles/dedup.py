@@ -6,7 +6,7 @@ from __future__ import annotations
 import re
 from difflib import SequenceMatcher
 
-from tentacles.models import Article
+from tentacles.models import Item
 
 _PUNCT = re.compile(r"[\s\W]+", re.UNICODE)
 
@@ -46,9 +46,9 @@ def title_similarity(a: str, b: str) -> float:
     return 0.7 * jaccard + 0.3 * ratio
 
 
-def dedup_articles(articles: list[Article], threshold: float = 0.72) -> list[Article]:
+def dedup_articles(articles: list[Item], threshold: float = 0.72) -> list[Item]:
     """保留每次出现的第一条，丢弃与其后出现标题高度相似的文章。"""
-    kept: list[Article] = []
+    kept: list[Item] = []
     titles: list[str] = []
     for article in articles:
         if any(title_similarity(article.title, seen) >= threshold for seen in titles):

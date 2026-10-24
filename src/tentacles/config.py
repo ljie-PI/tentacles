@@ -1,43 +1,168 @@
-"""Settings (env-driven) and feed list loading."""
+"""Single YAML config: loading, ${ENV} interpolation and validation.
+
+Every error is a ConfigError whose message names the offending location in the
+file, e.g. ``sources[1].url``. Relative paths resolve against the directory the
+config file lives in.
+"""
 
 from __future__ import annotations
 
-from functools import lru_cache
+import os
+import re
+from collections.abc import Mapping, Sequence
 from pathlib import Path
+from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import yaml
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from dotenv import dotenv_values
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, ValidationError, field_validator
 
-ROOT_DIR = Path(__file__).resolve().parent.parent.parent
+from tentacles.errors import ConfigError, NotFound
 
-
-class Settings(BaseSettings):
-    model_config = SettingsConfigDict(
-        env_prefix="TENTACLES_", env_file=".env", extra="ignore"
-    )
-
-    llm_api_key: str = ""
-    llm_base_url: str = "https://api.openai.com/v1"
-    llm_model: str = "gpt-4o-mini"
-
-    db_path: Path = ROOT_DIR / "data" / "tentacles.db"
-    reports_dir: Path = ROOT_DIR / "reports"
-    feeds_file: Path = ROOT_DIR / "feeds.yaml"
-
-    fetch_timeout: float = 30.0
-    daily_hours: int = 24        # 日报覆盖最近多少小时的文章
+DEFAULT_CONFIG = Path("config") / "tentacles.yaml"
+_ENV_REF = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}")
 
 
-@lru_cache
-def get_settings() -> Settings:
-    return Settings()
+class AppSpec(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    timezone: str = "Asia/Shanghai"
+    data_dir: Path = Path("../data")
+    reports_dir: Path = Path("../reports")
+
+    @field_validator("timezone")
+    @classmethod
+    def _known_zone(cls, v: str) -> str:
+        try:
+            ZoneInfo(v)
+        except (ZoneInfoNotFoundError, ValueError):
+            raise ValueError(f"unknown timezone {v!r}")
+        return v
 
 
-def load_feeds(path: Path | None = None) -> dict[str, str]:
-    """feeds.yaml -> {feed 名称: feed URL}"""
-    path = path or get_settings().feeds_file
-    if not path.exists():
-        raise FileNotFoundError(f"feeds file not found: {path}")
-    with open(path, encoding="utf-8") as f:
-        data = yaml.safe_load(f) or {}
-    return {name: str(url) for name, url in data.get("feeds", {}).items()}
+class SourceSpec(BaseModel):
+    """Fields common to every source; type-specific options stay in the extras
+    and are validated by the source type's own options model."""
+
+    model_config = ConfigDict(extra="allow")
+
+    id: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
+    type: str
+    schedule: str
+    name: str | None = None
+    enabled: bool = True
+
+    @property
+    def options(self) -> dict[str, Any]:
+        return dict(self.model_extra or {})
+
+
+class AppConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    app: AppSpec = Field(default_factory=AppSpec)
+    sources: list[SourceSpec] = Field(default_factory=list)
+
+    _path: Path = PrivateAttr(default=Path(DEFAULT_CONFIG))
+
+    @property
+    def path(self) -> Path:
+        return self._path
+
+    def resolve(self, p: Path) -> Path:
+        return p if p.is_absolute() else (self._path.parent / p).resolve()
+
+    @property
+    def data_dir(self) -> Path:
+        return self.resolve(self.app.data_dir)
+
+    @property
+    def reports_dir(self) -> Path:
+        return self.resolve(self.app.reports_dir)
+
+    @property
+    def db_path(self) -> Path:
+        return self.data_dir / "tentacles.db"
+
+    def source(self, source_id: str) -> SourceSpec:
+        for s in self.sources:
+            if s.id == source_id:
+                return s
+        raise NotFound(f"unknown source {source_id!r}")
+
+
+def format_loc(loc: Sequence[str | int]) -> str:
+    out = ""
+    for part in loc:
+        out += f"[{part}]" if isinstance(part, int) else (f".{part}" if out else str(part))
+    return out or "<root>"
+
+
+def interpolate(obj: Any, env: Mapping[str, str], where: str = "") -> Any:
+    """Replace ${VAR} / ${VAR:-default} in every string, recursively."""
+    if isinstance(obj, str):
+        def sub(m: re.Match) -> str:
+            name, default = m.group(1), m.group(2)
+            if name in env:
+                return env[name]
+            if default is not None:
+                return default
+            raise ConfigError(f"missing env {name} at {where or '<root>'}")
+        return _ENV_REF.sub(sub, obj)
+    if isinstance(obj, dict):
+        return {k: interpolate(v, env, f"{where}.{k}" if where else str(k)) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [interpolate(v, env, f"{where}[{i}]") for i, v in enumerate(obj)]
+    return obj
+
+
+def find_config(path: Path | str | None = None, env: Mapping[str, str] | None = None) -> Path:
+    env = os.environ if env is None else env
+    chosen = Path(path) if path else Path(env["TENTACLES_CONFIG"]) if env.get("TENTACLES_CONFIG") \
+        else DEFAULT_CONFIG
+    return chosen.expanduser().resolve()
+
+
+def _load_env(config_path: Path, env: Mapping[str, str] | None) -> dict[str, str]:
+    """Process env wins over .env files (next to the config, then one level up)."""
+    merged: dict[str, str] = {}
+    for d in (config_path.parent.parent, config_path.parent):
+        f = d / ".env"
+        if f.is_file():
+            merged.update({k: v for k, v in dotenv_values(f).items() if v is not None})
+    merged.update(os.environ if env is None else env)
+    return merged
+
+
+def load_config(path: Path | str | None = None, *, env: Mapping[str, str] | None = None) -> AppConfig:
+    config_path = find_config(path, env)
+    if not config_path.is_file():
+        raise ConfigError(f"config file not found: {config_path}")
+    try:
+        raw = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+    except yaml.YAMLError as exc:
+        raise ConfigError(f"invalid YAML in {config_path}: {exc}") from exc
+    if not isinstance(raw, dict):
+        raise ConfigError(f"{config_path}: top level must be a mapping")
+
+    data = interpolate(raw, _load_env(config_path, env))
+    try:
+        config = AppConfig.model_validate(data)
+    except ValidationError as exc:
+        err = exc.errors()[0]
+        raise ConfigError(f"{format_loc(err['loc'])}: {err['msg']}") from exc
+    config._path = config_path
+    _check_sources(config)
+    return config
+
+
+def _check_sources(config: AppConfig) -> None:
+    from tentacles.sources import validate_source  # source types register on import
+
+    seen: set[str] = set()
+    for i, spec in enumerate(config.sources):
+        if spec.id in seen:
+            raise ConfigError(f"sources[{i}].id: duplicate source id {spec.id!r}")
+        seen.add(spec.id)
+        validate_source(spec, where=f"sources[{i}]")

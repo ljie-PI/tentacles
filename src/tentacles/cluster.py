@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from tentacles.dedup import title_similarity
-from tentacles.models import Article
+from tentacles.models import Item
 
 MAJOR_EVENT_SIZE = 3        # 同一事件文章数 >= 此值时视为重大事件，触发深度报道
 SIMILARITY_THRESHOLD = 0.30  # 标题相似度阈值，低于它不合并
@@ -13,13 +13,13 @@ SIMILARITY_THRESHOLD = 0.30  # 标题相似度阈值，低于它不合并
 
 @dataclass
 class Cluster:
-    representative: Article
-    members: list[Article] = field(default_factory=list)
+    representative: Item
+    members: list[Item] = field(default_factory=list)
     sources: set[str] = field(default_factory=set)
 
     def __post_init__(self) -> None:
         self.members = [self.representative]
-        self.sources = {self.representative.source}
+        self.sources = {self.representative.source_id}
 
     @property
     def size(self) -> int:
@@ -33,7 +33,7 @@ class Cluster:
         return self.representative.title
 
 
-def cluster_articles(articles: list[Article],
+def cluster_articles(articles: list[Item],
                      threshold: float = SIMILARITY_THRESHOLD) -> list[Cluster]:
     """贪心聚类：按来源不同优先，标题与已有点相似即归入该事件。"""
     clusters: list[Cluster] = []
@@ -45,7 +45,7 @@ def cluster_articles(articles: list[Article],
                 best, best_score = cluster, score
         if best is not None and best_score >= threshold:
             best.members.append(article)
-            best.sources.add(article.source)
+            best.sources.add(article.source_id)
         else:
             clusters.append(Cluster(representative=article))
     clusters.sort(key=lambda c: (-c.size, -len(c.sources)))

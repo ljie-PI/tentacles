@@ -1,5 +1,9 @@
-"""Sources to fetch feeds from."""
+"""Information sources. Importing this package registers the built-in types."""
 
-from tentacles.sources.fetcher import fetch_feeds
+from tentacles.sources.base import (
+    SOURCE_TYPES, FetchContext, FetchResult, Source, build_source, register, validate_source,
+)
+from tentacles.sources import rss  # noqa: F401  (registers "rss")
 
-__all__ = ["fetch_feeds"]
+__all__ = ["SOURCE_TYPES", "FetchContext", "FetchResult", "Source", "build_source",
+           "register", "validate_source"]

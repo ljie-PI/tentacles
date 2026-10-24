@@ -1,83 +1,254 @@
-"""SQLite storage for fetched articles."""
+"""SQLite storage. Schema versions are tracked with PRAGMA user_version; each
+entry in MIGRATIONS upgrades the schema by one version."""
 
 from __future__ import annotations
 
+import json
 import sqlite3
-from datetime import datetime, timedelta, timezone
+import threading
+from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
+from typing import Any, Callable, Iterable
 
-from tentacles.models import Article
+from tentacles.models import Item, item_id
+from tentacles.timeutil import from_iso, to_iso
 
-_SCHEMA = """
-CREATE TABLE IF NOT EXISTS articles (
-    id          TEXT PRIMARY KEY,
-    url         TEXT NOT NULL UNIQUE,
-    source      TEXT NOT NULL,
-    title       TEXT NOT NULL,
-    summary     TEXT NOT NULL DEFAULT '',
-    published   TEXT,
-    fetched_at  TEXT NOT NULL,
-    fingerprint TEXT NOT NULL
+
+@dataclass
+class SourceState:
+    source_id: str
+    cursor: dict[str, Any] = field(default_factory=dict)
+    last_fetch_at: datetime | None = None
+    last_status: str | None = None
+    last_error: str | None = None
+    total_items: int = 0
+
+
+@dataclass
+class RunRecord:
+    id: int
+    kind: str
+    target: str
+    status: str
+    started_at: datetime
+    finished_at: datetime | None
+    stats: dict[str, Any]
+    cost: float | None
+    error: str | None
+
+
+@dataclass
+class ItemQuery:
+    source_ids: list[str] | None = None
+    kinds: list[str] | None = None
+    since: datetime | None = None
+    until: datetime | None = None
+    search: str | None = None
+    limit: int = 50
+    offset: int = 0
+
+
+_V1 = """
+CREATE TABLE items (
+    id TEXT PRIMARY KEY, source_id TEXT NOT NULL, kind TEXT NOT NULL, external_id TEXT NOT NULL,
+    url TEXT NOT NULL DEFAULT '', title TEXT NOT NULL, author TEXT NOT NULL DEFAULT '',
+    summary TEXT NOT NULL DEFAULT '', content TEXT NOT NULL DEFAULT '', published TEXT,
+    fetched_at TEXT NOT NULL, fingerprint TEXT NOT NULL, meta TEXT NOT NULL DEFAULT '{}',
+    UNIQUE (source_id, external_id)
 );
-CREATE INDEX IF NOT EXISTS idx_articles_fingerprint ON articles (fingerprint);
-CREATE INDEX IF NOT EXISTS idx_articles_fetched_at ON articles (fetched_at);
+CREATE INDEX idx_items_url ON items (url) WHERE url != '';
+CREATE INDEX idx_items_fp ON items (fingerprint);
+CREATE INDEX idx_items_time ON items (COALESCE(published, fetched_at));
+CREATE TABLE source_state (
+    source_id TEXT PRIMARY KEY, cursor TEXT NOT NULL DEFAULT '{}', last_fetch_at TEXT,
+    last_status TEXT, last_error TEXT, total_items INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE runs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT NOT NULL, target TEXT NOT NULL,
+    status TEXT NOT NULL, started_at TEXT NOT NULL, finished_at TEXT,
+    stats TEXT NOT NULL DEFAULT '{}', cost REAL, error TEXT
+);
 """
 
 
+def _migrate_v1(conn: sqlite3.Connection) -> None:
+    conn.executescript(_V1)
+    legacy = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'articles'").fetchone()
+    if not legacy:
+        return
+    # 旧版 RSS 文章表一次性导入为条目；旧表保留不删
+    for r in conn.execute("SELECT url, source, title, summary, published, fetched_at, fingerprint "
+                          "FROM articles").fetchall():
+        conn.execute(
+            "INSERT OR IGNORE INTO items (id, source_id, kind, external_id, url, title, summary,"
+            " published, fetched_at, fingerprint) VALUES (?, ?, 'rss', ?, ?, ?, ?, ?, ?, ?)",
+            (item_id(r[1], r[0]), r[1], r[0], r[0], r[2], r[3] or "",
+             _legacy_time(r[4]), _legacy_time(r[5]), r[6]),
+        )
+
+
+def _legacy_time(s: str | None) -> str | None:
+    return to_iso(from_iso(s)) if s else None
+
+
+MIGRATIONS: list[Callable[[sqlite3.Connection], None]] = [_migrate_v1]
+
+_ITEM_COLUMNS = ("id, source_id, kind, external_id, url, title, author, summary, content,"
+                 " published, fetched_at, fingerprint, meta")
+_SORT_TIME = "COALESCE(published, fetched_at)"
+
+
 class Store:
-    def __init__(self, db_path: str | Path):
-        self.db_path = Path(db_path)
-        self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        self._conn = sqlite3.connect(self.db_path)
+    def __init__(self, path: str | Path):
+        self.path = Path(path)
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._lock = threading.RLock()
+        self._conn = sqlite3.connect(self.path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
-        self._conn.executescript(_SCHEMA)
+        self._conn.execute("PRAGMA journal_mode = WAL")
+        self._conn.execute("PRAGMA busy_timeout = 5000")
+        self._migrate()
+
+    def _migrate(self) -> None:
+        with self._lock:
+            version = self._conn.execute("PRAGMA user_version").fetchone()[0]
+            for i, step in enumerate(MIGRATIONS[version:], start=version + 1):
+                with self._conn:
+                    step(self._conn)
+                    self._conn.execute(f"PRAGMA user_version = {i}")
 
     def close(self) -> None:
-        self._conn.close()
+        with self._lock:
+            self._conn.close()
 
-    def upsert(self, articles: list[Article]) -> tuple[int, int]:
-        """写入文章，返回 (新增, 重复) 数量。"""
-        new = dup = 0
-        for a in articles:
-            cur = self._conn.execute(
-                "SELECT 1 FROM articles WHERE url = ? OR fingerprint = ?",
-                (a.url, a.fingerprint),
-            )
-            if cur.fetchone():
-                dup += 1
-                continue
-            self._conn.execute(
-                "INSERT INTO articles (id, url, source, title, summary, published, fetched_at, fingerprint)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                (a.id, a.url, a.source, a.title, a.summary,
-                 a.published.isoformat() if a.published else None,
-                 a.fetched_at.isoformat(), a.fingerprint),
-            )
-            new += 1
-        self._conn.commit()
+    # ---- items -------------------------------------------------------------
+
+    def upsert_items(self, items: Iterable[Item]) -> tuple[list[str], int]:
+        """Insert items that aren't duplicates; returns (new ids, duplicate count).
+
+        Duplicate = same (source, external id), or same non-empty url, or same
+        content fingerprint (not applied to email: distinct mails can match).
+        """
+        new: list[str] = []
+        dup = 0
+        with self._lock, self._conn:
+            for it in items:
+                exists = self._conn.execute(
+                    "SELECT 1 FROM items WHERE (source_id = ? AND external_id = ?)"
+                    " OR (? != '' AND url = ?)"
+                    " OR (? != 'email' AND kind != 'email' AND fingerprint = ?) LIMIT 1",
+                    (it.source_id, it.external_id, it.url, it.url, it.kind, it.fingerprint),
+                ).fetchone()
+                if exists:
+                    dup += 1
+                    continue
+                self._conn.execute(
+                    f"INSERT INTO items ({_ITEM_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (it.id, it.source_id, it.kind, it.external_id, it.url, it.title, it.author,
+                     it.summary, it.content, to_iso(it.published), to_iso(it.fetched_at),
+                     it.fingerprint, json.dumps(it.meta, ensure_ascii=False)),
+                )
+                new.append(it.id)
         return new, dup
 
-    def rows_to_articles(self, rows) -> list[Article]:
-        out = []
-        for r in rows:
-            out.append(Article(
-                id=r["id"], url=r["url"], source=r["source"], title=r["title"],
-                summary=r["summary"],
-                published=datetime.fromisoformat(r["published"]) if r["published"] else None,
-                fetched_at=datetime.fromisoformat(r["fetched_at"]),
-            ))
-        return out
+    def get_item(self, item_id_: str) -> Item | None:
+        with self._lock:
+            row = self._conn.execute(f"SELECT {_ITEM_COLUMNS} FROM items WHERE id = ?",
+                                     (item_id_,)).fetchone()
+        return _row_to_item(row) if row else None
 
-    def articles_fetched_since(self, since: datetime) -> list[Article]:
-        rows = self._conn.execute(
-            "SELECT * FROM articles WHERE fetched_at >= ? ORDER BY fetched_at DESC",
-            (since.isoformat(),),
-        ).fetchall()
-        return self.rows_to_articles(rows)
+    def list_items(self, q: ItemQuery) -> tuple[list[Item], int]:
+        where, args = ["1 = 1"], []
+        if q.source_ids:
+            where.append(f"source_id IN ({','.join('?' * len(q.source_ids))})")
+            args += q.source_ids
+        if q.kinds:
+            where.append(f"kind IN ({','.join('?' * len(q.kinds))})")
+            args += q.kinds
+        if q.since:
+            where.append(f"{_SORT_TIME} >= ?")
+            args.append(to_iso(q.since))
+        if q.until:
+            where.append(f"{_SORT_TIME} < ?")
+            args.append(to_iso(q.until))
+        if q.search:
+            where.append("(title LIKE ? OR summary LIKE ? OR author LIKE ?)")
+            args += [f"%{q.search}%"] * 3
+        cond = " AND ".join(where)
+        with self._lock:
+            total = self._conn.execute(f"SELECT COUNT(*) FROM items WHERE {cond}", args).fetchone()[0]
+            rows = self._conn.execute(
+                f"SELECT {_ITEM_COLUMNS} FROM items WHERE {cond}"
+                f" ORDER BY {_SORT_TIME} DESC, id LIMIT ? OFFSET ?",
+                [*args, q.limit, q.offset],
+            ).fetchall()
+        return [_row_to_item(r) for r in rows], total
 
-    def articles_last_n_hours(self, hours: int = 24) -> list[Article]:
-        cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
-        return self.articles_fetched_since(cutoff)
+    # ---- source state -----------------------------------------------------
 
-    def count(self) -> int:
-        return self._conn.execute("SELECT COUNT(*) FROM articles").fetchone()[0]
+    def get_source_state(self, source_id: str) -> SourceState:
+        with self._lock:
+            row = self._conn.execute("SELECT * FROM source_state WHERE source_id = ?",
+                                     (source_id,)).fetchone()
+        if not row:
+            return SourceState(source_id)
+        return SourceState(source_id, json.loads(row["cursor"]), from_iso(row["last_fetch_at"]),
+                           row["last_status"], row["last_error"], row["total_items"])
+
+    def save_source_state(self, st: SourceState) -> None:
+        with self._lock, self._conn:
+            self._conn.execute(
+                "INSERT INTO source_state (source_id, cursor, last_fetch_at, last_status,"
+                " last_error, total_items) VALUES (?, ?, ?, ?, ?, ?)"
+                " ON CONFLICT (source_id) DO UPDATE SET cursor = excluded.cursor,"
+                " last_fetch_at = excluded.last_fetch_at, last_status = excluded.last_status,"
+                " last_error = excluded.last_error, total_items = excluded.total_items",
+                (st.source_id, json.dumps(st.cursor, ensure_ascii=False), to_iso(st.last_fetch_at),
+                 st.last_status, st.last_error, st.total_items),
+            )
+
+    # ---- runs ---------------------------------------------------------------
+
+    def start_run(self, kind: str, target: str, now: datetime) -> int:
+        with self._lock, self._conn:
+            cur = self._conn.execute(
+                "INSERT INTO runs (kind, target, status, started_at) VALUES (?, ?, 'running', ?)",
+                (kind, target, to_iso(now)))
+        assert cur.lastrowid is not None
+        return cur.lastrowid
+
+    def finish_run(self, run_id: int, *, status: str, now: datetime, stats: dict[str, Any] | None = None,
+                   cost: float | None = None, error: str | None = None) -> None:
+        with self._lock, self._conn:
+            self._conn.execute(
+                "UPDATE runs SET status = ?, finished_at = ?, stats = ?, cost = ?, error = ? WHERE id = ?",
+                (status, to_iso(now), json.dumps(stats or {}, ensure_ascii=False), cost, error, run_id))
+
+    def list_runs(self, kind: str | None = None, target: str | None = None,
+                  limit: int = 50) -> list[RunRecord]:
+        where, args = ["1 = 1"], []
+        if kind:
+            where.append("kind = ?")
+            args.append(kind)
+        if target:
+            where.append("target = ?")
+            args.append(target)
+        with self._lock:
+            rows = self._conn.execute(
+                f"SELECT * FROM runs WHERE {' AND '.join(where)} ORDER BY id DESC LIMIT ?",
+                [*args, limit]).fetchall()
+        return [RunRecord(r["id"], r["kind"], r["target"], r["status"], from_iso(r["started_at"]),
+                          from_iso(r["finished_at"]), json.loads(r["stats"]), r["cost"], r["error"])
+                for r in rows]
+
+
+def _row_to_item(r: sqlite3.Row) -> Item:
+    return Item(
+        id=r["id"], source_id=r["source_id"], kind=r["kind"], external_id=r["external_id"],
+        url=r["url"], title=r["title"], author=r["author"], summary=r["summary"],
+        content=r["content"], published=from_iso(r["published"]),
+        fetched_at=from_iso(r["fetched_at"]), fingerprint=r["fingerprint"],
+        meta=json.loads(r["meta"]),
+    )

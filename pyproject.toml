@@ -1,14 +1,15 @@
 [project]
 name = "tentacles"
-version = "0.1.0"
-description = "Fetch news feeds from multiple sources, aggregate and deduplicate them, and generate LLM-written daily digests and in-depth reports."
+version = "0.2.0"
+description = "Personal information and news manager: multi-source fetching, persona-based filtering and LLM processing."
 requires-python = ">=3.10"
 license = { text = "Apache-2.0" }
 dependencies = [
     "feedparser>=6.0",
     "httpx[socks]>=0.27",
     "pydantic>=2.7",
-    "pydantic-settings>=2.2",
+    "python-dotenv>=1.0",
+    "beautifulsoup4>=4.12",
     "typer>=0.12",
     "jinja2>=3.1",
     "python-dateutil>=2.9",
@@ -20,7 +21,7 @@ dependencies = [
 tentacles = "tentacles.cli:app"
 
 [project.optional-dependencies]
-dev = ["pytest>=8.0"]
+dev = ["pytest>=8.0", "mypy>=1.10", "types-PyYAML"]
 
 [build-system]
 requires = ["hatchling"]
@@ -31,3 +32,6 @@ packages = ["src/tentacles"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.mypy]
+ignore_missing_imports = true
