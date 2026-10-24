@@ -163,7 +163,31 @@ def _migrate_v5(conn: sqlite3.Connection) -> None:
     conn.execute('CREATE INDEX idx_reports_pipeline ON reports (pipeline_id, created_at DESC, id DESC)')
 
 
-MIGRATIONS: list[Callable[[sqlite3.Connection], None]] = [_migrate_v1, _migrate_v2, _migrate_v3, _migrate_v4, _migrate_v5]
+def _migrate_v6(conn: sqlite3.Connection) -> None:
+    conn.execute("""CREATE TABLE pipeline_consumption (
+        pipeline_id TEXT NOT NULL, item_id TEXT NOT NULL, consumed_at TEXT NOT NULL,
+        report_id TEXT, PRIMARY KEY (pipeline_id, item_id)
+    )""")
+    conn.execute('INSERT INTO pipeline_consumption (pipeline_id, item_id, consumed_at)'
+                 ' SELECT pipeline_id, item_id, MIN(reported_at) FROM evaluations'
+                 ' WHERE reported_at IS NOT NULL GROUP BY pipeline_id, item_id')
+    # A pre-ledger explicit re-evaluation may have deleted its reported marker.
+    # Reports still contain the immutable material IDs, so recover those too.
+    for row in conn.execute('SELECT id, pipeline_id, item_ids, created_at FROM reports'
+                            ' ORDER BY created_at, id').fetchall():
+        for item_id in json.loads(row['item_ids']):
+            conn.execute('INSERT INTO pipeline_consumption VALUES (?, ?, ?, ?)'
+                ' ON CONFLICT (pipeline_id, item_id) DO UPDATE SET'
+                ' consumed_at = MIN(consumed_at, excluded.consumed_at),'
+                ' report_id = COALESCE(report_id, excluded.report_id)',
+                (row['pipeline_id'], item_id, row['created_at'], row['id']))
+    conn.execute('UPDATE evaluations SET reported_at = (SELECT consumed_at FROM pipeline_consumption c'
+                 ' WHERE c.pipeline_id = evaluations.pipeline_id AND c.item_id = evaluations.item_id)'
+                 ' WHERE EXISTS (SELECT 1 FROM pipeline_consumption c WHERE c.pipeline_id = evaluations.pipeline_id'
+                 ' AND c.item_id = evaluations.item_id)')
+
+
+MIGRATIONS: list[Callable[[sqlite3.Connection], None]] = [_migrate_v1, _migrate_v2, _migrate_v3, _migrate_v4, _migrate_v5, _migrate_v6]
 
 _ITEM_COLUMNS = ("id, source_id, kind, external_id, url, title, author, summary, content,"
                  " published, fetched_at, fingerprint, meta")
@@ -239,7 +263,9 @@ class Store:
         placeholders = ','.join('?' for _ in q.sources)
         sql = (' FROM items i JOIN evaluations e ON e.item_id = i.id'
                f' WHERE e.pipeline_id = ? AND e.persona_version = ? AND i.source_id IN ({placeholders})'
-               ' AND i.fetched_at >= ? AND i.fetched_at <= ? AND e.passed = 1 AND e.reported_at IS NULL')
+               ' AND i.fetched_at >= ? AND i.fetched_at <= ? AND e.passed = 1 AND e.reported_at IS NULL'
+               ' AND NOT EXISTS (SELECT 1 FROM pipeline_consumption c'
+               ' WHERE c.pipeline_id = e.pipeline_id AND c.item_id = e.item_id)')
         return sql, [q.pipeline_id, q.persona_version, *q.sources, to_iso(q.since), to_iso(q.until)]
 
     def pending_items(self, q: PipelineQuery) -> list[tuple[Item, Evaluation]]:
@@ -257,20 +283,24 @@ class Store:
     def pipeline_ids(self) -> set[str]:
         with self._lock:
             return {row[0] for row in self._conn.execute(
-                'SELECT DISTINCT pipeline_id FROM evaluations UNION SELECT DISTINCT pipeline_id FROM reports')}
+                'SELECT DISTINCT pipeline_id FROM evaluations UNION SELECT DISTINCT pipeline_id FROM reports'
+                ' UNION SELECT DISTINCT pipeline_id FROM pipeline_consumption')}
 
     def _check_pending(self, evaluations: list[Evaluation]) -> None:
         for evaluation in evaluations:
             row = self._conn.execute(
-                'SELECT * FROM evaluations WHERE pipeline_id = ? AND item_id = ? AND persona_version = ?',
+                'SELECT * FROM evaluations WHERE pipeline_id = ? AND item_id = ? AND persona_version = ?'
+                ' AND NOT EXISTS (SELECT 1 FROM pipeline_consumption c'
+                ' WHERE c.pipeline_id = evaluations.pipeline_id AND c.item_id = evaluations.item_id)',
                 (evaluation.pipeline_id, evaluation.item_id, evaluation.persona_version)).fetchone()
             if row is None or _row_to_evaluation(row) != evaluation or evaluation.reported_at is not None:
                 raise Conflict('evaluations changed while preparing the report')
 
-    def _consume(self, evaluations: list[Evaluation], now: datetime) -> None:
-        self._conn.executemany('UPDATE evaluations SET reported_at = ? WHERE pipeline_id = ?'
-                               ' AND item_id = ? AND persona_version = ?',
-            [(to_iso(now), e.pipeline_id, e.item_id, e.persona_version) for e in evaluations])
+    def _consume(self, evaluations: list[Evaluation], now: datetime, report_id: str | None = None) -> None:
+        self._conn.executemany('INSERT INTO pipeline_consumption VALUES (?, ?, ?, ?)',
+            [(e.pipeline_id, e.item_id, to_iso(now), report_id) for e in evaluations])
+        self._conn.executemany('UPDATE evaluations SET reported_at = ? WHERE pipeline_id = ? AND item_id = ?',
+            [(to_iso(now), e.pipeline_id, e.item_id) for e in evaluations])
 
     def save_report(self, report: ReportView, evaluations: list[Evaluation], run_id: int,
                     stats: dict[str, Any]) -> None:
@@ -296,7 +326,7 @@ class Store:
                     (report.id, report.pipeline_id, report.persona_version, report.kind, report.title,
                      report.markdown, json.dumps(report.item_ids), report.model,
                      report.usage.model_dump_json(), report.cost, report.path, to_iso(report.created_at)))
-                self._consume(evaluations, report.created_at)
+                self._consume(evaluations, report.created_at, report.id)
                 self._finish_run(run_id, status='ok', now=report.created_at, stats=stats, cost=report.cost)
                 self._complete_task_run(run_id, 'ok', None)
         except BaseException:
@@ -339,12 +369,13 @@ class Store:
             self._require_running(run_id)
             for evaluation in evaluations:
                 self._conn.execute(
-                    'INSERT OR IGNORE INTO evaluations VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+                    'INSERT OR IGNORE INTO evaluations VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?,'
+                    ' (SELECT consumed_at FROM pipeline_consumption WHERE pipeline_id = ? AND item_id = ?))',
                     (evaluation.pipeline_id, evaluation.item_id, evaluation.persona_version,
                      evaluation.passed, evaluation.score, json.dumps(evaluation.tags, ensure_ascii=False),
                      evaluation.reason, evaluation.stage,
                      json.dumps([s.model_dump() for s in evaluation.stage_scores], ensure_ascii=False),
-                     to_iso(evaluation.evaluated_at), to_iso(evaluation.reported_at)))
+                     to_iso(evaluation.evaluated_at), evaluation.pipeline_id, evaluation.item_id))
             self._finish_run(run_id, status='ok', now=now, stats=stats)
             self._complete_task_run(run_id, 'ok', None)
 

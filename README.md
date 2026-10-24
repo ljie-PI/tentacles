@@ -101,7 +101,7 @@ tentacles reports show REPORT_ID
 
 当前 `tick` 只自动抓取来源；pipeline 的 `schedule` 是频率元数据，自动到期执行将在 #24 接入。
 过滤和运行各有独立的持久化锁；运行遇到过滤锁被占用时，会直接处理之前已通过的条目。
-再次运行不会重复消费同版本的已报告条目。报告失败时保留未报告状态，修复问题后可以重试。
+消费记录独立于 Persona 版本，同一 pipeline 中的条目只消费一次。报告失败时保留未报告状态，修复问题后可以重试。
 报告存入 SQLite，同时按 pipeline 写入 `reports_dir` 下的 Markdown 文件（新文件默认私有权限）。
 
 关键词在标题和摘要中不区分大小写匹配，exclude 优先（0 分）、include 为 1 分，否则 0.5。
@@ -109,7 +109,7 @@ tentacles reports show REPORT_ID
 `items list --pipeline ... --rejected` 查看淘汰结果；`items show ID` 包含各 pipeline 的最新评估。
 
 `pipelines filter ID --reevaluate` 会删除窗口内当前 Persona 版本的已有评估并重算，
-也会重置对应的已消费标记，**可能重新生成报告**，只在明确需要时使用。
+消费账本不会被清除，不会让已报告条目重新进入报告。
 `processor.type: none` 不调用模型、不生成文件，但将选中的条目标记为已消费。
 完整参数和自定义提示词格式见 [agent 命令说明](docs/agent-cli.md)。
 

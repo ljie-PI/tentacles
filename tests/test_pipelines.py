@@ -271,7 +271,8 @@ def test_caps_pending_count_none_processor_and_explicit_reevaluation(web, write_
             forced = await service.filter_pipeline('daily', reevaluate=True)
             assert forced.stats['candidates'] == 3
             assert service.list_items(pipeline='daily', passed=True).total == 1
-            assert service.list_pipelines()[0].pending == 1
+            # The sole passed item was already consumed by the none processor.
+            assert service.list_pipelines()[0].pending == 0
         finally:
             await service.aclose()
 
@@ -686,6 +687,97 @@ def test_filter_window_uses_fetch_time_not_old_publication_time(web, write_confi
             now[0] += timedelta(hours=25)
             await service.set_persona('default', include_add=['new'])
             assert (await service.filter_pipeline('daily')).stats['candidates'] == 0
+        finally:
+            await service.aclose()
+
+    asyncio.run(scenario())
+
+
+def test_consumption_survives_persona_versions_and_forced_reevaluation(web, write_config, open_service):
+    from test_models import model_config, chat_reply, CHAT_URL
+    web.serve(FEED, three_entries())
+    web.handle(CHAT_URL, lambda r: httpx.Response(200, json=chat_reply('Research [1]. Weather [2].')))
+    service = open_service(write_config({**model_config(), **pipeline_config(processor={'type': 'digest'})}))
+
+    async def scenario():
+        await service.fetch_sources()
+        first = await service.run_pipeline('daily')
+        assert first.status == 'ok'
+        report = service.get_report(first.report_id)
+        await service.set_persona('default', note='metadata only')
+        second = await service.run_pipeline('daily')
+        assert second.status == 'no_new' and second.report_id is None
+        assert service.list_reports().total == 1
+        assert service.list_pipelines()[0].pending == 0
+        for item_id in report.item_ids:
+            [latest] = service.get_item(item_id).evaluations
+            assert latest.persona_version == 2 and latest.reported_at is not None
+        forced = await service.filter_pipeline('daily', reevaluate=True)
+        assert forced.stats['candidates'] == 3
+        assert (await service.run_pipeline('daily')).status == 'no_new'
+        assert service.list_reports().total == 1
+        assert len(web.requests_to(CHAT_URL)) == 1
+
+    asyncio.run(scenario())
+
+
+def test_consumption_is_durable_but_independent_for_other_pipelines(web, write_config):
+    from test_models import model_config, chat_reply, CHAT_URL
+    data = {**model_config(), **pipeline_config(processor={'type': 'digest'})}
+    data['pipelines'].append({**data['pipelines'][0], 'id': 'weekly', 'schedule': '1w'})
+    path = write_config(data)
+    web.serve(FEED, three_entries())
+    web.handle(CHAT_URL, lambda r: httpx.Response(200, json=chat_reply('Research [1]. Weather [2].')))
+
+    async def scenario():
+        service = TentaclesService.open(path, env={}, transport=web.transport())
+        try:
+            await service.fetch_sources()
+            first = await service.run_pipeline('daily')
+            assert first.status == 'ok'
+            ids = service.get_report(first.report_id).item_ids
+            await service.set_persona('default', include_add=['Extra interest'])
+        finally:
+            await service.aclose()
+        service = TentaclesService.open(path, env={}, transport=web.transport())
+        try:
+            assert (await service.run_pipeline('daily')).status == 'no_new'
+            assert len(web.requests_to(CHAT_URL)) == 1
+            second = await service.run_pipeline('weekly')
+            assert second.status == 'ok'
+            assert service.get_report(second.report_id).item_ids == ids
+            assert service.list_reports(pipeline='daily').total == service.list_reports(pipeline='weekly').total == 1
+        finally:
+            await service.aclose()
+
+    asyncio.run(scenario())
+
+
+def test_v5_migration_recovers_consumption_from_reports_and_none_markers(write_config, tmp_path, web):
+    import sqlite3
+    from datetime import datetime, timezone
+    from test_models import model_config
+    data = {**model_config(), **pipeline_config(processor={'type': 'digest'})}
+    data['pipelines'].append({**data['pipelines'][0], 'id': 'sink', 'processor': {'type': 'none'}})
+    path = write_config(data)
+    database = tmp_path / 'data' / 'tentacles.db'
+    database.parent.mkdir()
+    with sqlite3.connect(database) as connection:
+        connection.executescript((Path(__file__).parent / 'fixtures' / 'pipelines-v5.sql').read_text())
+    service = TentaclesService.open(path, env={}, transport=web.transport(),
+                                    clock=lambda: datetime(2030, 1, 1, 0, 1, tzinfo=timezone.utc))
+
+    async def scenario():
+        try:
+            assert service.get_persona('default').version == 2
+            assert all(p.pending == 0 for p in service.list_pipelines())
+            assert (await service.run_pipeline('daily')).status == 'no_new'
+            assert (await service.run_pipeline('sink')).status == 'no_new'
+            [report] = service.list_reports().items
+            assert report.id == 'legacy-report'
+            for item in service.list_items().items:
+                assert all(e.reported_at is not None for e in service.get_item(item.id).evaluations)
+            assert web.requests == []
         finally:
             await service.aclose()
 
