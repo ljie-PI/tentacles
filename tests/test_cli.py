@@ -185,3 +185,29 @@ def test_scheduler_commands_are_json_and_show_next_run(cli, web):
     assert payload(cli('sources', 'list'))[0]['next_run_at'] == task['next_run_at']
     assert 'next' in cli('sources', 'list', json_mode=False).stdout
     assert cli('scheduler', 'status', json_mode=False).exit_code == 0
+
+
+def test_model_commands_json_and_human_contracts(cli, web, write_config):
+    import httpx
+    from test_models import model_config, chat_reply, CHAT_URL
+    path = write_config(model_config())
+    web.handle(CHAT_URL, lambda r: httpx.Response(200, json=chat_reply('Hello [sample]')))
+    listed = cli('models', 'list', config=path)
+    assert listed.exit_code == 0 and 'private-test-key' not in listed.stdout
+    assert {r['name'] for r in payload(listed)} == {'fast', 'decision'}
+    tested = cli('models', 'test', 'fast', config=path)
+    assert tested.exit_code == 0 and payload(tested)['ok']
+    assert payload(tested)['sample'] == 'Hello [sample]'
+    human = cli('models', 'test', 'fast', config=path, json_mode=False)
+    assert human.exit_code == 0 and '[sample]' in human.stdout
+    assert cli('models', 'list', config=path, json_mode=False).exit_code == 0
+    missing = cli('models', 'test', 'absent', config=path)
+    assert missing.exit_code == 3 and payload(missing)['error']['code'] == 'not_found'
+
+
+def test_model_probe_failure_remains_structured(cli, write_config):
+    from test_models import model_config
+    path = write_config(model_config(api_key=''))
+    result = cli('models', 'test', 'fast', config=path)
+    assert result.exit_code == 0
+    assert payload(result)['ok'] is False and 'fast' in payload(result)['error']

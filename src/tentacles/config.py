@@ -20,6 +20,7 @@ from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, ValidationError,
 
 from tentacles.errors import ConfigError, NotFound
 from tentacles.schedule import Schedule
+from tentacles.llm.config import Defaults, ModelSpec, STAGES
 
 DEFAULT_CONFIG = Path("config") / "tentacles.yaml"
 _ENV_REF = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}")
@@ -70,6 +71,8 @@ class AppConfig(BaseModel):
 
     app: AppSpec = Field(default_factory=AppSpec)
     sources: list[SourceSpec] = Field(default_factory=list)
+    models: dict[str, ModelSpec] = Field(default_factory=dict)
+    defaults: Defaults = Field(default_factory=Defaults)
 
     _path: Path = PrivateAttr(default=Path(DEFAULT_CONFIG))
 
@@ -164,6 +167,7 @@ def load_config(path: Path | str | None = None, *, env: Mapping[str, str] | None
         raise ConfigError(f"{format_loc(err['loc'])}: {err['msg']}") from exc
     config._path = config_path
     _check_sources(config)
+    _check_models(config)
     return config
 
 
@@ -176,3 +180,23 @@ def _check_sources(config: AppConfig) -> None:
             raise ConfigError(f"sources[{i}].id: duplicate source id {spec.id!r}")
         seen.add(spec.id)
         validate_source(spec, where=f"sources[{i}]")
+
+
+def _check_models(config: AppConfig) -> None:
+    # RSS-only configurations remain valid without any model configuration.
+    if not config.models and not config.defaults.models:
+        return
+    for name in config.models:
+        if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]*', name):
+            raise ConfigError('models: names must use letters, digits, dot, dash or underscore')
+    for stage in STAGES:
+        where = f'defaults.models.{stage}'
+        default_name = config.defaults.models.get(stage)
+        if not default_name:
+            raise ConfigError(f'{where}: a default model is required')
+        spec = config.models.get(default_name)
+        if spec is None:
+            raise ConfigError(f'{where}: unknown model {default_name!r}')
+        kind = 'decision' if stage == 'decision' else 'chat'
+        if spec.kind != kind:
+            raise ConfigError(f'{where}: model {default_name!r} must have kind {kind}')

@@ -2,7 +2,7 @@
 
 个人信息与新闻管理系统：从多种信息源抓取内容，按个人 persona 过滤，再用 LLM 加工成日报、深度报道或邮件简报。整体设计见 [#18](https://github.com/ljie-PI/tentacles/issues/18)，实施进度见它的子 issue。
 
-> 目前已完成骨架：配置驱动的 RSS 抓取、去重入库、条目查询、运行记录和持久化调度。persona、过滤、LLM 处理、邮件和网页源、Web 端将陆续加入。
+> 目前已完成骨架：配置驱动的 RSS 抓取、去重入库、条目查询、运行记录、持久化调度和命名模型注册表/连通性测试。persona、过滤、LLM 处理、邮件和网页源、Web 端将陆续加入。
 
 ## 快速开始
 
@@ -29,6 +29,8 @@ tentacles items list --since 24h  # 查看最近 24 小时的条目
 | 命令 | 作用 |
 | ---- | ---- |
 | `tentacles config check` | 校验配置 |
+| `tentacles models list` | 列出命名模型，不泄露密钥 |
+| `tentacles models test NAME` | 实际调用模型，返回可用性、延迟、样例和用量 |
 | `tentacles sources list` | 列出信息源及其抓取状态 |
 | `tentacles sources fetch [ID...]` | 立即抓取信息源，不写 ID 时抓取全部启用的源 |
 | `tentacles items list` | 列出条目，可按来源、时间、关键词筛选，支持分页 |
@@ -38,6 +40,21 @@ tentacles items list --since 24h  # 查看最近 24 小时的条目
 | `tentacles runs list` | 查看运行记录 |
 
 所有命令都支持 `--json`：stdout 只输出一个 JSON 值，日志写到 stderr，退出码按错误类型区分。给 agent 用的完整说明见 [docs/agent-cli.md](docs/agent-cli.md)。
+
+## 模型配置
+
+示例提供 `fast`（DeepSeek）、`smart`（Claude Sonnet）、`max`（Claude Opus）和 `decision`（JEV）。
+在 `.env` 中按需填写 key，然后运行 `tentacles models test fast`；这会真实调用模型并可能产生费用。
+注册表懒加载，不会在启动、检查配置或列出模型时请求服务商。
+
+纯 RSS 配置可以完全省略 `models` 和 `defaults`。一旦配置模型，就必须在 `defaults.models`
+为 `extract`、`filter`、`decision`、`persona`、`process` 五个阶段指定已存在、种类匹配的默认模型。
+`api_key` 可以为空；只有真正调用模型时才报错。`models list` 仅显示 key 是否配置。
+本地 Ollama/vLLM 等无鉴权服务也请填写非空占位 key，例如 `local`。
+
+OpenAI 兼容接口使用 `provider: openai` 和服务的 API 根路径 `base_url`（如 `http://localhost:11434/v1`）；
+Anthropic 使用 `provider: anthropic`，OpenRouter 用 `provider: openrouter`。
+详细字段、重试规则和 JSON 输出见 [agent 命令说明](docs/agent-cli.md)。
 
 ## 自动抓取
 

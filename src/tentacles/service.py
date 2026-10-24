@@ -4,18 +4,22 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import json
 from datetime import datetime
 from pathlib import Path
-from typing import Callable, Mapping
+from typing import Callable, Mapping, Any
 from zoneinfo import ZoneInfo
 from uuid import uuid4
 
 import httpx
 
 from tentacles.config import AppConfig, SourceSpec, load_config
-from tentacles.errors import ConfigError, NotFound
+from tentacles.errors import ConfigError, NotFound, UpstreamError
 from tentacles.net import HttpPool
-from tentacles.schemas import ConfigCheck, FetchOutcome, ItemDetail, ItemView, Page, RunView, SourceView, TaskView
+from tentacles.llm.registry import ModelRegistry
+from tentacles.llm.config import Stage
+from tentacles.llm.json import extract_json
+from tentacles.schemas import ConfigCheck, FetchOutcome, ItemDetail, ItemView, Page, RunView, SourceView, TaskView, ModelView, Completion, ModelTest
 from tentacles.sources.runner import fetch_source
 from tentacles.asyncutil import run_store_call
 from tentacles.store import ItemQuery, Store
@@ -35,6 +39,8 @@ class TentaclesService:
         self.store = store
         self._transport = transport
         self._clock = clock
+        self._model_http = HttpPool(transport)
+        self.models = ModelRegistry(config.models, config.defaults, self._model_http, clock=clock)
         self._tasks = {s.id: Task('fetch', s.id, s.schedule, config.app.timezone, s.enabled)
                        for s in config.sources}
         try:
@@ -52,13 +58,61 @@ class TentaclesService:
         return cls(config, Store(config.db_path), transport=transport, clock=clock)
 
     async def aclose(self) -> None:
-        self.store.close()
+        try:
+            await self._model_http.aclose()
+        finally:
+            self.store.close()
 
     # ---- config -------------------------------------------------------------
 
     def check_config(self) -> ConfigCheck:
         # 能打开 Service 就说明配置已通过全部校验
         return ConfigCheck(ok=True, path=str(self.config.path), sources=len(self.config.sources))
+
+    # ---- models -------------------------------------------------------------
+
+    def list_models(self) -> list[ModelView]:
+        return [ModelView(name=name, provider=spec.provider, kind=spec.kind, model=spec.model,
+                          base_url=spec.endpoint, key_configured=bool(spec.api_key.get_secret_value()))
+                for name, spec in self.config.models.items()]
+
+    async def complete_model(self, messages: list[dict[str, str]], *, name: str | None = None,
+                             stage: Stage = 'process', system: str | None = None,
+                             max_tokens: int | None = None,
+                             temperature: float | None = None, json_output: bool = False) -> Completion:
+        resolved = self.models.resolve(stage, name)
+        result = await self.models.chat(resolved).complete(messages, system=system,
+                                                          max_tokens=max_tokens, temperature=temperature)
+        if json_output:
+            try:
+                result.data = extract_json(result.text)
+            except ValueError:
+                raise UpstreamError(f'model {resolved!r}: no valid JSON in model output') from None
+        return result
+
+    async def test_model(self, name: str) -> ModelTest:
+        spec = self.models.spec(name)
+        started_at = self._clock()
+        try:
+            if spec.kind == 'chat':
+                result = await self.models.chat(name).complete(
+                    [{'role': 'user', 'content': 'Reply with OK to confirm you are available.'}])
+                sample, model, usage, cost = result.text, result.model, result.usage, result.cost
+            else:
+                decision = await self.models.decision(name).decide(
+                    'The model is responding to a connectivity check.',
+                    {'available': {'type': 'noul', 'instructions': 'Is this a connectivity check?',
+                                   'criteria': {'true': 'Connectivity check', 'false': 'Other request'}}})
+                sample, model, usage, cost = (json.dumps(decision.answers, ensure_ascii=False),
+                                              decision.model, decision.usage, decision.cost)
+        except UpstreamError as exc:
+            return ModelTest(name=name, ok=False, latency_ms=self._model_latency(started_at),
+                             error=self.models.redact(exc.message))
+        return ModelTest(name=name, ok=True, latency_ms=self._model_latency(started_at),
+                         sample=self.models.redact(sample)[:500], model=model, usage=usage, cost=cost)
+
+    def _model_latency(self, started_at: datetime) -> float:
+        return max(0.0, (self._clock() - started_at).total_seconds() * 1000)
 
     # ---- sources ------------------------------------------------------------
 

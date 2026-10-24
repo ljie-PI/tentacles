@@ -10,6 +10,45 @@ app:
   data_dir: ../data           # SQLite 数据库位置
   reports_dir: ../reports     # 报告输出目录
 
+# 命名模型：不填写 key 也可以校验配置、抓取 RSS；实际调用时才报 upstream。
+# provider: openai（包括 DeepSeek/Moonshot/Ollama/vLLM）、anthropic、openrouter。
+# kind 默认为 chat。base_url 是 API 根路径；模型 ID 请按服务商当前可用型号调整。
+models:
+  fast:
+    provider: openai
+    model: deepseek-flash
+    base_url: https://api.deepseek.com
+    api_key: ${DEEPSEEK_API_KEY:-}
+    max_tokens: 4096
+    timeout: 60
+    retries: 2
+  smart:
+    provider: anthropic
+    model: claude-sonnet-5-5
+    api_key: ${ANTHROPIC_API_KEY:-}
+    max_tokens: 4096
+  max:
+    provider: anthropic
+    model: claude-opus-5-5
+    api_key: ${ANTHROPIC_API_KEY:-}
+    max_tokens: 8192
+  decision:
+    provider: openrouter
+    kind: decision
+    model: typesafe/jev-1.13
+    api_key: ${OPENROUTER_API_KEY:-}
+    concurrency: 8
+    extra_body:
+      provider: {data_collection: deny}
+
+defaults:
+  models:
+    extract: fast
+    filter: fast
+    decision: decision
+    persona: smart
+    process: smart
+
 # 信息源。通用字段：id（唯一）、type、schedule（抓取频率：30m / 2h / 1d 等间隔，
 # 或 @hourly/@daily/@weekly、5 段 cron 表达式）、name（可选显示名）、enabled（默认 true）。
 #
