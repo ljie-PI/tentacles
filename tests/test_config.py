@@ -106,3 +106,14 @@ def test_home_relative_paths_expand(write_config, open_service, tmp_path, monkey
 def test_falsey_non_mapping_configs_are_invalid(write_config, text):
     with pytest.raises(ConfigError, match="top level must be a mapping"):
         TentaclesService.open(write_config(text), env={})
+
+
+@pytest.mark.parametrize('schedule', ['0s', '60 * * * *', '* 24 * * *', '* * 0 * *',
+    '* * * 13 *', '* * * * 8', '*/0 * * * *', '1,,2 * * * *', '9-2 * * * *',
+    '0 0 30 2 *', '0 0 * * MON', '@yearly', '-2h'])
+def test_invalid_schedules_fail_at_config_loading(write_config, open_service, schedule):
+    from tentacles.errors import ConfigError
+    path = write_config({'sources': [{'id': 'n', 'type': 'rss', 'url': 'https://n.test/rss',
+                                     'schedule': schedule}]})
+    with pytest.raises(ConfigError, match=r'sources\[0\].schedule'):
+        open_service(path)

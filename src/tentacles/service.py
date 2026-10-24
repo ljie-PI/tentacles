@@ -3,20 +3,26 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from datetime import datetime
 from pathlib import Path
 from typing import Callable, Mapping
 from zoneinfo import ZoneInfo
+from uuid import uuid4
 
 import httpx
 
-from tentacles.config import AppConfig, load_config
+from tentacles.config import AppConfig, SourceSpec, load_config
 from tentacles.errors import ConfigError, NotFound
 from tentacles.net import HttpPool
-from tentacles.schemas import ConfigCheck, FetchOutcome, ItemDetail, ItemView, Page, RunView, SourceView
+from tentacles.schemas import ConfigCheck, FetchOutcome, ItemDetail, ItemView, Page, RunView, SourceView, TaskView
 from tentacles.sources.runner import fetch_source
+from tentacles.asyncutil import run_store_call
 from tentacles.store import ItemQuery, Store
-from tentacles.timeutil import parse_since, utcnow
+from tentacles.timeutil import parse_since, utcnow, to_utc
+from tentacles.tasks import Task
+
+log = logging.getLogger(__name__)
 
 FETCH_CONCURRENCY = 4
 
@@ -29,6 +35,13 @@ class TentaclesService:
         self.store = store
         self._transport = transport
         self._clock = clock
+        self._tasks = {s.id: Task('fetch', s.id, s.schedule, config.app.timezone, s.enabled)
+                       for s in config.sources}
+        try:
+            store.register_tasks(list(self._tasks.values()), to_utc(clock()))
+        except BaseException:
+            store.close()
+            raise
 
     @classmethod
     def open(cls, config_path: Path | str | None = None, *,
@@ -57,6 +70,8 @@ class TentaclesService:
                 id=s.id, type=s.type, name=s.name, schedule=s.schedule, enabled=s.enabled,
                 last_fetch_at=st.last_fetch_at, last_status=st.last_status,
                 last_error=st.last_error, total_items=st.total_items,
+                next_run_at=self.store.get_task_state(self._tasks[s.id]).next_run(self._tasks[s.id])
+                if s.enabled else None,
             ))
         return views
 
@@ -66,15 +81,69 @@ class TentaclesService:
             specs = [self.config.source(i) for i in dict.fromkeys(ids)]
         else:
             specs = [s for s in self.config.sources if s.enabled]
+        return await self._fetch_batch(specs, due_only=False)
+
+    async def tick(self) -> list[FetchOutcome]:
+        """Execute enabled, due source tasks, reporting occupied leases as busy."""
+        return await self._fetch_batch([s for s in self.config.sources if s.enabled], due_only=True)
+
+    def scheduler_status(self) -> list[TaskView]:
+        now = to_utc(self._clock())
+        views = []
+        for task in self._tasks.values():
+            state = self.store.get_task_state(task)
+            views.append(TaskView(
+                kind=task.kind, target=task.target, schedule=task.schedule, enabled=task.enabled,
+                last_run_at=state.last_run_at,
+                next_run_at=state.next_run(task) if task.enabled else None,
+                running=state.running(now), last_status=state.last_status, last_error=state.last_error))
+        return views
+
+    async def _fetch_task(self, spec: SourceSpec, http: HttpPool, *, due_only: bool) -> FetchOutcome | None:
+        task = self._tasks[spec.id]
+        token, started_at = uuid4().hex, to_utc(self._clock())
+        outcome: FetchOutcome | None = None
+        failure: Exception | None = None
+        run_id, needs_cleanup = 0, True
+        try:
+            claim = await run_store_call(self.store.claim_task, task, token, started_at,
+                                         force=not due_only)
+            if claim.status != 'ready':
+                needs_cleanup = False
+                if claim.status == 'busy':
+                    outcome = FetchOutcome(source_id=spec.id, run_id=0, status='busy', new=0, dup=0)
+            else:
+                run_id = claim.run_id or 0
+                outcome = await fetch_source(spec, store=self.store, http=http, clock=self._clock,
+                                             run_id=claim.run_id, started_at=started_at)
+        except Exception as exc:
+            failure = exc
+        finally:
+            if needs_cleanup:
+                try:
+                    # The token is known even if cancellation arrived after acquisition committed.
+                    await run_store_call(self.store.finish_task, task, token, to_utc(self._clock()))
+                except Exception as exc:
+                    log.warning('could not finish task %s: %s', spec.id, exc)
+                    failure = failure or exc
+        if failure is not None:
+            error = f'{type(failure).__name__}: {failure}'
+            log.warning('fetch %s failed: %s', spec.id, error)
+            return FetchOutcome(source_id=spec.id, run_id=run_id, status='error',
+                                new=outcome.new if outcome else 0, dup=outcome.dup if outcome else 0,
+                                error=error, stats=outcome.stats if outcome else {})
+        return outcome
+
+    async def _fetch_batch(self, specs: list[SourceSpec], *, due_only: bool) -> list[FetchOutcome]:
         sem = asyncio.Semaphore(FETCH_CONCURRENCY)
         async with HttpPool(self._transport) as http:
             async def one(spec):
                 async with sem:
-                    return await fetch_source(spec, store=self.store, http=http, clock=self._clock)
+                    return await self._fetch_task(spec, http, due_only=due_only)
 
             tasks = [asyncio.create_task(one(s)) for s in specs]
             try:
-                return list(await asyncio.gather(*tasks))
+                return [result for result in await asyncio.gather(*tasks) if result is not None]
             except BaseException:
                 # gather can return as soon as a semaphore waiter is cancelled,
                 # while active sources are still draining their database workers.

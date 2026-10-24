@@ -7,13 +7,15 @@ import json
 import sqlite3
 import threading
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable
 
 from tentacles.dedup import split_similar
 from tentacles.models import Item, item_id
+from tentacles.errors import Conflict
 from tentacles.timeutil import from_iso, to_iso
+from tentacles.tasks import Claim, Task, TaskState
 
 
 @dataclass
@@ -117,7 +119,16 @@ def _migrate_v2(conn: sqlite3.Connection) -> None:
                      (json.dumps(cursor, ensure_ascii=False), row[0], row[0]))
 
 
-MIGRATIONS: list[Callable[[sqlite3.Connection], None]] = [_migrate_v1, _migrate_v2]
+def _migrate_v3(conn: sqlite3.Connection) -> None:
+    conn.execute("""CREATE TABLE task_state (
+        kind TEXT NOT NULL, target TEXT NOT NULL, first_seen_at TEXT NOT NULL,
+        last_run_at TEXT, last_status TEXT, last_error TEXT, token TEXT,
+        lease_until TEXT, started_at TEXT, run_id INTEGER,
+        PRIMARY KEY (kind, target)
+    )""")
+
+
+MIGRATIONS: list[Callable[[sqlite3.Connection], None]] = [_migrate_v1, _migrate_v2, _migrate_v3]
 
 _ITEM_COLUMNS = ("id, source_id, kind, external_id, url, title, author, summary, content,"
                  " published, fetched_at, fingerprint, meta")
@@ -163,10 +174,95 @@ class Store:
         with self._lock:
             self._conn.close()
 
+    # ---- scheduler tasks ---------------------------------------------------
+
+    def register_tasks(self, tasks: list[Task], now: datetime) -> None:
+        with self._lock, self._conn:
+            self._conn.executemany(
+                "INSERT OR IGNORE INTO task_state (kind, target, first_seen_at) VALUES (?, ?, ?)",
+                [(task.kind, task.target, to_iso(now)) for task in tasks])
+            for task in tasks:
+                self._reconcile_completed_task(task)
+
+    def get_task_state(self, task: Task) -> TaskState:
+        with self._lock:
+            row = self._conn.execute("SELECT * FROM task_state WHERE kind = ? AND target = ?",
+                                     (task.kind, task.target)).fetchone()
+        assert row is not None, "task must be registered before use"
+        return TaskState(from_iso(row['first_seen_at']), from_iso(row['last_run_at']),
+                         row['last_status'], row['last_error'], row['token'],
+                         from_iso(row['lease_until']), from_iso(row['started_at']), row['run_id'])
+
+    def claim_task(self, task: Task, token: str, now: datetime, *, force: bool = False,
+                   lease: timedelta = timedelta(hours=1)) -> Claim:
+        """Serialize the due check, lease acquisition and run creation across processes."""
+        with self._lock, self._conn:
+            self._conn.execute("BEGIN IMMEDIATE")
+            state = self._reconcile_completed_task(task)
+            if state.running(now):
+                return Claim('busy')
+            # An abandoned run is retried once its lease expires, even for a long interval.
+            if not force and state.token is None and state.next_run(task) > now:
+                return Claim('not_due')
+            if state.run_id is not None and state.token is not None:
+                self._finish_run(state.run_id, status='failed', now=now, error='task lease expired')
+                self._complete_task_run(state.run_id, 'failed', 'task lease expired')
+            cur = self._conn.execute(
+                "INSERT INTO runs (kind, target, status, started_at) VALUES (?, ?, 'running', ?)",
+                (task.kind, task.target, to_iso(now)))
+            run_id = cur.lastrowid
+            self._conn.execute(
+                "UPDATE task_state SET token = ?, lease_until = ?, started_at = ?, run_id = ?"
+                " WHERE kind = ? AND target = ?",
+                (token, to_iso(now + lease), to_iso(now), run_id, task.kind, task.target))
+            return Claim('ready', run_id)
+
+    def finish_task(self, task: Task, token: str, now: datetime) -> None:
+        """The owner alone releases a lease. A committed successful run stays successful."""
+        with self._lock, self._conn:
+            self._conn.execute("BEGIN IMMEDIATE")
+            state = self.get_task_state(task)
+            if state.token != token:
+                return
+            run = self._conn.execute("SELECT status, error FROM runs WHERE id = ?",
+                                     (state.run_id,)).fetchone()
+            status, error = run['status'], run['error']
+            if status == 'running':
+                status, error = 'failed', 'task cancelled before completion'
+                assert state.run_id is not None
+                self._finish_run(state.run_id, status=status, now=now, error=error)
+                if task.kind == 'fetch':
+                    self._conn.execute(
+                        "INSERT INTO source_state (source_id, last_fetch_at, last_status, last_error)"
+                        " VALUES (?, ?, 'error', ?) ON CONFLICT (source_id) DO UPDATE SET"
+                        " last_fetch_at = excluded.last_fetch_at, last_status = excluded.last_status,"
+                        " last_error = excluded.last_error",
+                        (task.target, to_iso(state.started_at), error))
+            assert state.run_id is not None
+            self._complete_task_run(state.run_id, status, error)
+
+    def _complete_task_run(self, run_id: int, status: str, error: str | None) -> None:
+        """Advance scheduling alongside run/cursor completion in the caller's transaction."""
+        self._conn.execute(
+            "UPDATE task_state SET last_run_at = started_at, last_status = ?, last_error = ?,"
+            " token = NULL, lease_until = NULL, started_at = NULL, run_id = NULL WHERE run_id = ?",
+            ('ok' if status == 'ok' else 'error', error, run_id))
+
+    def _reconcile_completed_task(self, task: Task) -> TaskState:
+        state = self.get_task_state(task)
+        if state.token is not None and state.run_id is not None:
+            run = self._conn.execute("SELECT status, error FROM runs WHERE id = ?",
+                                     (state.run_id,)).fetchone()
+            if run is not None and run['status'] != 'running':
+                # Repair a terminal run left with a lease by an interrupted older writer.
+                self._complete_task_run(state.run_id, run['status'], run['error'])
+                state = self.get_task_state(task)
+        return state
+
     # ---- items -------------------------------------------------------------
 
     def upsert_items(self, items: list[Item], *, source_id: str,
-                     title_since: datetime | None) -> tuple[list[str], int]:
+                     title_since: datetime | None, run_id: int | None = None) -> tuple[list[str], int]:
         """Atomically deduplicate and insert a source's batch, including its counts.
 
         The write lock precedes all duplicate reads, protecting both concurrent
@@ -177,6 +273,7 @@ class Store:
         counts: dict[str, int] = {}
         with self._lock, self._conn:
             self._conn.execute("BEGIN IMMEDIATE")
+            self._require_running(run_id)
             suppressed: list[Item] = []
             if items and title_since is not None:
                 candidates = [it for it in items if not self._is_duplicate(it)]
@@ -282,6 +379,7 @@ class Store:
         """Advance the cursor and finish its run together, or neither on failure."""
         with self._lock, self._conn:
             self._conn.execute("BEGIN IMMEDIATE")
+            self._require_running(run_id)
             self._conn.execute(
                 "INSERT INTO source_state (source_id, cursor, last_fetch_at, last_status,"
                 " last_error, total_items) VALUES (?, ?, ?, ?, ?, ?)"
@@ -292,12 +390,15 @@ class Store:
                  st.last_status, st.last_error, st.total_items),
             )
             self._finish_run(run_id, status="ok", now=now, stats=stats)
+            self._complete_task_run(run_id, 'ok', None)
 
     def save_fetch_failure(self, source_id: str, run_id: int | None, *, started_at: datetime,
                            finished_at: datetime, error: str) -> None:
         """Record failure without overwriting a cursor committed by another fetch."""
         with self._lock, self._conn:
             self._conn.execute("BEGIN IMMEDIATE")
+            if run_id is not None and not self._run_is_running(run_id):
+                return  # an expired owner must not overwrite the replacement's source state
             self._conn.execute(
                 "INSERT INTO source_state (source_id, last_fetch_at, last_status, last_error)"
                 " VALUES (?, ?, 'error', ?) ON CONFLICT (source_id) DO UPDATE SET"
@@ -305,6 +406,7 @@ class Store:
                 " last_error = excluded.last_error", (source_id, to_iso(started_at), error))
             if run_id is not None:
                 self._finish_run(run_id, status="failed", now=finished_at, error=error)
+                self._complete_task_run(run_id, 'failed', error)
 
     # ---- runs ---------------------------------------------------------------
 
@@ -316,10 +418,18 @@ class Store:
         assert cur.lastrowid is not None
         return cur.lastrowid
 
+    def _run_is_running(self, run_id: int) -> bool:
+        row = self._conn.execute("SELECT status FROM runs WHERE id = ?", (run_id,)).fetchone()
+        return row is not None and row['status'] == 'running'
+
+    def _require_running(self, run_id: int | None) -> None:
+        if run_id is not None and not self._run_is_running(run_id):
+            raise Conflict('fetch run no longer owns its task lease')
+
     def _finish_run(self, run_id: int, *, status: str, now: datetime, stats: dict[str, Any] | None = None,
                     cost: float | None = None, error: str | None = None) -> None:
         self._conn.execute(
-            "UPDATE runs SET status = ?, finished_at = ?, stats = ?, cost = ?, error = ? WHERE id = ?",
+            "UPDATE runs SET status = ?, finished_at = ?, stats = ?, cost = ?, error = ? WHERE id = ? AND status = 'running'",
             (status, to_iso(now), json.dumps(stats or {}, ensure_ascii=False), cost, error, run_id))
 
     def list_runs(self, kind: str | None = None, target: str | None = None,

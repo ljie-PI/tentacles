@@ -76,6 +76,8 @@ config_app = typer.Typer(help="配置", no_args_is_help=True, cls=_JsonErrorsGro
 sources_app = typer.Typer(help="信息源", no_args_is_help=True, cls=_JsonErrorsGroup)
 items_app = typer.Typer(help="条目", no_args_is_help=True, cls=_JsonErrorsGroup)
 runs_app = typer.Typer(help="运行记录", no_args_is_help=True, cls=_JsonErrorsGroup)
+scheduler_app = typer.Typer(help="调度器", no_args_is_help=True, cls=_JsonErrorsGroup)
+app.add_typer(scheduler_app, name="scheduler")
 app.add_typer(config_app, name="config")
 app.add_typer(sources_app, name="sources")
 app.add_typer(items_app, name="items")
@@ -183,8 +185,8 @@ def config_check(ctx: typer.Context) -> None:
 def sources_list(ctx: typer.Context) -> None:
     """列出信息源及其抓取状态。"""
     _run(ctx, lambda s: s.list_sources(), lambda rows, out, when: out.print(_table(
-        "Sources", ["id", "type", "schedule", "enabled", "last fetch", "status", "items", "error"],
-        [[r.id, r.type, r.schedule, r.enabled, when(r.last_fetch_at), r.last_status,
+        "Sources", ["id", "type", "schedule", "enabled", "last fetch", "next run", "status", "items", "error"],
+        [[r.id, r.type, r.schedule, r.enabled, when(r.last_fetch_at), when(r.next_run_at), r.last_status,
           r.total_items, r.last_error] for r in rows])))
 
 
@@ -195,6 +197,25 @@ def sources_fetch(ctx: typer.Context,
     _run(ctx, lambda s: s.fetch_sources(ids or None), lambda rows, out, when: out.print(_table(
         "Fetch", ["source", "status", "new", "dup", "error"],
         [[r.source_id, r.status, r.new, r.dup, r.error] for r in rows])))
+
+
+# ---- scheduler --------------------------------------------------------------
+
+@app.command("tick")
+def tick(ctx: typer.Context) -> None:
+    """执行所有到期任务；被占用的任务返回 busy。"""
+    _run(ctx, lambda s: s.tick(), lambda rows, out, when: out.print(_table(
+        "Tick", ["source", "status", "new", "dup", "error"],
+        [[r.source_id, r.status, r.new, r.dup, r.error] for r in rows])))
+
+
+@scheduler_app.command("status")
+def scheduler_status(ctx: typer.Context) -> None:
+    """列出任务频率、上次/下次运行时间、运行状态及最近错误。"""
+    _run(ctx, lambda s: s.scheduler_status(), lambda rows, out, when: out.print(_table(
+        "Scheduler", ["kind", "target", "schedule", "last run", "next run", "running", "status", "error"],
+        [[r.kind, r.target, r.schedule, when(r.last_run_at), when(r.next_run_at), r.running,
+          r.last_status, r.last_error] for r in rows])))
 
 
 # ---- items ------------------------------------------------------------------

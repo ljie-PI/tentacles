@@ -666,7 +666,7 @@ def test_cancelling_many_sources_drains_fetches_before_the_service_closes(web, w
 def test_a_concurrent_failure_does_not_overwrite_a_successful_cursor(write_config):
     import sqlite3
     import threading
-    from datetime import datetime, timezone
+    from datetime import datetime, timedelta, timezone
     from tentacles.service import TentaclesService
 
     path = write_config(rss_config())
@@ -693,7 +693,9 @@ def test_a_concurrent_failure_does_not_overwrite_a_successful_cursor(write_confi
         return httpx.Response(500)
 
     good = TentaclesService.open(path, transport=httpx.MockTransport(success), env={}, clock=clock)
-    bad = TentaclesService.open(path, transport=httpx.MockTransport(failure), env={})
+    # Simulate an abandoned lease: the new scheduler prevents normal overlap.
+    bad = TentaclesService.open(path, transport=httpx.MockTransport(failure), env={},
+                                clock=lambda: datetime.now(timezone.utc) - timedelta(hours=2))
     connection = sqlite3.connect(good.config.db_path)
     try:
         asyncio.run(good.fetch_sources())

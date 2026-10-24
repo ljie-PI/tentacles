@@ -48,12 +48,12 @@
 
 ### `sources list`
 
-列出信息源及其抓取状态。
+列出信息源及其抓取状态，包含 `next_run_at`（禁用源为 null）。
 
 ```json
 [{"id": "hacker-news", "type": "rss", "name": null, "schedule": "30m", "enabled": true,
   "last_fetch_at": "2026-10-24T15:30:00.000000Z", "last_status": "ok", "last_error": null,
-  "total_items": 120}]
+  "total_items": 120, "next_run_at": "2026-10-24T16:00:00Z"}]
 ```
 
 ### `sources fetch [ID...]`
@@ -62,7 +62,8 @@
 
 - 只有 guid、没有链接的 RSS 条目也会保留；正文只在 description 中时仍完整保存到详情。
 - 单个源失败不会影响其他源。失败的源在结果中 `status` 为 `"error"`，并保留上次的游标，下次抓取时会重试。
-- 即使部分源失败，**退出码仍为 0**，需要逐条检查 `status`。
+- 手动抓取与 `tick` 共用锁；已经运行的源返回 `status: "busy"`、`run_id: 0`，不产生新运行记录。手动抓取也会推进下次调度时间。
+- 即使部分源失败或 busy，**退出码仍为 0**，需要逐条检查 `status`。
 - 只有 ID 不存在时才会返回错误对象，退出码为 3。
 - 中断会等待在途数据库操作结束。若抓取已经完整提交，保留成功记录；否则记录失败并保留旧游标。
 
@@ -77,6 +78,36 @@
 
 1. **与已入库条目重复**：同源同外部 id、同 url，或同内容指纹（邮件不按指纹去重）。
 2. **近似标题**：同一批次内标题高度相似时保留第一条；也会跳过其他来源最近 48 小时内已入库过的近似标题。这些被跳过条目的外部 id 会持久化保存，重启或超过 48 小时也不会重新入库。同一来源不同批次的近似标题不会仅因此被合并。
+
+### `tick`
+
+并发抓取所有启用且已到期的信息源（最多四个同时执行），返回与 `sources fetch` 相同的数组。
+未到期/禁用的源不出现在结果中；没有到期任务时返回 `[]`。
+每项 `status` 为 `ok`、`error` 或 `busy`。部分失败或锁被占用时仍退出 0，应逐项检查。
+
+```json
+[{"source_id": "news", "run_id": 9, "status": "ok", "new": 0, "dup": 0,
+  "error": null, "stats": {"entries": 0, "too_old": 0, "fetched": 0, "new": 0, "dup": 0}},
+ {"source_id": "locked", "run_id": 0, "status": "busy", "new": 0, "dup": 0,
+  "error": null, "stats": {}}]
+```
+
+任务首次出现时间、上次开始时间和最近状态保存在 SQLite。间隔任务首次立即到期，
+cron 首次等到下一个触发点；成功/失败都按开始时间推进频率。锁默认一小时过期，
+过期后即使原间隔未到也可重试，旧持锁者不能覆盖新任务的条目、游标或状态。
+可以每 30 秒通过系统 cron/launchd 执行此命令（README 有示例）。
+
+### `scheduler status`
+
+列出配置中全部源的任务状态。`last_run_at` 为最近完成任务的开始时间，
+`running` 表示锁尚未到期；`last_status` 为 `ok` / `error` 或尚未运行时的 null。
+`next_run_at` 用当前配置的频率计算，禁用任务为 null；修改频率后下次打开 Service 即生效。
+
+```json
+[{"kind": "fetch", "target": "news", "schedule": "30m", "enabled": true,
+  "last_run_at": "2026-10-25T00:10:00Z", "next_run_at": "2026-10-25T00:40:00Z",
+  "running": false, "last_status": "ok", "last_error": null}]
+```
 
 ### `items list`
 
