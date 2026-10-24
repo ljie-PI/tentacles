@@ -9,6 +9,8 @@ from typing import Any, Generic, Literal, TypeVar
 from pydantic import BaseModel, Field
 
 from tentacles.models import Item, ItemKind
+from tentacles.pipelines.models import Evaluation, StageScore
+from tentacles.llm.types import TokenUsage as TokenUsage
 
 T = TypeVar("T")
 
@@ -72,6 +74,15 @@ class ItemView(BaseModel):
     published: datetime | None
     fetched_at: datetime
 
+    pipeline_id: str | None = None
+    persona_version: int | None = None
+    passed: bool | None = None
+    score: float | None = None
+    tags: list[str] = Field(default_factory=list)
+    reason: str | None = None
+    stage: str | None = None
+    stage_scores: list[StageScore] = Field(default_factory=list)
+
     @classmethod
     def of(cls, item: Item) -> "ItemView":
         return cls.model_validate(item.model_dump(include=set(cls.model_fields)))
@@ -82,6 +93,7 @@ class ItemDetail(ItemView):
     content: str
     fingerprint: str
     meta: dict[str, Any]
+    evaluations: list[Evaluation] = Field(default_factory=list)
 
 
 class RunView(BaseModel):
@@ -103,12 +115,6 @@ class ModelView(BaseModel):
     model: str
     base_url: str
     key_configured: bool
-
-
-class TokenUsage(BaseModel):
-    input_tokens: int = Field(default=0, ge=0, strict=True)
-    output_tokens: int = Field(default=0, ge=0, strict=True)
-    total_tokens: int = Field(default=0, ge=0, strict=True)
 
 
 class Completion(BaseModel):

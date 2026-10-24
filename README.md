@@ -2,7 +2,7 @@
 
 个人信息与新闻管理系统：从多种信息源抓取内容，按个人 persona 过滤，再用 LLM 加工成日报、深度报道或邮件简报。整体设计见 [#18](https://github.com/ljie-PI/tentacles/issues/18)，实施进度见它的子 issue。
 
-> 目前已完成骨架：配置驱动的 RSS 抓取、去重入库、条目查询、运行记录、持久化调度、命名模型注册表/连通性测试和版本化 Persona 管理。过滤、LLM 处理、邮件和网页源、Web 端将陆续加入。
+> 目前已完成骨架：配置驱动的 RSS 抓取、去重入库、条目查询、运行记录、持久化调度、命名模型注册表/连通性测试、版本化 Persona 管理，以及 keyword 级联过滤和 digest 日报。pipeline 自动调度、其他过滤/处理、邮件和网页源、Web 端将陆续加入。
 
 ## 快速开始
 
@@ -40,6 +40,8 @@ tentacles items list --since 24h  # 查看最近 24 小时的条目
 | `tentacles items show ID` | 查看条目详情 |
 | `tentacles tick` | 并发执行到期的信息源任务 |
 | `tentacles scheduler status` | 查看任务频率、到期时间、运行状态 |
+| `tentacles pipelines list/filter/run ID` | 查看 pipeline、只过滤或生成报告 |
+| `tentacles reports list/show ID` | 查看报告列表和全文 |
 | `tentacles runs list` | 查看运行记录 |
 
 所有命令都支持 `--json`：stdout 只输出一个 JSON 值，日志写到 stderr，退出码按错误类型区分。给 agent 用的完整说明见 [docs/agent-cli.md](docs/agent-cli.md)。
@@ -83,6 +85,33 @@ tentacles persona export default > default-snapshot.yaml
 关键词去重/删除不区分大小写（Unicode casefold），保留最早的拼写和顺序。
 每次编辑写成新版本；回滚同样追加版本。并发的纯关键词编辑会合并。提供 profile 且未跳过标签时，
 若提交前 persona 已被修改（包括内容相同的快捷路径），旧请求返回 `conflict`，请刷新后重试。导出的是完整版本快照，不是只有 profile 的文本，也不会直接覆盖任何文件。
+
+## Keyword 过滤与 digest 日报
+
+示例配置声明了 `daily-tech` pipeline：使用 default Persona、最近 24h **抓取**的条目，
+先用 keyword 级联筛选，再选择分数最高的最多 60 条生成日报。
+
+```sh
+tentacles pipelines filter daily-tech
+tentacles items list --pipeline daily-tech --passed
+tentacles pipelines run daily-tech       # 显式调用 process 模型，可能产生费用
+tentacles reports list --pipeline daily-tech
+tentacles reports show REPORT_ID
+```
+
+当前 `tick` 只自动抓取来源；pipeline 的 `schedule` 是频率元数据，自动到期执行将在 #24 接入。
+过滤和运行各有独立的持久化锁；运行遇到过滤锁被占用时，会直接处理之前已通过的条目。
+消费记录独立于 Persona 版本，同一 pipeline 中的条目只消费一次。报告失败时保留未报告状态，修复问题后可以重试。
+报告存入 SQLite，同时按 pipeline 写入 `reports_dir` 下的 Markdown 文件（新文件默认私有权限）。
+
+关键词在标题和摘要中不区分大小写匹配，exclude 优先（0 分）、include 为 1 分，否则 0.5。
+可启用有执行时限的正则匹配。级联保留每阶段分数、理由及统计；最后阶段出错的条目不缓存，之后可以重试。
+`items list --pipeline ... --rejected` 查看淘汰结果；`items show ID` 包含各 pipeline 的最新评估。
+
+`pipelines filter ID --reevaluate` 会删除窗口内当前 Persona 版本的已有评估并重算，
+消费账本不会被清除，不会让已报告条目重新进入报告。
+`processor.type: none` 不调用模型、不生成文件，但将选中的条目标记为已消费。
+完整参数和自定义提示词格式见 [agent 命令说明](docs/agent-cli.md)。
 
 ## 自动抓取
 

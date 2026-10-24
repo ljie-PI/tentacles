@@ -4,6 +4,8 @@ entry in MIGRATIONS upgrades the schema by one version."""
 from __future__ import annotations
 
 import json
+import logging
+import os
 import sqlite3
 import threading
 from dataclasses import dataclass, field
@@ -17,6 +19,9 @@ from tentacles.errors import Conflict
 from tentacles.personas.models import PersonaEdit, PersonaView, edit_keywords, keywords
 from tentacles.timeutil import from_iso, to_iso, to_utc
 from tentacles.tasks import Claim, Task, TaskState
+from tentacles.pipelines.models import Evaluation, PipelineQuery, ReportView
+
+log = logging.getLogger(__name__)
 
 
 @dataclass
@@ -51,6 +56,8 @@ class ItemQuery:
     search: str | None = None
     limit: int = 50
     offset: int = 0
+    pipeline_id: str | None = None
+    passed: bool | None = None
 
 
 _V1 = """
@@ -138,10 +145,55 @@ def _migrate_v4(conn: sqlite3.Connection) -> None:
     )""")
 
 
-MIGRATIONS: list[Callable[[sqlite3.Connection], None]] = [_migrate_v1, _migrate_v2, _migrate_v3, _migrate_v4]
+def _migrate_v5(conn: sqlite3.Connection) -> None:
+    conn.execute("""CREATE TABLE evaluations (
+        pipeline_id TEXT NOT NULL, item_id TEXT NOT NULL, persona_version INTEGER NOT NULL,
+        passed INTEGER NOT NULL, score REAL NOT NULL, tags TEXT NOT NULL, reason TEXT NOT NULL,
+        stage TEXT NOT NULL, stage_scores TEXT NOT NULL, evaluated_at TEXT NOT NULL, reported_at TEXT,
+        PRIMARY KEY (pipeline_id, item_id, persona_version)
+    )""")
+    conn.execute('CREATE INDEX idx_evaluations_pending ON evaluations'
+                 ' (pipeline_id, persona_version, passed, reported_at, score DESC)')
+    conn.execute("""CREATE TABLE reports (
+        id TEXT PRIMARY KEY, pipeline_id TEXT NOT NULL, persona_version INTEGER NOT NULL,
+        kind TEXT NOT NULL, title TEXT NOT NULL, markdown TEXT NOT NULL, item_ids TEXT NOT NULL,
+        model TEXT, usage TEXT NOT NULL, cost REAL, path TEXT NOT NULL, created_at TEXT NOT NULL
+    )""")
+    conn.execute('CREATE INDEX idx_reports_time ON reports (created_at DESC, id DESC)')
+    conn.execute('CREATE INDEX idx_reports_pipeline ON reports (pipeline_id, created_at DESC, id DESC)')
+
+
+def _migrate_v6(conn: sqlite3.Connection) -> None:
+    conn.execute("""CREATE TABLE pipeline_consumption (
+        pipeline_id TEXT NOT NULL, item_id TEXT NOT NULL, consumed_at TEXT NOT NULL,
+        report_id TEXT, PRIMARY KEY (pipeline_id, item_id)
+    )""")
+    conn.execute('INSERT INTO pipeline_consumption (pipeline_id, item_id, consumed_at)'
+                 ' SELECT pipeline_id, item_id, MIN(reported_at) FROM evaluations'
+                 ' WHERE reported_at IS NOT NULL GROUP BY pipeline_id, item_id')
+    # A pre-ledger explicit re-evaluation may have deleted its reported marker.
+    # Reports still contain the immutable material IDs, so recover those too.
+    for row in conn.execute('SELECT id, pipeline_id, item_ids, created_at FROM reports'
+                            ' ORDER BY created_at, id').fetchall():
+        for item_id in json.loads(row['item_ids']):
+            conn.execute('INSERT INTO pipeline_consumption VALUES (?, ?, ?, ?)'
+                ' ON CONFLICT (pipeline_id, item_id) DO UPDATE SET'
+                ' consumed_at = MIN(consumed_at, excluded.consumed_at),'
+                ' report_id = COALESCE(report_id, excluded.report_id)',
+                (row['pipeline_id'], item_id, row['created_at'], row['id']))
+    conn.execute('UPDATE evaluations SET reported_at = (SELECT consumed_at FROM pipeline_consumption c'
+                 ' WHERE c.pipeline_id = evaluations.pipeline_id AND c.item_id = evaluations.item_id)'
+                 ' WHERE EXISTS (SELECT 1 FROM pipeline_consumption c WHERE c.pipeline_id = evaluations.pipeline_id'
+                 ' AND c.item_id = evaluations.item_id)')
+
+
+MIGRATIONS: list[Callable[[sqlite3.Connection], None]] = [_migrate_v1, _migrate_v2, _migrate_v3, _migrate_v4, _migrate_v5, _migrate_v6]
 
 _ITEM_COLUMNS = ("id, source_id, kind, external_id, url, title, author, summary, content,"
                  " published, fetched_at, fingerprint, meta")
+_EVAL_COLUMNS = ('pipeline_id', 'item_id', 'persona_version', 'passed', 'score', 'tags',
+                 'reason', 'stage', 'stage_scores', 'evaluated_at', 'reported_at')
+_EVAL_PROJECTION = ', '.join(f'e.{column} AS eval_{column}' for column in _EVAL_COLUMNS)
 _SORT_TIME = "COALESCE(published, fetched_at)"
 
 
@@ -183,6 +235,163 @@ class Store:
     def close(self) -> None:
         with self._lock:
             self._conn.close()
+
+    # ---- pipeline evaluations ----------------------------------------------
+
+    def filter_candidates(self, q: PipelineQuery, *, reevaluate: bool = False,
+                          run_id: int | None = None) -> list[Item]:
+        placeholders = ','.join('?' for _ in q.sources)
+        with self._lock, self._conn:
+            if reevaluate:
+                assert run_id is not None
+                self._conn.execute('BEGIN IMMEDIATE')
+                self._require_running(run_id)
+                self._conn.execute('DELETE FROM evaluations WHERE pipeline_id = ? AND persona_version = ?'
+                    f' AND item_id IN (SELECT id FROM items WHERE source_id IN ({placeholders})'
+                    ' AND fetched_at >= ? AND fetched_at <= ?)',
+                    [q.pipeline_id, q.persona_version, *q.sources, to_iso(q.since), to_iso(q.until)])
+            rows = self._conn.execute(
+                f"SELECT {_ITEM_COLUMNS} FROM items WHERE source_id IN ({placeholders})"
+                " AND fetched_at >= ? AND fetched_at <= ? AND NOT EXISTS"
+                " (SELECT 1 FROM evaluations e WHERE e.item_id = items.id AND e.pipeline_id = ?"
+                " AND e.persona_version = ?) ORDER BY fetched_at DESC, id LIMIT ?",
+                [*q.sources, to_iso(q.since), to_iso(q.until), q.pipeline_id, q.persona_version, q.limit]).fetchall()
+        return [_row_to_item(row) for row in rows]
+
+    @staticmethod
+    def _pending_from(q: PipelineQuery) -> tuple[str, list[Any]]:
+        placeholders = ','.join('?' for _ in q.sources)
+        sql = (' FROM items i JOIN evaluations e ON e.item_id = i.id'
+               f' WHERE e.pipeline_id = ? AND e.persona_version = ? AND i.source_id IN ({placeholders})'
+               ' AND i.fetched_at >= ? AND i.fetched_at <= ? AND e.passed = 1 AND e.reported_at IS NULL'
+               ' AND NOT EXISTS (SELECT 1 FROM pipeline_consumption c'
+               ' WHERE c.pipeline_id = e.pipeline_id AND c.item_id = e.item_id)')
+        return sql, [q.pipeline_id, q.persona_version, *q.sources, to_iso(q.since), to_iso(q.until)]
+
+    def pending_items(self, q: PipelineQuery) -> list[tuple[Item, Evaluation]]:
+        sql, args = self._pending_from(q)
+        with self._lock:
+            rows = self._conn.execute(f'SELECT i.*, {_EVAL_PROJECTION}' + sql +
+                ' ORDER BY e.score DESC, i.fetched_at DESC, i.id LIMIT ?', [*args, q.limit]).fetchall()
+        return [(_row_to_item(row), _row_to_evaluation(row, 'eval_')) for row in rows]
+
+    def pending_count(self, q: PipelineQuery) -> int:
+        sql, args = self._pending_from(q)
+        with self._lock:
+            return self._conn.execute('SELECT COUNT(*)' + sql, args).fetchone()[0]
+
+    def pipeline_ids(self) -> set[str]:
+        with self._lock:
+            return {row[0] for row in self._conn.execute(
+                'SELECT DISTINCT pipeline_id FROM evaluations UNION SELECT DISTINCT pipeline_id FROM reports'
+                ' UNION SELECT DISTINCT pipeline_id FROM pipeline_consumption')}
+
+    def _check_pending(self, evaluations: list[Evaluation]) -> None:
+        for evaluation in evaluations:
+            row = self._conn.execute(
+                'SELECT * FROM evaluations WHERE pipeline_id = ? AND item_id = ? AND persona_version = ?'
+                ' AND NOT EXISTS (SELECT 1 FROM pipeline_consumption c'
+                ' WHERE c.pipeline_id = evaluations.pipeline_id AND c.item_id = evaluations.item_id)',
+                (evaluation.pipeline_id, evaluation.item_id, evaluation.persona_version)).fetchone()
+            if row is None or _row_to_evaluation(row) != evaluation or evaluation.reported_at is not None:
+                raise Conflict('evaluations changed while preparing the report')
+
+    def _consume(self, evaluations: list[Evaluation], now: datetime, report_id: str | None = None) -> None:
+        self._conn.executemany('INSERT INTO pipeline_consumption VALUES (?, ?, ?, ?)',
+            [(e.pipeline_id, e.item_id, to_iso(now), report_id) for e in evaluations])
+        self._conn.executemany('UPDATE evaluations SET reported_at = ? WHERE pipeline_id = ? AND item_id = ?',
+            [(to_iso(now), e.pipeline_id, e.item_id) for e in evaluations])
+
+    def save_report(self, report: ReportView, evaluations: list[Evaluation], run_id: int,
+                    stats: dict[str, Any]) -> None:
+        """Publish one exclusive file and its database record/consumption together.
+
+        A failed SQL commit removes only the file created by this operation.
+        Worker IO is drained by the caller before cancellation may close Store.
+        """
+        path, created = Path(report.path), False
+        try:
+            with self._lock, self._conn:
+                self._conn.execute('BEGIN IMMEDIATE')
+                self._require_running(run_id)
+                self._check_pending(evaluations)
+                path.parent.mkdir(parents=True, exist_ok=True)
+                with open(path, 'x', encoding='utf-8',
+                          opener=lambda target, flags: os.open(target, flags, 0o600)) as handle:
+                    created = True
+                    handle.write(report.markdown)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                self._conn.execute('INSERT INTO reports VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+                    (report.id, report.pipeline_id, report.persona_version, report.kind, report.title,
+                     report.markdown, json.dumps(report.item_ids), report.model,
+                     report.usage.model_dump_json(), report.cost, report.path, to_iso(report.created_at)))
+                self._consume(evaluations, report.created_at, report.id)
+                self._finish_run(run_id, status='ok', now=report.created_at, stats=stats, cost=report.cost)
+                self._complete_task_run(run_id, 'ok', None)
+        except BaseException:
+            if created:
+                try:
+                    path.unlink(missing_ok=True)
+                except OSError as cleanup_error:
+                    log.warning('could not remove uncommitted report file (%s)', type(cleanup_error).__name__)
+                    # The original failure remains visible; never remove an unowned file.
+            raise
+
+    def consume_without_report(self, evaluations: list[Evaluation], run_id: int, now: datetime,
+                               stats: dict[str, Any]) -> None:
+        with self._lock, self._conn:
+            self._conn.execute('BEGIN IMMEDIATE')
+            self._require_running(run_id)
+            self._check_pending(evaluations)
+            self._consume(evaluations, now)
+            self._finish_run(run_id, status='ok', now=now, stats=stats)
+            self._complete_task_run(run_id, 'ok', None)
+
+    def list_reports(self, pipeline_id: str | None, limit: int, offset: int) -> tuple[list[ReportView], int]:
+        condition = 'pipeline_id = ?' if pipeline_id is not None else '1 = 1'
+        args = [pipeline_id] if pipeline_id is not None else []
+        with self._lock:
+            total = self._conn.execute('SELECT COUNT(*) FROM reports WHERE ' + condition, args).fetchone()[0]
+            rows = self._conn.execute('SELECT * FROM reports WHERE ' + condition +
+                ' ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?', [*args, limit, offset]).fetchall()
+        return [_row_to_report(row) for row in rows], total
+
+    def get_report(self, report_id: str) -> ReportView | None:
+        with self._lock:
+            row = self._conn.execute('SELECT * FROM reports WHERE id = ?', (report_id,)).fetchone()
+        return _row_to_report(row) if row else None
+
+    def save_evaluations(self, evaluations: list[Evaluation], run_id: int, now: datetime,
+                         stats: dict[str, Any]) -> None:
+        with self._lock, self._conn:
+            self._conn.execute('BEGIN IMMEDIATE')
+            self._require_running(run_id)
+            for evaluation in evaluations:
+                self._conn.execute(
+                    'INSERT OR IGNORE INTO evaluations VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?,'
+                    ' (SELECT consumed_at FROM pipeline_consumption WHERE pipeline_id = ? AND item_id = ?))',
+                    (evaluation.pipeline_id, evaluation.item_id, evaluation.persona_version,
+                     evaluation.passed, evaluation.score, json.dumps(evaluation.tags, ensure_ascii=False),
+                     evaluation.reason, evaluation.stage,
+                     json.dumps([s.model_dump() for s in evaluation.stage_scores], ensure_ascii=False),
+                     to_iso(evaluation.evaluated_at), evaluation.pipeline_id, evaluation.item_id))
+            self._finish_run(run_id, status='ok', now=now, stats=stats)
+            self._complete_task_run(run_id, 'ok', None)
+
+    def item_evaluations(self, item_id: str, pipeline_id: str | None = None) -> list[Evaluation]:
+        where = 'e.item_id = ?'
+        args = [item_id]
+        if pipeline_id is not None:
+            where += ' AND e.pipeline_id = ?'
+            args.append(pipeline_id)
+        with self._lock:
+            rows = self._conn.execute(
+                'SELECT e.* FROM evaluations e WHERE ' + where +
+                ' AND e.persona_version = (SELECT MAX(newer.persona_version) FROM evaluations newer'
+                ' WHERE newer.pipeline_id = e.pipeline_id AND newer.item_id = e.item_id)'
+                ' ORDER BY e.pipeline_id', args).fetchall()
+        return [_row_to_evaluation(row) for row in rows]
 
     # ---- versioned personas ------------------------------------------------
 
@@ -410,8 +619,20 @@ class Store:
                                      (item_id_,)).fetchone()
         return _row_to_item(row) if row else None
 
-    def list_items(self, q: ItemQuery) -> tuple[list[Item], int]:
-        where, args = ["1 = 1"], []
+    def list_items(self, q: ItemQuery) -> tuple[list[tuple[Item, Evaluation | None]], int]:
+        where = ["1 = 1"]
+        args: list[Any] = []
+        joined = ''
+        extra_columns = ''
+        if q.pipeline_id is not None:
+            joined = (' JOIN evaluations e ON e.item_id = items.id AND e.pipeline_id = ?'
+                      ' AND e.persona_version = (SELECT MAX(n.persona_version) FROM evaluations n'
+                      ' WHERE n.pipeline_id = e.pipeline_id AND n.item_id = e.item_id)')
+            args.append(q.pipeline_id)
+            extra_columns = ', ' + _EVAL_PROJECTION
+            if q.passed is not None:
+                where.append('e.passed = ?')
+                args.append(q.passed)
         if q.source_ids:
             where.append(f"source_id IN ({','.join('?' * len(q.source_ids))})")
             args += q.source_ids
@@ -430,13 +651,14 @@ class Store:
             args += [q.search.casefold()] * 3
         cond = " AND ".join(where)
         with self._lock:
-            total = self._conn.execute(f"SELECT COUNT(*) FROM items WHERE {cond}", args).fetchone()[0]
+            total = self._conn.execute(f"SELECT COUNT(*) FROM items{joined} WHERE {cond}", args).fetchone()[0]
             rows = self._conn.execute(
-                f"SELECT {_ITEM_COLUMNS} FROM items WHERE {cond}"
+                f"SELECT {_ITEM_COLUMNS}{extra_columns} FROM items{joined} WHERE {cond}"
                 f" ORDER BY {_SORT_TIME} DESC, id LIMIT ? OFFSET ?",
                 [*args, q.limit, q.offset],
             ).fetchall()
-        return [_row_to_item(r) for r in rows], total
+        return [(_row_to_item(r), _row_to_evaluation(r, "eval_")
+                 if q.pipeline_id is not None else None) for r in rows], total
 
     # ---- source state -----------------------------------------------------
 
@@ -493,9 +715,20 @@ class Store:
         assert cur.lastrowid is not None
         return cur.lastrowid
 
-    def finish_run(self, run_id: int, *, status: str, now: datetime, error: str | None = None) -> None:
+    def finish_run(self, run_id: int, *, status: str, now: datetime, error: str | None = None,
+                   stats: dict[str, Any] | None = None, cost: float | None = None) -> None:
         with self._lock, self._conn:
-            self._finish_run(run_id, status=status, now=now, error=error)
+            self._conn.execute('BEGIN IMMEDIATE')
+            previous = self._conn.execute('SELECT status FROM runs WHERE id = ?', (run_id,)).fetchone()
+            self._finish_run(run_id, status=status, now=now, error=error, stats=stats, cost=cost)
+            if previous is not None and previous['status'] == status == 'failed' and stats is not None:
+                # A late response may reveal billed usage after lease reclamation.
+                # Update that old run's metrics only, never its status or replacement task.
+                self._conn.execute('UPDATE runs SET stats = ?, cost = COALESCE(?, cost) WHERE id = ?',
+                                   (json.dumps(stats, ensure_ascii=False), cost, run_id))
+            actual = self._conn.execute('SELECT status, error FROM runs WHERE id = ?', (run_id,)).fetchone()
+            if actual is not None and actual['status'] != 'running':
+                self._complete_task_run(run_id, actual['status'], actual['error'])
 
     def _run_is_running(self, run_id: int) -> bool:
         row = self._conn.execute("SELECT status FROM runs WHERE id = ?", (run_id,)).fetchone()
@@ -503,7 +736,7 @@ class Store:
 
     def _require_running(self, run_id: int | None) -> None:
         if run_id is not None and not self._run_is_running(run_id):
-            raise Conflict('fetch run no longer owns its task lease')
+            raise Conflict('run no longer owns its task lease')
 
     def _finish_run(self, run_id: int, *, status: str, now: datetime, stats: dict[str, Any] | None = None,
                     cost: float | None = None, error: str | None = None) -> None:
@@ -545,3 +778,18 @@ def _row_to_persona(row: sqlite3.Row) -> PersonaView:
                        exclude=json.loads(row['exclude_keywords']), source=row['source'], note=row['note'],
                        created_at=from_iso(row['created_at']), tag_status=row['tag_status'],
                        tag_error=row['tag_error'])
+
+
+def _row_to_evaluation(row: sqlite3.Row, prefix: str = '') -> Evaluation:
+    data = {column: row[prefix + column] for column in _EVAL_COLUMNS}
+    data['tags'] = json.loads(data['tags'])
+    data['stage_scores'] = json.loads(data['stage_scores'])
+    data['evaluated_at'], data['reported_at'] = from_iso(data['evaluated_at']), from_iso(data['reported_at'])
+    return Evaluation.model_validate(data)
+
+
+def _row_to_report(row: sqlite3.Row) -> ReportView:
+    return ReportView(id=row['id'], pipeline_id=row['pipeline_id'], persona_version=row['persona_version'],
+        kind=row['kind'], title=row['title'], markdown=row['markdown'], item_ids=json.loads(row['item_ids']),
+        model=row['model'], usage=json.loads(row['usage']), cost=row['cost'], path=row['path'],
+        created_at=from_iso(row['created_at']))

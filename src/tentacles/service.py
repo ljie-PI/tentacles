@@ -25,6 +25,8 @@ from tentacles.asyncutil import run_store_call
 from tentacles.store import ItemQuery, Store
 from tentacles.personas.manager import PersonaManager
 from tentacles.personas.models import PersonaView
+from tentacles.pipelines.manager import PipelineManager
+from tentacles.pipelines.models import PipelineOutcome, ReportView, PipelineView
 from tentacles.timeutil import parse_since, utcnow, to_utc
 from tentacles.tasks import Task
 
@@ -47,7 +49,9 @@ class TentaclesService:
         self._tasks = {s.id: Task('fetch', s.id, s.schedule, config.app.timezone, s.enabled)
                        for s in config.sources}
         try:
+            self.pipelines = PipelineManager(config, store, self.models, clock)
             self.personas.seed(config)
+            self.pipelines.initialize()
             store.register_tasks(list(self._tasks.values()), to_utc(clock()))
         except BaseException:
             store.close()
@@ -72,6 +76,35 @@ class TentaclesService:
     def check_config(self) -> ConfigCheck:
         # 能打开 Service 就说明配置已通过全部校验
         return ConfigCheck(ok=True, path=str(self.config.path), sources=len(self.config.sources))
+
+    # ---- pipelines ----------------------------------------------------------
+
+    def list_pipelines(self) -> list[PipelineView]:
+        return self.pipelines.list_pipelines()
+
+    async def filter_pipeline(self, pipeline_id: str, *, reevaluate: bool = False) -> PipelineOutcome:
+        return await self.pipelines.filter(pipeline_id, reevaluate=reevaluate)
+
+    async def run_pipeline(self, pipeline_id: str) -> PipelineOutcome:
+        return await self.pipelines.run(pipeline_id)
+
+    def list_reports(self, *, pipeline: str | None = None, limit: int = 50, offset: int = 0) -> Page[ReportView]:
+        if not 1 <= limit <= 500 or offset < 0:
+            raise ConfigError('reports limit must be 1–500 and offset nonnegative')
+        if pipeline is not None:
+            self._known_pipeline(pipeline)
+        reports, total = self.store.list_reports(pipeline, limit, offset)
+        return Page[ReportView](items=reports, total=total, limit=limit, offset=offset)
+
+    def _known_pipeline(self, pipeline_id: str) -> None:
+        if pipeline_id not in {p.id for p in self.config.pipelines} | self.store.pipeline_ids():
+            raise NotFound(f'unknown pipeline {pipeline_id!r}')
+
+    def get_report(self, report_id: str) -> ReportView:
+        report = self.store.get_report(report_id)
+        if report is None:
+            raise NotFound(f'unknown report {report_id!r}')
+        return report
 
     # ---- personas -----------------------------------------------------------
 
@@ -245,7 +278,12 @@ class TentaclesService:
 
     def list_items(self, *, sources: list[str] | None = None, kinds: list[str] | None = None,
                    since: str | datetime | None = None, until: str | datetime | None = None,
-                   search: str | None = None, limit: int = 50, offset: int = 0) -> Page[ItemView]:
+                   search: str | None = None, limit: int = 50, offset: int = 0,
+                   pipeline: str | None = None, passed: bool | None = None) -> Page[ItemView]:
+        if passed is not None and pipeline is None:
+            raise ConfigError('passed/rejected filtering requires a pipeline')
+        if pipeline is not None:
+            self._known_pipeline(pipeline)
         if not 1 <= limit <= 500:
             raise ConfigError("limit must be between 1 and 500")
         if offset < 0:
@@ -256,16 +294,17 @@ class TentaclesService:
                 if s not in known:
                     raise NotFound(f"unknown source {s!r}")
         q = ItemQuery(source_ids=sources or None, kinds=kinds or None, since=self._time(since),
-                      until=self._time(until), search=search or None, limit=limit, offset=offset)
+                      until=self._time(until), search=search or None, limit=limit, offset=offset, pipeline_id=pipeline, passed=passed)
         items, total = self.store.list_items(q)
-        return Page[ItemView](items=[ItemView.of(i) for i in items], total=total,
-                              limit=limit, offset=offset)
+        views = [ItemView.model_validate({**item.model_dump(), **(evaluation.model_dump() if evaluation else {})})
+                 for item, evaluation in items]
+        return Page[ItemView](items=views, total=total, limit=limit, offset=offset)
 
     def get_item(self, item_id: str) -> ItemDetail:
         item = self.store.get_item(item_id)
         if item is None:
             raise NotFound(f"unknown item {item_id!r}")
-        return ItemDetail.model_validate(item.model_dump(include=set(ItemDetail.model_fields)))
+        return ItemDetail.model_validate({**item.model_dump(), "evaluations": self.store.item_evaluations(item_id)})
 
     # ---- runs ---------------------------------------------------------------
 
