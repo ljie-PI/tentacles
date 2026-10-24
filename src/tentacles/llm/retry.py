@@ -71,6 +71,9 @@ def retry_after_seconds(response: httpx.Response | None, now: datetime) -> float
             seconds = (deadline - to_utc(now)).total_seconds()
         except (ValueError, TypeError, OverflowError):
             return None
+    else:
+        if seconds < 0 or value.lstrip().startswith('-'):
+            return None
     return min(60.0, max(0.0, seconds)) if math.isfinite(seconds) else None
 
 

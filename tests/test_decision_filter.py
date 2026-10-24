@@ -583,3 +583,76 @@ def test_required_response_metadata_is_validated_without_dropping_known_cost(wri
         assert service.list_runs(kind='filter')[0].cost == known_cost
 
     asyncio.run(scenario())
+
+
+@pytest.mark.parametrize('retries', [0, 2])
+@pytest.mark.parametrize('hint', ['-1', '-0.5', '-0'])
+def test_negative_retry_after_cannot_make_a_permanent_402_transient(write_config, open_service, web, retries, hint):
+    web.serve(FEED, three_entries())
+    web.serve(DECISION_URL, 'credit failure', status=402, headers={'Retry-After': hint})
+    service = open_service(write_config(decision_config(retries=retries, concurrency=1)))
+
+    async def scenario():
+        await service.fetch_sources()
+        outcome = await service.filter_pipeline('daily')
+        assert outcome.status == 'error'
+        assert len(web.requests_to(DECISION_URL)) == 1
+        assert service.list_runs(kind='filter')[0].status == 'failed'
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize('cancel_again', [False, True])
+def test_owner_cancellation_never_interrupts_a_workers_async_http_cleanup(write_config, web, cancel_again):
+    web.serve(FEED, three_entries())
+    path = write_config(decision_config(concurrency=2))
+
+    async def scenario():
+        both_started, cleanup_started, release_cleanup = asyncio.Event(), asyncio.Event(), asyncio.Event()
+        active = started = 0
+
+        async def respond(request):
+            nonlocal active, started
+            active += 1
+            started += 1
+            position = started
+            if started == 2:
+                both_started.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                if position == 2:
+                    cleanup_started.set()
+                    await release_cleanup.wait()
+                active -= 1
+
+        seed = TentaclesService.open(path, env={}, transport=web.transport())
+        worker = None
+        task = None
+        try:
+            await seed.fetch_sources()
+            worker = TentaclesService.open(path, env={}, transport=httpx.MockTransport(respond))
+            task = asyncio.create_task(worker.filter_pipeline('daily'))
+            await asyncio.wait_for(both_started.wait(), 2)
+            task.cancel()
+            await asyncio.wait_for(cleanup_started.wait(), 2)
+            await asyncio.sleep(0.01)
+            assert not task.done() and active == 1
+            if cancel_again:
+                task.cancel()
+                await asyncio.sleep(0.01)
+                assert not task.done() and active == 1
+            release_cleanup.set()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            assert active == 0
+            await worker.aclose()
+        finally:
+            release_cleanup.set()
+            if task:
+                await asyncio.gather(task, return_exceptions=True)
+            if worker:
+                await worker.aclose()
+            await seed.aclose()
+
+    asyncio.run(scenario())
