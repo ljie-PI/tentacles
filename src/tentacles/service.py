@@ -40,7 +40,7 @@ class TentaclesService:
         self._transport = transport
         self._clock = clock
         self._model_http = HttpPool(transport)
-        self.models = ModelRegistry(config.models, config.defaults, self._model_http)
+        self.models = ModelRegistry(config.models, config.defaults, self._model_http, clock=clock)
         self._tasks = {s.id: Task('fetch', s.id, s.schedule, config.app.timezone, s.enabled)
                        for s in config.sources}
         try:

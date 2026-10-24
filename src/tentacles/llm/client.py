@@ -14,11 +14,14 @@ from tentacles.errors import ConfigError, UpstreamError
 from tentacles.llm.config import ModelSpec
 from tentacles.net import HttpPool
 from tentacles.schemas import Completion, DecisionCompletion, TokenUsage
+from tentacles.timeutil import to_utc
 
 
 class ModelClient:
-    def __init__(self, name: str, spec: ModelSpec, http: HttpPool, redact: Callable[[str], str]):
+    def __init__(self, name: str, spec: ModelSpec, http: HttpPool, redact: Callable[[str], str],
+                 clock: Callable[[], datetime]):
         self.name, self.spec, self._http, self._redact = name, spec, http, redact
+        self._clock = clock
 
     async def _post(self, path: str, body: dict[str, Any], *, headers: dict[str, str] | None = None) -> dict[str, Any]:
         key = self.spec.api_key.get_secret_value()
@@ -42,7 +45,7 @@ class ModelClient:
                 if not retryable or attempt == self.spec.retries:
                     summary = self._redact(response.text)[:500]
                     raise UpstreamError(f'model {self.name!r}: HTTP {response.status_code}: {summary}')
-            await asyncio.sleep(_retry_delay(response, attempt))
+            await asyncio.sleep(_retry_delay(response, attempt, self._clock()))
         assert response is not None
         try:
             data = response.json()
@@ -126,7 +129,7 @@ class DecisionModel(ModelClient):
             raise UpstreamError(f'model {self.name!r}: invalid decision response') from None
 
 
-def _retry_delay(response: httpx.Response | None, attempt: int) -> float:
+def _retry_delay(response: httpx.Response | None, attempt: int, now: datetime) -> float:
     value = response.headers.get('Retry-After') if response is not None else None
     if value is not None:
         try:
@@ -136,7 +139,7 @@ def _retry_delay(response: httpx.Response | None, attempt: int) -> float:
                 deadline = parsedate_to_datetime(value)
                 if deadline.tzinfo is None:
                     deadline = deadline.replace(tzinfo=timezone.utc)
-                seconds = (deadline - datetime.now(timezone.utc)).total_seconds()
+                seconds = (deadline - to_utc(now)).total_seconds()
             except (ValueError, TypeError, OverflowError):
                 seconds = float('nan')
         if math.isfinite(seconds):

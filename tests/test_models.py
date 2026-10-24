@@ -239,3 +239,29 @@ def test_openai_supports_modern_max_completion_tokens_in_extra_body(web, write_c
     web.handle(CHAT_URL, respond)
     service = open_service(write_config(model_config(extra_body={'max_completion_tokens': 200})))
     asyncio.run(service.complete_model([{'role': 'user', 'content': 'Hi'}], max_tokens=100))
+
+
+def test_http_date_retry_after_uses_the_injected_clock(write_config, web):
+    from datetime import datetime, timezone
+    now = datetime(2030, 1, 2, tzinfo=timezone.utc)
+    attempts = []
+
+    def respond(request):
+        attempts.append(request)
+        if len(attempts) == 1:
+            return httpx.Response(429, headers={'Retry-After': 'Tue, 01 Jan 2030 00:00:00 GMT'})
+        return httpx.Response(200, json=chat_reply())
+
+    web.handle(CHAT_URL, respond)
+
+    async def scenario():
+        service = TentaclesService.open(write_config(model_config(retries=1)),
+                                        transport=web.transport(), clock=lambda: now)
+        try:
+            result = await asyncio.wait_for(service.test_model('fast'), 0.2)
+            assert result.ok and result.latency_ms == 0
+            assert len(attempts) == 2
+        finally:
+            await service.aclose()
+
+    asyncio.run(scenario())

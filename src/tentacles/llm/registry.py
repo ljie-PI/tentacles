@@ -1,6 +1,10 @@
 """Lazy named model registry; every instance shares the same HTTP pool."""
 from __future__ import annotations
 
+from datetime import datetime
+from typing import Callable
+
+from tentacles.timeutil import utcnow
 from tentacles.errors import ConfigError, NotFound
 from tentacles.llm.client import ChatModel, DecisionModel
 from tentacles.llm.config import Defaults, ModelSpec, Stage, STAGES
@@ -8,8 +12,10 @@ from tentacles.net import HttpPool
 
 
 class ModelRegistry:
-    def __init__(self, specs: dict[str, ModelSpec], defaults: Defaults, http: HttpPool):
+    def __init__(self, specs: dict[str, ModelSpec], defaults: Defaults, http: HttpPool, *,
+                 clock: Callable[[], datetime] = utcnow):
         self._specs, self._defaults, self._http = specs, defaults, http
+        self._clock = clock
         self._chats: dict[str, ChatModel] = {}
         self._decisions: dict[str, DecisionModel] = {}
         self._keys = sorted((s.api_key.get_secret_value() for s in specs.values()
@@ -40,11 +46,11 @@ class ModelRegistry:
     def chat(self, name: str) -> ChatModel:
         spec = self.spec(name, kind='chat')
         if name not in self._chats:
-            self._chats[name] = ChatModel(name, spec, self._http, self.redact)
+            self._chats[name] = ChatModel(name, spec, self._http, self.redact, self._clock)
         return self._chats[name]
 
     def decision(self, name: str) -> DecisionModel:
         spec = self.spec(name, kind='decision')
         if name not in self._decisions:
-            self._decisions[name] = DecisionModel(name, spec, self._http, self.redact)
+            self._decisions[name] = DecisionModel(name, spec, self._http, self.redact, self._clock)
         return self._decisions[name]
