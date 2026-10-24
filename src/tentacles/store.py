@@ -8,6 +8,7 @@ import logging
 import os
 import sqlite3
 import threading
+from time import monotonic, sleep
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -213,12 +214,44 @@ class Store:
         try:
             self._conn.row_factory = sqlite3.Row
             self._conn.create_function("casefold", 1, str.casefold, deterministic=True)
-            self._conn.execute("PRAGMA journal_mode = WAL")
             self._conn.execute("PRAGMA busy_timeout = 5000")
+            self._enable_wal()
             self._migrate()
         except BaseException:
             self._conn.close()
             raise
+
+    def _enable_wal(self) -> None:
+        """Retry initial mode-switch races within a five-second IO budget.
+
+        A transient lock upgrade can fail without invoking SQLite's busy handler.
+        The monotonic resource budget is independent of the domain clock.
+        """
+        deadline = monotonic() + 5
+        last_error: sqlite3.OperationalError | None = None
+        while True:
+            remaining = deadline - monotonic()
+            if remaining <= 0:
+                if last_error is not None:
+                    raise last_error
+                raise sqlite3.OperationalError('database initialization lock timeout')
+            # A retry must not start another full five-second native wait.
+            self._conn.execute(f'PRAGMA busy_timeout = {max(1, int(remaining * 1000))}')
+            try:
+                self._conn.execute('PRAGMA journal_mode = WAL')
+            except sqlite3.OperationalError as exc:
+                # Error names are available on newer Python; 3.10 needs text.
+                name = str(getattr(exc, 'sqlite_errorname', '') or '')
+                message = str(exc).casefold()
+                transient = name.startswith(('SQLITE_BUSY', 'SQLITE_LOCKED')) or 'locked' in message or 'busy' in message
+                remaining = deadline - monotonic()
+                if not transient or remaining <= 0:
+                    raise
+                last_error = exc
+                sleep(min(0.01, remaining))
+            else:
+                self._conn.execute('PRAGMA busy_timeout = 5000')
+                return
 
     def _migrate(self) -> None:
         """Each migration (DDL included) runs in one explicit transaction, so a
