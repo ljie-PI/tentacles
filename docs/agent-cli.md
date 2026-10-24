@@ -46,6 +46,58 @@
 
 校验失败时退出码为 2，`message` 会指出出错的位置，例如 `sources[3].url: must be an http(s) URL`。
 
+### `models list`
+
+列出命名模型及可安全公开的配置，不调用服务商，不输出密钥及额外请求体。
+
+```json
+[{"name": "fast", "provider": "openai", "kind": "chat", "model": "deepseek-chat",
+  "base_url": "https://api.deepseek.com/v1", "key_configured": false}]
+```
+
+### `models test NAME`
+
+实际调用一次模型（遇到临时错误时按配置重试），可能产生费用。
+对话模型发送简短连通性提问；decision 模型通过 Decisions API 执行一个 noul 问题，默认拒绝数据收集。
+返回可用性、总耗时（含重试等待）、最多 500 字符的样例、实际模型、用量和提供方返回的 cost（缺省为 null）。
+
+```json
+{"name": "fast", "ok": true, "latency_ms": 120.0, "sample": "OK", "model": "deepseek-chat",
+ "usage": {"input_tokens": 12, "output_tokens": 1, "total_tokens": 13}, "cost": null, "error": null}
+```
+
+提供方失败或 key 为空时，返回 `ok: false` 和包含命名模型名的 `error`；**退出码仍为 0**，
+调用方须检查 `ok`，与 `sources fetch` 的逐项状态约定一致。未知名称返回 `not_found`（退出码 3）；
+配置引用/种类错误返回 `invalid`（退出码 2）。诊断会脱敏所有已配置模型 key；不记录请求正文或完整响应。
+
+模型规格：
+
+| 字段 | 含义/默认值 |
+|---|---|
+| `provider` | `openai`（默认，OpenAI 兼容）、`anthropic`、`openrouter` |
+| `kind` | `chat`（默认）或 `decision`（仅 OpenRouter） |
+| `model` | 服务商模型 ID，必填 |
+| `base_url` | API 根路径，可选；缺省使用对应服务商地址；不允许凭证、query、fragment |
+| `api_key` | 可为空，推荐 `${VAR:-}`；本地免鉴权服务可填非空占位值 |
+| `temperature` | 可选 0–2，未配置则不发送 |
+| `max_tokens` | 正整数，默认 4096；Anthropic 始终发送 |
+| `timeout` | 每次 HTTP 请求超时秒数，默认 60 |
+| `retries` | 首次请求之后最多重试次数，默认 2 |
+| `concurrency` | decision 并发配置，默认 8（由后续 decision 过滤阶段使用） |
+| `extra_body` | 原样合并的 JSON 额外参数；不允许覆盖 `model/messages/system/stream/state/questions` 协议字段 |
+
+显式调用的 token/温度参数优先于配置。OpenAI 兼容模型可以在 `extra_body` 设置
+`max_completion_tokens`，此时不再发送旧 `max_tokens`。decision 的 OpenRouter 根路径
+使用 `/api`（若填写 `/api/v1` 则自动去掉 `/v1`），调用 `/alpha/decisions`。
+
+重试范围：408、409、425、429、所有 5xx（含 524、529）、网络错误和超时。
+`Retry-After` 支持秒数和 HTTP 日期，上限 60 秒；否则指数退避加抖动，上限 30 秒。
+其余 4xx 不重试，诊断包含脱敏后的响应体前 500 字符。不跟随模型请求重定向，避免将认证头发往另一地址。
+
+纯 RSS 配置可以省略整个模型注册表；配置模型时必须显式为五个阶段提供种类匹配的默认引用。
+`decision` 阶段只用 decision 模型，其余阶段用 chat；单次操作显式指定的名称优先于阶段默认值。
+模型客户端及 JSON 提取是后续过滤、persona 和处理器的共享能力，并通过同一个可注入 HTTP 边界测试。
+
 ### `sources list`
 
 列出信息源及其抓取状态，包含 `next_run_at`（禁用源为 null）。

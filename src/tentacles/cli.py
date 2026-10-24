@@ -77,6 +77,8 @@ sources_app = typer.Typer(help="信息源", no_args_is_help=True, cls=_JsonError
 items_app = typer.Typer(help="条目", no_args_is_help=True, cls=_JsonErrorsGroup)
 runs_app = typer.Typer(help="运行记录", no_args_is_help=True, cls=_JsonErrorsGroup)
 scheduler_app = typer.Typer(help="调度器", no_args_is_help=True, cls=_JsonErrorsGroup)
+models_app = typer.Typer(help="命名模型", no_args_is_help=True, cls=_JsonErrorsGroup)
+app.add_typer(models_app, name="models")
 app.add_typer(scheduler_app, name="scheduler")
 app.add_typer(config_app, name="config")
 app.add_typer(sources_app, name="sources")
@@ -177,6 +179,25 @@ def config_check(ctx: typer.Context) -> None:
     """校验配置文件。"""
     _run(ctx, lambda s: s.check_config(),
          lambda r, out, when: out.print(f"[green]ok[/green] {escape(r.path)}（{r.sources} 个信息源）"))
+
+
+# ---- models -----------------------------------------------------------------
+
+@models_app.command("list")
+def models_list(ctx: typer.Context) -> None:
+    """列出命名模型；只显示 key 是否已配置，不输出密钥。"""
+    _run(ctx, lambda s: s.list_models(), lambda rows, out, when: out.print(_table(
+        "Models", ["name", "provider", "kind", "model", "base URL", "key configured"],
+        [[r.name, r.provider, r.kind, r.model, r.base_url, r.key_configured] for r in rows])))
+
+
+@models_app.command("test")
+def models_test(ctx: typer.Context, name: str = typer.Argument(..., help="配置中的模型名")) -> None:
+    """实际调用模型并返回可用性、延迟、样例、用量；失败时 ok=false。"""
+    def render(result, out: Console, when: TimeFmt) -> None:
+        out.print(Text(f"{result.name}: {'ok' if result.ok else 'error'} ({result.latency_ms:.0f} ms)"))
+        out.print(Text(result.sample if result.ok else result.error or ''))
+    _run(ctx, lambda s: s.test_model(name), render)
 
 
 # ---- sources ----------------------------------------------------------------
