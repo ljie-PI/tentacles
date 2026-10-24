@@ -1,0 +1,15 @@
+# 抓取的 RSS/Atom 源，格式：名称: URL
+feeds:
+  # 中文
+  solidot: https://www.solidot.org/index.rss
+  36kr: https://36kr.com/feed
+  少数派: https://sspai.com/feed
+  BBC中文: https://feeds.bbci.co.uk/zhongwen/simp/rss.xml
+  界面新闻: https://www.jiemian.com/rss/all.xml
+  # 英文
+  hacker-news: https://hnrss.org/frontpage
+  techcrunch: https://techcrunch.com/feed/
+  the-verge: https://www.theverge.com/rss/index.xml
+  ars-technica: https://feeds.arstechnica.com/arstechnica/index
+  nytimes-world: https://rss.nytimes.com/services/xml/rss/nyt/World.xml
+  cnbc-top: https://search.cnbc.com/rs/search/combinedcms/view.xml?partnerId=wrss01
