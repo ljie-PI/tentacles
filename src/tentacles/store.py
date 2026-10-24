@@ -206,6 +206,7 @@ class Store:
                 return Claim('not_due')
             if state.run_id is not None and state.token is not None:
                 self._finish_run(state.run_id, status='failed', now=now, error='task lease expired')
+                self._complete_task_run(state.run_id, 'failed', 'task lease expired')
             cur = self._conn.execute(
                 "INSERT INTO runs (kind, target, status, started_at) VALUES (?, ?, 'running', ?)",
                 (task.kind, task.target, to_iso(now)))

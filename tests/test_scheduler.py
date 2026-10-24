@@ -366,3 +366,44 @@ def test_completion_failure_does_not_replace_cancellation(write_config):
             await service.aclose()
 
     asyncio.run(scenario())
+
+
+def test_expired_failure_is_visible_while_the_replacement_is_running(write_config):
+    clock = Clock()
+    path = write_config(sources('2w'))
+
+    async def scenario():
+        entered = [asyncio.Event(), asyncio.Event()]
+        release = [asyncio.Event(), asyncio.Event()]
+        attempts = 0
+
+        async def respond(request):
+            nonlocal attempts
+            attempt = attempts
+            attempts += 1
+            entered[attempt].set()
+            await release[attempt].wait()
+            return httpx.Response(200, text=rss_feed())
+
+        one = TentaclesService.open(path, clock=clock, transport=httpx.MockTransport(respond))
+        two = TentaclesService.open(path, clock=clock, transport=httpx.MockTransport(respond))
+        active = []
+        try:
+            active.append(asyncio.create_task(one.tick()))
+            await asyncio.wait_for(entered[0].wait(), 2)
+            clock.now += timedelta(hours=1)
+            active.append(asyncio.create_task(two.tick()))
+            await asyncio.wait_for(entered[1].wait(), 2)
+            [state] = two.scheduler_status()
+            assert state.running
+            assert state.last_run_at == datetime(2026, 10, 25, 0, 10, tzinfo=timezone.utc)
+            assert state.last_status == 'error'
+            assert state.last_error == 'task lease expired'
+        finally:
+            for event in release:
+                event.set()
+            await asyncio.gather(*active, return_exceptions=True)
+            await one.aclose()
+            await two.aclose()
+
+    asyncio.run(scenario())
