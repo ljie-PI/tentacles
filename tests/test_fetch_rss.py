@@ -1,6 +1,7 @@
 import asyncio
 
 import httpx
+import pytest
 
 from conftest import rss_feed
 
@@ -453,3 +454,145 @@ def test_existing_skeleton_databases_keep_suppression_and_repair_counts(web, wri
     asyncio.run(svc.aclose())
     reopened = open_service(path)
     assert asyncio.run(reopened.fetch_sources(["news"]))[0].new == 0
+
+
+@pytest.mark.parametrize("shared_service", [True, False])
+@pytest.mark.parametrize("duplicate_by", ["url", "fingerprint", "title"])
+def test_concurrent_fetches_deduplicate_atomically(web, write_config, shared_service, duplicate_by):
+    import sqlite3
+    import threading
+    from tentacles.service import TentaclesService
+
+    other = "https://other.example.org/rss"
+    path = write_config({"sources": [
+        {"id": "news", "type": "rss", "url": FEED, "schedule": "1h"},
+        {"id": "other", "type": "rss", "url": other, "schedule": "1h"}]})
+    ready = 0
+    timer = None
+    locker = None
+    gate = None
+
+    async def handler(request):
+        nonlocal ready, timer, locker
+        ready += 1
+        if ready == 2:
+            locker = sqlite3.connect(svc1.config.db_path, check_same_thread=False)
+            locker.execute("BEGIN IMMEDIATE")
+            timer = threading.Timer(0.2, locker.commit)
+            timer.start()
+            gate.set()
+        await gate.wait()
+        host = request.url.host
+        link = "https://article.example/shared" if duplicate_by == "url" else f"https://{host}/article"
+        body = "same body" if duplicate_by == "fingerprint" else f"coverage from {host}"
+        return httpx.Response(200, content=rss_feed(
+            {"title": "Officials report major earthquake in Japan", "link": link,
+             "description": body}).encode())
+
+    svc1 = TentaclesService.open(path, transport=httpx.MockTransport(handler), env={})
+    svc2 = svc1 if shared_service else TentaclesService.open(path, transport=httpx.MockTransport(handler), env={})
+
+    async def fetch_concurrently():
+        nonlocal gate
+        gate = asyncio.Event()
+        batches = await asyncio.gather(svc1.fetch_sources(["news"]), svc2.fetch_sources(["other"]))
+        return [batch[0] for batch in batches]
+
+    try:
+        outcomes = asyncio.run(fetch_concurrently())
+        assert [o.status for o in outcomes] == ["ok", "ok"]
+        assert sorted(o.new for o in outcomes) == [0, 1]
+        assert sorted(o.dup for o in outcomes) == [0, 1]
+        assert svc1.list_items().total == 1
+        assert sum(s.total_items for s in svc1.list_sources()) == 1
+    finally:
+        if timer is not None:
+            timer.join()
+        if locker is not None:
+            locker.close()
+        asyncio.run(svc1.aclose())
+        if svc2 is not svc1:
+            asyncio.run(svc2.aclose())
+
+
+def test_failure_finishing_a_run_does_not_advance_the_cursor(web, write_config, open_service):
+    import sqlite3
+
+    headers = []
+
+    def handler(request):
+        headers.append(request.headers.get("if-none-match"))
+        version = len(headers)
+        return httpx.Response(200, headers={"etag": f"v{version}"}, content=rss_feed(
+            {"title": f"Bulletin {version}", "link": f"https://news.example.com/cursor/{version}"}).encode())
+
+    web.handle(FEED, handler)
+    svc = open_service(write_config(rss_config()))
+    assert asyncio.run(svc.fetch_sources())[0].status == "ok"
+    conn = sqlite3.connect(svc.config.db_path)
+    try:
+        conn.executescript("""
+            CREATE TRIGGER reject_success BEFORE UPDATE OF status ON runs
+            WHEN NEW.status = 'ok' BEGIN SELECT RAISE(FAIL, 'temporary write failure'); END;
+        """)
+        assert asyncio.run(svc.fetch_sources())[0].status == "error"
+        assert svc.list_runs()[0].status == "failed"
+        conn.execute("DROP TRIGGER reject_success")
+        conn.commit()
+        assert asyncio.run(svc.fetch_sources())[0].status == "ok"
+        assert headers == [None, "v1", "v1"]
+    finally:
+        conn.close()
+
+
+def test_cancellation_during_a_success_commit_keeps_the_completed_run(web, write_config):
+    import threading
+    from datetime import datetime, timezone
+    from tentacles.service import TentaclesService
+
+    pause_finish = threading.Event()
+    entered = threading.Event()
+    release = threading.Event()
+    headers = []
+
+    def clock():
+        if pause_finish.is_set() and not release.is_set():
+            entered.set()
+            if not release.wait(3):
+                raise RuntimeError("test did not release the finishing clock")
+        return datetime.now(timezone.utc)
+
+    def handler(request):
+        headers.append(request.headers.get("if-none-match"))
+        version = len(headers)
+        if version == 2:
+            pause_finish.set()
+        return httpx.Response(200, headers={"etag": f"v{version}"}, content=rss_feed(
+            {"title": f"Commit bulletin {version}", "link": f"https://news.example.com/commit/{version}"}).encode())
+
+    web.handle(FEED, handler)
+    svc = TentaclesService.open(write_config(rss_config()), transport=web.transport(), env={}, clock=clock)
+
+    async def cancel_commit():
+        task = asyncio.create_task(svc.fetch_sources())
+        try:
+            assert await asyncio.to_thread(entered.wait, 2)
+            task.cancel()
+            release.set()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        finally:
+            release.set()
+            if not task.done():
+                await task
+
+    try:
+        asyncio.run(svc.fetch_sources())
+        asyncio.run(cancel_commit())
+        assert svc.list_runs()[0].status == "ok"
+        assert svc.list_sources()[0].last_status == "ok"
+        asyncio.run(svc.fetch_sources())
+        assert headers == [None, "v1", "v2"]
+    finally:
+        release.set()
+        asyncio.run(svc.aclose())

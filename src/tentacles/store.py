@@ -9,8 +9,9 @@ import threading
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Iterable
+from typing import Any, Callable
 
+from tentacles.dedup import split_similar
 from tentacles.models import Item, item_id
 from tentacles.timeutil import from_iso, to_iso
 
@@ -164,20 +165,28 @@ class Store:
 
     # ---- items -------------------------------------------------------------
 
-    def upsert_items(self, items: Iterable[Item], *,
-                     suppressed: Iterable[Item] = ()) -> tuple[list[str], int]:
-        """Insert items that aren't duplicates; returns (new ids, duplicate count).
+    def upsert_items(self, items: list[Item], *, source_id: str,
+                     title_since: datetime | None) -> tuple[list[str], int]:
+        """Atomically deduplicate and insert a source's batch, including its counts.
 
-        Duplicate = same (source, external id), or same non-empty url, or same
-        content fingerprint (not applied to email: distinct mails can match).
+        The write lock precedes all duplicate reads, protecting both concurrent
+        worker threads and independent processes sharing the same database.
         """
+        fetched = len(items)
         new: list[str] = []
-        dup = 0
         counts: dict[str, int] = {}
         with self._lock, self._conn:
+            self._conn.execute("BEGIN IMMEDIATE")
+            suppressed: list[Item] = []
+            if items and title_since is not None:
+                candidates = [it for it in items if not self._is_duplicate(it)]
+                if candidates:
+                    items, suppressed = split_similar(candidates, self._recent_titles(
+                        exclude_source=source_id, since=title_since))
+                else:
+                    items = []
             for it in items:
                 if self._is_duplicate(it):
-                    dup += 1
                     continue
                 self._conn.execute(
                     f"INSERT INTO items ({_ITEM_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -193,7 +202,7 @@ class Store:
                 list(counts.items()))
             self._conn.executemany("INSERT OR IGNORE INTO suppressed_items VALUES (?, ?)",
                                    [(it.source_id, it.external_id) for it in suppressed])
-        return new, dup
+        return new, fetched - len(new)
 
     # 三条规则各走自己的索引；合成一个 OR 查询会退化为全表扫描
     _SUPPRESSED = "SELECT 1 FROM suppressed_items WHERE source_id = ? AND external_id = ?"
@@ -211,21 +220,11 @@ class Store:
             return True
         return it.kind != "email" and bool(c.execute(self._DUP_BY_FP, (it.fingerprint,)).fetchone())
 
-    def unknown(self, items: Iterable[Item]) -> list[Item]:
-        """Items not already stored under the same (source, external id) or url —
-        the cheap indexed checks, used before costlier similarity work."""
-        with self._lock:
-            c = self._conn
-            return [it for it in items
-                    if not c.execute(self._SUPPRESSED, (it.source_id, it.external_id)).fetchone()
-                    and not c.execute(self._DUP_BY_ID, (it.source_id, it.external_id)).fetchone()
-                    and not (it.url and c.execute(self._DUP_BY_URL, (it.url,)).fetchone())]
-
     def source_ids(self) -> set[str]:
         with self._lock:
             return {r[0] for r in self._conn.execute("SELECT DISTINCT source_id FROM items")}
 
-    def recent_titles(self, *, exclude_source: str, since: datetime) -> list[str]:
+    def _recent_titles(self, *, exclude_source: str, since: datetime) -> list[str]:
         """Titles of non-email items other sources stored since `since`."""
         with self._lock:
             rows = self._conn.execute(
@@ -279,17 +278,28 @@ class Store:
                            row["last_status"], row["last_error"], row["total_items"])
 
     def save_source_state(self, st: SourceState) -> None:
-        """Saves cursor and status; upsert_items updates counts in the insertion transaction."""
+        """Saves cursor and status; insertion updates counts in its own transaction."""
         with self._lock, self._conn:
-            self._conn.execute(
-                "INSERT INTO source_state (source_id, cursor, last_fetch_at, last_status,"
-                " last_error, total_items) VALUES (?, ?, ?, ?, ?, ?)"
-                " ON CONFLICT (source_id) DO UPDATE SET cursor = excluded.cursor,"
-                " last_fetch_at = excluded.last_fetch_at, last_status = excluded.last_status,"
-                " last_error = excluded.last_error",
-                (st.source_id, json.dumps(st.cursor, ensure_ascii=False), to_iso(st.last_fetch_at),
-                 st.last_status, st.last_error, st.total_items),
-            )
+            self._save_source_state(st)
+
+    def _save_source_state(self, st: SourceState) -> None:
+        self._conn.execute(
+            "INSERT INTO source_state (source_id, cursor, last_fetch_at, last_status,"
+            " last_error, total_items) VALUES (?, ?, ?, ?, ?, ?)"
+            " ON CONFLICT (source_id) DO UPDATE SET cursor = excluded.cursor,"
+            " last_fetch_at = excluded.last_fetch_at, last_status = excluded.last_status,"
+            " last_error = excluded.last_error",
+            (st.source_id, json.dumps(st.cursor, ensure_ascii=False), to_iso(st.last_fetch_at),
+             st.last_status, st.last_error, st.total_items),
+        )
+
+    def save_fetch_success(self, st: SourceState, run_id: int, *, now: datetime,
+                           stats: dict[str, Any]) -> None:
+        """Advance the cursor and finish its run together, or neither on failure."""
+        with self._lock, self._conn:
+            self._conn.execute("BEGIN IMMEDIATE")
+            self._save_source_state(st)
+            self._finish_run(run_id, status="ok", now=now, stats=stats)
 
     # ---- runs ---------------------------------------------------------------
 
@@ -304,9 +314,13 @@ class Store:
     def finish_run(self, run_id: int, *, status: str, now: datetime, stats: dict[str, Any] | None = None,
                    cost: float | None = None, error: str | None = None) -> None:
         with self._lock, self._conn:
-            self._conn.execute(
-                "UPDATE runs SET status = ?, finished_at = ?, stats = ?, cost = ?, error = ? WHERE id = ?",
-                (status, to_iso(now), json.dumps(stats or {}, ensure_ascii=False), cost, error, run_id))
+            self._finish_run(run_id, status=status, now=now, stats=stats, cost=cost, error=error)
+
+    def _finish_run(self, run_id: int, *, status: str, now: datetime, stats: dict[str, Any] | None = None,
+                    cost: float | None = None, error: str | None = None) -> None:
+        self._conn.execute(
+            "UPDATE runs SET status = ?, finished_at = ?, stats = ?, cost = ?, error = ? WHERE id = ?",
+            (status, to_iso(now), json.dumps(stats or {}, ensure_ascii=False), cost, error, run_id))
 
     def list_runs(self, kind: str | None = None, target: str | None = None,
                   limit: int = 50) -> list[RunRecord]:
