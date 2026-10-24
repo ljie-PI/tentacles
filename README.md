@@ -100,6 +100,7 @@ tentacles reports show REPORT_ID
 ```
 
 `tick` 按顺序执行全部到期任务：先并发抓取，再逐条只过滤，最后逐条运行 pipeline。
+重叠调用中遇到来源 busy 时，其依赖的 pipeline 会延期而不推进时间，避免提前空跑漏报；无关 pipeline 仍继续。
 每条启用的 pipeline 按 `schedule` 处理；可选 `filter_schedule` 提供更频繁的只过滤轮次。
 `pipelines list` 和 `scheduler status` 显示下次执行时间与当前待报告数量。
 **注意：`tick` 现在可能调用配置中的模型并产生费用。** 关闭自动运行可设置 pipeline `enabled: false`；

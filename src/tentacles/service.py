@@ -207,7 +207,13 @@ class TentaclesService:
         """Drain concurrent fetches, then due filters, then due pipeline runs."""
         fetched = await self._fetch_batch([s for s in self.config.sources if s.enabled], due_only=True)
         outcomes = [TickOutcome.of_fetch(outcome) for outcome in fetched]
+        busy_sources = {outcome.source_id for outcome in fetched if outcome.status == 'busy'}
+        deferred = {spec.id for spec in self.config.pipelines if busy_sources.intersection(spec.sources)}
         for task in self.pipelines.scheduled_tasks():
+            # Another tick may still own an upstream fetch. Do not advance a
+            # dependent schedule against an incomplete snapshot of its inputs.
+            if task.target in deferred:
+                continue
             kind: Literal['filter', 'pipeline'] = 'filter' if task.kind == 'filter' else 'pipeline'
             result = (await self.pipelines.filter(task.target, due_only=True) if kind == 'filter'
                       else await self.pipelines.run(task.target, due_only=True))

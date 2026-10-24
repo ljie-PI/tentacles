@@ -317,7 +317,9 @@ show 返回完整报告：id/pipeline_id/persona_version/kind/title/markdown/ite
 2. 按配置顺序依次执行到期的 `filter_schedule` 任务。
 3. 按配置顺序依次执行到期的 pipeline `schedule` 任务。
 
-无到期任务返回 `[]`；未到期/禁用的任务不出现在数组中。部分失败不会中断其他普通任务；
+无到期任务返回 `[]`；未到期/禁用的任务不出现在数组中。
+抓取返回 busy 表示其他调用仍在更新输入：依赖该来源的 pipeline 本轮延期，不创建运行记录、不推进下游频率；
+不依赖它的 pipeline 照常执行。部分普通失败不会中断其他任务；
 用户取消则停止本轮并等待 IO 清理。status 是 ok / error / busy，pipeline 无新内容为 no_new。
 仍退出 0，调用方应逐项检查 status。模型支持的 pipeline 会实际调用服务商，可能产生费用。
 

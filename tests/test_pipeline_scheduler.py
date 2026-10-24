@@ -537,3 +537,96 @@ def test_v6_upgrade_preserves_manual_progress_and_waits_for_first_automatic_cron
             await service.aclose()
 
     asyncio.run(scenario())
+
+
+def test_overlapping_tick_defers_dependent_jobs_until_owning_fetch_finishes(write_config):
+    from test_models import model_config, chat_reply
+    clock = Clock()
+    data = {**model_config(), **scheduled_config()}
+    data['pipelines'][0].update(window='30m', processor={'type': 'digest'})
+    path = write_config(data)
+
+    async def scenario():
+        entered, release = asyncio.Event(), asyncio.Event()
+
+        async def respond(request):
+            if request.url.path == '/rss':
+                entered.set()
+                await release.wait()
+                return httpx.Response(200, text=three_entries())
+            return httpx.Response(200, json=chat_reply('Research [1]. Weather [2].'))
+
+        transport = httpx.MockTransport(respond)
+        one = TentaclesService.open(path, env={}, transport=transport, clock=clock)
+        two = TentaclesService.open(path, env={}, transport=transport, clock=clock)
+        task = None
+        try:
+            task = asyncio.create_task(one.tick())
+            await asyncio.wait_for(entered.wait(), 2)
+            clock.now += timedelta(minutes=1)
+            waiting = await two.tick()
+            assert [(r.kind, r.status) for r in waiting] == [('fetch', 'busy')]
+            assert two.list_runs(kind='filter') == two.list_runs(kind='pipeline') == []
+            clock.now += timedelta(minutes=1)
+            release.set()
+            owner = await task
+            assert [r.kind for r in owner] == ['fetch', 'filter', 'pipeline']
+            assert owner[-1].status == 'ok' and two.list_reports().total == 1
+        finally:
+            release.set()
+            if task:
+                await asyncio.gather(task, return_exceptions=True)
+            await one.aclose()
+            await two.aclose()
+
+    asyncio.run(scenario())
+
+
+def test_busy_source_only_defers_its_dependent_pipelines(write_config):
+    from test_models import model_config, chat_reply
+    clock = Clock()
+    data = {**model_config(), **scheduled_config()}
+    data['sources'].append({'id': 'other', 'type': 'rss', 'url': 'https://other.test/rss',
+                            'enabled': False, 'schedule': '1h'})
+    data['pipelines'][0]['processor'] = {'type': 'digest'}
+    data['pipelines'].append({**data['pipelines'][0], 'id': 'independent', 'sources': ['other']})
+    path = write_config(data)
+
+    async def scenario():
+        entered, release = asyncio.Event(), asyncio.Event()
+
+        async def respond(request):
+            if request.url.host == 'other.test':
+                return httpx.Response(200, text=rss_feed(
+                    {'title': 'AI astronomy mission', 'guid': 'independent-a', 'description': 'New telescope'},
+                    {'title': 'Independent cooking tips', 'guid': 'independent-b', 'description': 'Cooking guide'}))
+            if request.url.path == '/rss':
+                entered.set()
+                await release.wait()
+                return httpx.Response(200, text=three_entries())
+            return httpx.Response(200, json=chat_reply('Material [1]. More [2].'))
+
+        transport = httpx.MockTransport(respond)
+        one = TentaclesService.open(path, env={}, transport=transport, clock=clock)
+        two = TentaclesService.open(path, env={}, transport=transport, clock=clock)
+        task = None
+        try:
+            await one.fetch_sources(['other'])
+            task = asyncio.create_task(one.tick())
+            await asyncio.wait_for(entered.wait(), 2)
+            waiting = await two.tick()
+            assert [(r.kind, r.target) for r in waiting] == [
+                ('fetch', 'news'), ('filter', 'independent'), ('pipeline', 'independent')]
+            assert waiting[-1].status == 'ok'
+            assert two.list_runs(kind='pipeline', target='daily') == []
+            release.set()
+            assert (await task)[-1].status == 'ok'
+            assert two.list_reports().total == 2
+        finally:
+            release.set()
+            if task:
+                await asyncio.gather(task, return_exceptions=True)
+            await one.aclose()
+            await two.aclose()
+
+    asyncio.run(scenario())
