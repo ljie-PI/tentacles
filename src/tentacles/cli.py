@@ -23,7 +23,10 @@ from rich.console import Console
 from rich.markup import escape
 from rich.table import Table
 from rich.text import Text
-from typer._click.exceptions import UsageError
+try:  # typer >= 0.27 内置 click；更早的版本依赖外部 click
+    from typer._click.exceptions import UsageError
+except ImportError:  # pragma: no cover
+    from click.exceptions import UsageError  # type: ignore[no-redef]
 from typer.core import TyperGroup
 
 from tentacles.errors import TentaclesError, exit_code

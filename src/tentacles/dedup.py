@@ -56,3 +56,10 @@ def dedup_articles(articles: list[Item], threshold: float = 0.72) -> list[Item]:
         kept.append(article)
         titles.append(article.title)
     return kept
+
+
+def drop_similar_to(items: list[Item], titles: list[str], threshold: float = 0.72) -> list[Item]:
+    """Drop items whose title nearly matches one of `titles` (stories already
+    seen from other outlets)."""
+    return [it for it in items
+            if not any(title_similarity(it.title, seen) >= threshold for seen in titles)]

@@ -41,19 +41,6 @@ def test_same_content_under_different_urls_is_a_duplicate(web, write_config, ope
     assert sorted([out["s0"].new, out["s1"].new]) == [0, 1]
 
 
-def test_near_identical_titles_in_one_batch_keep_only_the_first(web, write_config, open_service):
-    web.serve(A, rss_feed(
-        {"title": "Officials report major earthquake in Japan", "link": "https://a.com/1"},
-        {"title": "Officials report major earthquake in Japan!", "link": "https://a.com/2"},
-        {"title": "Unrelated gardening tips", "link": "https://a.com/3"},
-    ))
-    svc = open_service(write_config(config(A)))
-
-    out = fetch(svc)
-
-    assert (out["s0"].new, out["s0"].dup) == (2, 1)
-
-
 def test_emails_with_identical_content_are_not_fingerprint_duplicates(write_config, open_service):
     # 邮件源在后续 ticket 才有；这里直接经由存储验证去重规则对 email 的豁免
     svc = open_service(write_config(config(A)))
@@ -210,3 +197,22 @@ def test_failed_migration_leaves_the_database_retryable(write_config, tmp_path, 
         assert svc.list_items().total == 0
     finally:
         svc.store.close()
+
+
+def test_near_identical_titles_from_different_sources_collapse(web, write_config, open_service):
+    web.serve(A, rss_feed({"title": "Officials report major earthquake in Japan", "link": "https://a.com/q",
+                           "description": "from a"}))
+    web.serve(B, rss_feed({"title": "Officials report major earthquake in Japan!", "link": "https://b.com/q",
+                           "description": "from b"}))
+    svc = open_service(write_config(config(A, B)))
+
+    asyncio.run(svc.fetch_sources(["s0"]))
+    out = asyncio.run(svc.fetch_sources(["s1"]))[0]
+
+    assert (out.new, out.dup) == (0, 1)
+
+
+def test_z_suffixed_times_from_json_output_are_accepted(web, write_config, open_service):
+    svc = seeded(web, write_config, open_service)
+
+    assert svc.list_items(since="2026-10-23T00:00:00Z").total == 2

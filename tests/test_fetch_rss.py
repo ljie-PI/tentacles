@@ -151,3 +151,73 @@ def test_max_age_zero_keeps_only_undated_entries(web, write_config, open_service
     asyncio.run(svc.fetch_sources())
 
     assert [i.title for i in svc.list_items().items] == ["Undated"]
+
+
+def test_runs_record_real_start_and_finish_times(web, write_config):
+    from datetime import datetime, timedelta, timezone
+    from tentacles.service import TentaclesService
+
+    ticks = iter(datetime(2026, 10, 24, 8, 0, tzinfo=timezone.utc) + timedelta(seconds=10 * i) for i in range(100))
+    web.serve(FEED, rss_feed({"title": "A", "link": "https://news.example.com/a"}))
+    svc = TentaclesService.open(write_config(rss_config()), transport=web.transport(), env={},
+                                clock=lambda: next(ticks))
+    try:
+        asyncio.run(svc.fetch_sources())
+        [run] = svc.list_runs()
+        assert run.finished_at > run.started_at
+        assert svc.list_sources()[0].last_fetch_at == run.started_at
+    finally:
+        svc.store.close()
+
+
+def test_a_series_of_similar_titles_in_one_feed_is_kept(web, write_config, open_service):
+    web.serve(FEED, rss_feed(
+        {"title": "Python 3.13.2 released", "link": "https://news.example.com/3132"},
+        {"title": "Python 3.13.1 released", "link": "https://news.example.com/3131"},
+    ))
+    svc = open_service(write_config(rss_config()))
+
+    [outcome] = asyncio.run(svc.fetch_sources())
+
+    assert (outcome.new, outcome.dup) == (2, 0)
+
+
+def test_cancelled_fetch_marks_the_run_failed(web, write_config, open_service):
+    import pytest
+
+    def cancel(request):
+        raise asyncio.CancelledError()
+
+    web.handle(FEED, cancel)
+    svc = open_service(write_config(rss_config()))
+
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(svc.fetch_sources())
+
+    [run] = svc.list_runs()
+    assert run.status == "failed" and run.finished_at is not None
+
+
+def test_charset_from_content_type_header_is_honoured(web, write_config, open_service):
+    body = ('<?xml version="1.0"?><rss version="2.0"><channel><title>t</title>'
+            '<item><title>中文标题</title><link>https://news.example.com/zh</link></item></channel></rss>')
+    web.serve(FEED, body.encode("gbk"), headers={"Content-Type": "text/xml; charset=gbk"})
+    svc = open_service(write_config(rss_config()))
+
+    asyncio.run(svc.fetch_sources())
+
+    assert svc.list_items().items[0].title == "中文标题"
+
+
+def test_changing_the_feed_url_drops_old_validators(web, write_config, open_service):
+    web.serve(FEED, rss_feed({"title": "Old", "link": "https://news.example.com/o"}), headers={"ETag": '"old"'})
+    NEW = "https://news.example.com/new-rss"
+    web.serve(NEW, rss_feed({"title": "New", "link": "https://news.example.com/n"}))
+    path = write_config(rss_config())
+    asyncio.run(open_service(path).fetch_sources())
+
+    svc = open_service(write_config({"sources": [{"id": "news", "type": "rss", "url": NEW, "schedule": "30m"}]}))
+    [outcome] = asyncio.run(svc.fetch_sources())
+
+    assert "If-None-Match" not in web.requests_to(NEW)[0].headers
+    assert outcome.new == 1

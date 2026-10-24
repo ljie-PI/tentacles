@@ -14,7 +14,6 @@ from tentacles.config import AppConfig, load_config
 from tentacles.errors import ConfigError, NotFound
 from tentacles.net import HttpPool
 from tentacles.schemas import ConfigCheck, FetchOutcome, ItemDetail, ItemView, Page, RunView, SourceView
-from tentacles.sources.base import FetchContext
 from tentacles.sources.runner import fetch_source
 from tentacles.store import ItemQuery, Store
 from tentacles.timeutil import parse_since, utcnow
@@ -69,11 +68,9 @@ class TentaclesService:
             specs = [s for s in self.config.sources if s.enabled]
         sem = asyncio.Semaphore(FETCH_CONCURRENCY)
         async with HttpPool(self._transport) as http:
-            ctx = FetchContext(http=http, now=self._clock())
-
             async def one(spec):
                 async with sem:
-                    return await fetch_source(spec, store=self.store, ctx=ctx)
+                    return await fetch_source(spec, store=self.store, http=http, clock=self._clock)
 
             return list(await asyncio.gather(*(one(s) for s in specs)))
 

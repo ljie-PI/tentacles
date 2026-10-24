@@ -55,7 +55,8 @@ def parse_since(s: str, now: datetime, tz: ZoneInfo | None = None) -> datetime:
     if is_duration(s):
         return now - parse_duration(s)
     try:
-        dt = datetime.fromisoformat(s)
+        # Python 3.10 的 fromisoformat 不认 "Z"，而 JSON 输出正是这种格式
+        dt = datetime.fromisoformat(s[:-1] + "+00:00" if s.endswith(("Z", "z")) else s)
         return to_utc(dt.replace(tzinfo=tz) if dt.tzinfo is None and tz else dt)
     except ValueError:
         raise ValueError(f"invalid time {s!r} (expected a duration like 24h or an ISO timestamp)")

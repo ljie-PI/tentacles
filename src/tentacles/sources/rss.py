@@ -76,6 +76,8 @@ class RssSource(Source):
     async def fetch(self, cursor: dict[str, Any], ctx: FetchContext) -> FetchResult:
         opts = cast(RssOptions, self.options)
         headers = dict(opts.headers)
+        if cursor.get("url") != opts.url:  # 换了地址：旧的条件请求游标作废
+            cursor = {}
         if cursor.get("etag"):
             headers["If-None-Match"] = cursor["etag"]
         if cursor.get("last_modified"):
@@ -89,7 +91,9 @@ class RssSource(Source):
         if not resp.is_success:
             raise UpstreamError(f"GET {opts.url} returned HTTP {resp.status_code}")
 
-        parsed = feedparser.parse(resp.content)
+        # 把 Content-Type 交给 feedparser，只在 HTTP 头里声明的字符集（如 gbk）才能正确解码
+        ctype = resp.headers.get("content-type")
+        parsed = feedparser.parse(resp.content, response_headers={"content-type": ctype} if ctype else None)
         if parsed.bozo and not parsed.entries:
             raise UpstreamError(f"cannot parse feed {opts.url}: {parsed.bozo_exception}")
 
@@ -104,6 +108,6 @@ class RssSource(Source):
                 continue
             items.append(item)
 
-        new_cursor = {k: v for k, v in (("etag", resp.headers.get("etag")),
-                                        ("last_modified", resp.headers.get("last-modified"))) if v}
+        new_cursor = {"url": opts.url, **{k: v for k, v in (
+            ("etag", resp.headers.get("etag")), ("last_modified", resp.headers.get("last-modified"))) if v}}
         return FetchResult(items, new_cursor, {"entries": len(parsed.entries), "too_old": too_old})

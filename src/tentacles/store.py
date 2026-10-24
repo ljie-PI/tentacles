@@ -123,12 +123,16 @@ class Store:
         """Each migration (DDL included) runs in one explicit transaction, so a
         failure leaves the schema at the previous version and is retryable."""
         with self._lock:
-            version = self._conn.execute("PRAGMA user_version").fetchone()[0]
-            for i, step in enumerate(MIGRATIONS[version:], start=version + 1):
-                self._conn.execute("BEGIN")
+            while True:
+                # IMMEDIATE 先拿写锁再读版本：多个进程同时打开新库时只有一个执行迁移
+                self._conn.execute("BEGIN IMMEDIATE")
+                version = self._conn.execute("PRAGMA user_version").fetchone()[0]
+                if version >= len(MIGRATIONS):
+                    self._conn.rollback()
+                    return
                 try:
-                    step(self._conn)
-                    self._conn.execute(f"PRAGMA user_version = {i}")
+                    MIGRATIONS[version](self._conn)
+                    self._conn.execute(f"PRAGMA user_version = {version + 1}")
                 except BaseException:
                     self._conn.rollback()
                     raise
@@ -181,6 +185,14 @@ class Store:
             return [" ".join(str(r[-1]) for r in self._conn.execute(f"EXPLAIN QUERY PLAN {q}", args))
                     for q, args in ((self._DUP_BY_ID, ("s", "e")), (self._DUP_BY_URL, ("u",)),
                                     (self._DUP_BY_FP, ("f",)))]
+
+    def recent_titles(self, *, exclude_source: str, since: datetime) -> list[str]:
+        """Titles of non-email items other sources stored since `since`."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT title FROM items WHERE source_id != ? AND kind != 'email' AND fetched_at >= ?",
+                (exclude_source, to_iso(since))).fetchall()
+        return [r[0] for r in rows]
 
     def get_item(self, item_id_: str) -> Item | None:
         with self._lock:
