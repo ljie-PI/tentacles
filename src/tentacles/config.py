@@ -22,6 +22,7 @@ from tentacles.errors import ConfigError, NotFound
 from tentacles.schedule import Schedule
 from tentacles.llm.config import Defaults, ModelSpec, STAGES
 from tentacles.personas.models import PersonaSeed, persona_name
+from tentacles.pipelines.config import PipelineSpec
 
 DEFAULT_CONFIG = Path("config") / "tentacles.yaml"
 _ENV_REF = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}")
@@ -75,6 +76,7 @@ class AppConfig(BaseModel):
     models: dict[str, ModelSpec] = Field(default_factory=dict)
     defaults: Defaults = Field(default_factory=Defaults)
     personas: dict[str, PersonaSeed] = Field(default_factory=dict)
+    pipelines: list[PipelineSpec] = Field(default_factory=list)
 
     _path: Path = PrivateAttr(default=Path(DEFAULT_CONFIG))
 
@@ -170,6 +172,14 @@ def load_config(path: Path | str | None = None, *, env: Mapping[str, str] | None
     config._path = config_path
     _check_sources(config)
     _check_models(config)
+    pipeline_ids: set[str] = set()
+    for i, pipeline in enumerate(config.pipelines):
+        if pipeline.id in pipeline_ids:
+            raise ConfigError(f'pipelines[{i}].id: duplicate pipeline id')
+        pipeline_ids.add(pipeline.id)
+        unknown = set(pipeline.sources) - {source.id for source in config.sources}
+        if unknown:
+            raise ConfigError(f'pipelines[{i}].sources: unknown source {sorted(unknown)[0]!r}')
     for name in config.personas:
         if persona_name(name) != name:
             raise ConfigError('personas: names must not have leading or trailing whitespace')

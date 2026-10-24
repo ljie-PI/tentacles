@@ -80,6 +80,10 @@ runs_app = typer.Typer(help="运行记录", no_args_is_help=True, cls=_JsonError
 scheduler_app = typer.Typer(help="调度器", no_args_is_help=True, cls=_JsonErrorsGroup)
 models_app = typer.Typer(help="命名模型", no_args_is_help=True, cls=_JsonErrorsGroup)
 persona_app = typer.Typer(help="Persona 与版本管理", no_args_is_help=True, cls=_JsonErrorsGroup)
+pipelines_app = typer.Typer(help="Pipeline 过滤与运行", no_args_is_help=True, cls=_JsonErrorsGroup)
+reports_app = typer.Typer(help="报告", no_args_is_help=True, cls=_JsonErrorsGroup)
+app.add_typer(pipelines_app, name="pipelines")
+app.add_typer(reports_app, name="reports")
 app.add_typer(persona_app, name="persona")
 app.add_typer(models_app, name="models")
 app.add_typer(scheduler_app, name="scheduler")
@@ -182,6 +186,51 @@ def config_check(ctx: typer.Context) -> None:
     """校验配置文件。"""
     _run(ctx, lambda s: s.check_config(),
          lambda r, out, when: out.print(f"[green]ok[/green] {escape(r.path)}（{r.sources} 个信息源）"))
+
+
+# ---- pipelines and reports --------------------------------------------------
+
+@pipelines_app.command("list")
+def pipelines_list(ctx: typer.Context) -> None:
+    """列出 pipeline 及当前待报告数量。"""
+    _run(ctx, lambda s: s.list_pipelines(), lambda rows, out, when: out.print(_table(
+        "Pipelines", ["id", "persona", "processor", "schedule", "enabled", "pending", "status"],
+        [[r.id, r.persona, r.processor, r.schedule, r.enabled, r.pending, r.last_status] for r in rows])))
+
+
+def _render_pipeline(result, out: Console, when: TimeFmt) -> None:
+    out.print(_table("Pipeline", ["pipeline", "status", "run", "evaluated", "report", "error"],
+        [[result.pipeline_id, result.status, result.run_id, result.stats.get('evaluated', 0),
+          result.report_id, result.error]]))
+
+
+@pipelines_app.command("filter")
+def pipelines_filter(ctx: typer.Context, pipeline_id: str = typer.Argument(...),
+                     reevaluate: bool = typer.Option(False, help="删除窗口内当前版本的评估，再重新过滤")) -> None:
+    """只过滤，不调用报告处理器。"""
+    _run(ctx, lambda s: s.filter_pipeline(pipeline_id, reevaluate=reevaluate), _render_pipeline)
+
+
+@pipelines_app.command("run")
+def pipelines_run(ctx: typer.Context, pipeline_id: str = typer.Argument(...)) -> None:
+    """先过滤，再处理尚未报告的条目；单项失败返回 status=error。"""
+    _run(ctx, lambda s: s.run_pipeline(pipeline_id), _render_pipeline)
+
+
+@reports_app.command("list")
+def reports_list(ctx: typer.Context, pipeline: Optional[str] = typer.Option(None),
+                 limit: int = typer.Option(50), offset: int = typer.Option(0)) -> None:
+    """分页列出报告。"""
+    _run(ctx, lambda s: s.list_reports(pipeline=pipeline, limit=limit, offset=offset),
+         lambda page, out, when: out.print(_table("Reports", ["id", "pipeline", "kind", "created", "title"],
+            [[r.id, r.pipeline_id, r.kind, when(r.created_at), r.title] for r in page.items])))
+
+
+@reports_app.command("show")
+def reports_show(ctx: typer.Context, report_id: str = typer.Argument(...)) -> None:
+    """查看报告全文及引用元数据。"""
+    _run(ctx, lambda s: s.get_report(report_id),
+         lambda report, out, when: out.print(Markdown(report.markdown)))
 
 
 # ---- persona ----------------------------------------------------------------
@@ -339,14 +388,30 @@ def items_list(
     search: Optional[str] = typer.Option(None, "--search", "-q", help="在标题、摘要、作者中搜索"),
     limit: int = typer.Option(50, help="每页条数（1–500）"),
     offset: int = typer.Option(0, help="偏移量"),
+    pipeline: Optional[str] = typer.Option(None, help="按 pipeline 的最新评估筛选"),
+    passed: bool = typer.Option(False, "--passed", help="只看通过的条目，需要 --pipeline"),
+    rejected: bool = typer.Option(False, "--rejected", help="只看淘汰的条目，需要 --pipeline"),
 ) -> None:
     """列出条目，按发布时间倒序。"""
-    _run(ctx, lambda s: s.list_items(sources=source, since=since, until=until, search=search,
-                                     limit=limit, offset=offset),
-         lambda page, out, when: out.print(_table(
-             f"Items ({page.offset + 1}-{page.offset + len(page.items)} / {page.total})",
-             ["id", "source", "published", "title"],
-             [[i.id, i.source_id, when(i.published or i.fetched_at), i.title] for i in page.items])))
+    def query(service: TentaclesService):
+        if passed and rejected:
+            raise ConfigError('choose either --passed or --rejected')
+        return service.list_items(sources=source, since=since, until=until, search=search,
+                                  limit=limit, offset=offset, pipeline=pipeline,
+                                  passed=True if passed else False if rejected else None)
+
+    def render(page, out: Console, when: TimeFmt) -> None:
+        columns = ["id", "source", "published", "title"]
+        if pipeline is not None:
+            columns += ["score", "tags", "reason", "stage"]
+        rows = []
+        for item in page.items:
+            row = [item.id, item.source_id, when(item.published or item.fetched_at), item.title]
+            if pipeline is not None:
+                row += [item.score, ', '.join(item.tags), item.reason, item.stage]
+            rows.append(row)
+        out.print(_table(f"Items ({page.offset + 1}-{page.offset + len(page.items)} / {page.total})", columns, rows))
+    _run(ctx, query, render)
 
 
 @items_app.command("show")

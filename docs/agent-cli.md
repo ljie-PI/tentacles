@@ -169,6 +169,108 @@ tentacles --json persona export default | jq -r . > persona-snapshot.yaml
 只在数据库不存在该名称时读取并导入；首次导入为 seed v1，跳过标签模型。
 已有名称会忽略后续种子内容和文件，即使原文件已移除也能启动。所有新种子同一事务导入，失败不会留下半批种子。
 
+### `pipelines list`
+
+返回配置中的 pipeline 数组，包括 id/name/persona/sources/schedule/enabled/processor、
+当前 Persona 版本和窗口内的待报告数量 `pending`，以及上次运行时间、最近状态/错误。
+当前 pipeline 只支持手动运行，`schedule` 尚未接入 `tick`（后续 #24）；手动命名调用可执行禁用的 pipeline。
+
+### `pipelines filter ID [--reevaluate]`
+
+仅执行过滤，不调用报告处理器。候选条目必须来自指定来源，`fetched_at` 在窗口内，
+且还没有该 pipeline / 条目 / 当前 Persona 版本的评估。单次数量由 pipeline `max_items` 控制（默认 500，1–5000）。
+
+配置示例：
+
+```yaml
+pipelines:
+  - id: daily
+    persona: default
+    sources: [news]
+    window: 24h
+    schedule: '@daily'
+    filters:
+      - type: keyword
+        include: [robotics]
+        exclude: [sponsored]
+        regex: false
+        reject_below: 0.5
+        accept_above: 1
+    processor:
+      type: digest
+      language: zh-CN
+      max_items: 60
+```
+
+keyword 合并 Persona 和阶段的 include/exclude；对标题+摘要做不区分大小写的子串匹配。
+exclude 优先得 0，include 得 1，否则 0.5。`regex: true` 使用 Unicode 正则；每条/阶段总匹配预算 50ms，
+超时或非法运行时模式记为阶段错误，不会阻塞整批；配置自身的非法正则在加载时拒绝。
+
+级联规则：
+
+1. 低于 `reject_below` 淘汰；没设置时取 `min_score`，再没设置时取 0.5。显式 0 有效。
+2. 不低于 `accept_above` 时直接通过，跳过后续阶段。
+3. 最后一个阶段未被淘汰就通过；无任何阶段时全部通过（分数 1、阶段 none）。
+4. 阶段出错交给下一阶段；最后出错不落库，下次可重试。每阶段保留分数或 error、标签和理由。
+
+`--reevaluate` 先删除窗口内当前 Persona 版本的评估（包括消费标记）再重算；可能重新报告，需显式选择。
+变更过滤配置不会自动清空既有缓存。Persona 版本变化后按新版本独立评估。
+
+### `pipelines run ID`
+
+先过滤，再按分数倒序选取已通过且尚未消费的前 N 条（processor `max_items`，默认 60，1–500）。
+运行锁和过滤锁独立、原子获取，默认一小时租约；第二个并发运行返回 busy。
+内部过滤拿不到锁时，跳过过滤、直接处理已有通过项。过期持锁者不能写入新的评估或报告、不能消费替代任务的条目。
+
+```json
+{"pipeline_id":"daily","run_id":12,"status":"ok","report_id":"report-uuid",
+ "stats":{"candidates":3,"evaluated":3,"passed":2,"rejected":1,"errors":0,
+          "filter_status":"ok","processor_candidates":2,"consumed":2,
+          "usage":{"input_tokens":100,"output_tokens":20,"total_tokens":120}},"error":null}
+```
+
+`status` 为 ok / error / busy / no_new。单次操作失败时返回 error，**退出码仍为 0**，调用方检查 status；
+未知 ID 是 not_found（退出码 3），非法配置/参数是 invalid（退出码 2）。无新内容不生成报告，report_id 为 null。
+`stats.stages` 包含每阶段的 passed/rejected/forwarded/errors 和 usage；模型已返回的用量/cost 即使报告校验或落盘失败也会记录。
+
+Digest 使用 process 默认模型或 processor `model` 覆盖，按 Persona 取舍和排序、按标签分组，保留稳定的 [编号] 引用。
+只允许提供材料的编号，空白报告或越界引用会失败。模型正文保留后追加确定性的来源目录。
+数据库记录、消费标记和本次成功记录在同一事务提交；写文件或 SQL 失败时不消费，
+尽力清理本次新建文件（清理失败会告警），之后可重试。硬中断可能留下孤立文件，但不会把未提交的条目标为已消费。
+文件在 `reports_dir/PIPELINE/`，文件名含时间、digest、标题及唯一 ID；独占创建、不覆盖已有文件，POSIX 下默认 0600 权限。
+取消时等待数据库/文件 IO 完成，已提交的成功报告和消费状态保留。
+
+`processor.type: none` 不生成报告、不调用模型，但选中的前 N 条仍会被标记为已消费（evaluations.reported_at）。
+
+### 自定义 digest 提示词
+
+处理器共用字段：`type`（digest/none）、`model`、`language`（默认 zh-CN）、`instructions`（追加指令）、
+`max_items` 和 `prompt_file`。prompt_file 相对配置目录，UTF-8，格式如下：
+
+```text
+[system]
+你是按用户画像取舍、仅依据材料事实的编辑，必须使用 [编号] 引用，输出 Markdown。
+[user]
+用户画像：{{ persona }}
+当前时间：{{ now }}
+pipeline：{{ pipeline.id }}
+{% for item in items %}
+[{{ item.number }}] {{ item.source }} / {{ item.title }}
+{{ item.summary }}
+{% endfor %}
+```
+
+system 是纯文本；user 使用沙箱 Jinja 模板，字段有 persona、items、groups、tags、now、pipeline。
+items 含 number/id/source/title/summary/url/score/tags；摘要最多 600 字。persona 渲染最多 12000 字。
+模板文件和模板渲染结果最多 100 万字符，未知变量、语法错误、外部模板引用在配置检查时拒绝；渲染时缺失字段则本次运行失败。
+只使用可信的本地模板；沙箱不等于独立进程的 CPU/内存隔离。language 和 instructions 会追加到 system。
+
+### `reports list [--pipeline ID] [--limit N] [--offset N]` / `reports show ID`
+
+list 返回 Page（items/total/limit/offset），按创建时间倒序；limit 1–500，offset 非负。
+show 返回完整报告：id/pipeline_id/persona_version/kind/title/markdown/item_ids/model/usage/cost/path/created_at。
+人类模式渲染 Markdown。即使 pipeline 从配置中移除，仍可查询已存报告与评估历史。
+
 ### `sources list`
 
 列出信息源及其抓取状态，包含 `next_run_at`（禁用源为 null）。
@@ -238,6 +340,8 @@ cron 首次等到下一个触发点；成功/失败都按开始时间推进频�
 
 | 选项 | 说明 |
 |---|---|
+| `--pipeline ID` | 只列出该 pipeline 已评估的条目，每个条目只看最新 Persona 版本那条评估 |
+| `--passed` / `--rejected` | 按通过/淘汰筛选，二者互斥且需提供 --pipeline |
 | `--source, -s ID` | 按信息源筛选，可以重复使用 |
 | `--since T` / `--until T` | 时间范围。`T` 可以写时长（`90s`、`30m`、`24h`、`7d`、`2w`，表示从现在往前推），也可以写 ISO 时间；不带时区的 ISO 时间按配置的 `app.timezone` 解释 |
 | `--search, -q TEXT` | 在标题、摘要、作者中按字面子串搜索（不区分大小写，`%`、`_` 不是通配符） |
@@ -251,7 +355,8 @@ cron 首次等到下一个触发点；成功/失败都按开始时间推进频�
  "total": 25, "limit": 50, "offset": 0}
 ```
 
-`kind` 的取值为 `rss`、`email` 或 `web`。
+`kind` 的取值为 `rss`、`email` 或 `web`。指定 pipeline 时额外显示 pipeline_id/persona_version/passed/score/tags/reason/stage/stage_scores。
+`items show` 包含 evaluations，列出每个 pipeline 的最新评估及其消费时间 reported_at。
 
 ### `items show ID`
 

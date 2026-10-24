@@ -249,3 +249,39 @@ def test_persona_cli_errors_remain_structured(cli, args, code):
     result = cli('persona', *args)
     assert result.exit_code == code
     assert payload(result)['error']['code'] == ('not_found' if code == 3 else 'invalid')
+
+
+def test_pipeline_and_report_commands_and_item_filters_are_json_contracts(cli, web, write_config):
+    import httpx
+    from test_pipelines import pipeline_config, three_entries
+    from test_models import model_config, chat_reply, CHAT_URL
+    path = write_config({**model_config(), **pipeline_config(processor={'type': 'digest'})})
+    web.serve(FEED, three_entries())
+    web.handle(CHAT_URL, lambda r: httpx.Response(200, json=chat_reply('Research [1]. Weather [2].')))
+    assert cli('sources', 'fetch', config=path).exit_code == 0
+    filtered = cli('pipelines', 'filter', 'daily', config=path)
+    assert filtered.exit_code == 0 and payload(filtered)['status'] == 'ok'
+    [pipeline] = payload(cli('pipelines', 'list', config=path))
+    assert pipeline['pending'] == 2
+    passed = payload(cli('items', 'list', '--pipeline', 'daily', '--passed', config=path))
+    assert passed['total'] == 2 and all(i['score'] >= 0.5 and i['stage'] == 'keyword' for i in passed['items'])
+    assert payload(cli('items', 'list', '--pipeline', 'daily', '--rejected', config=path))['total'] == 1
+    ran = cli('pipelines', 'run', 'daily', config=path)
+    assert ran.exit_code == 0 and payload(ran)['status'] == 'ok'
+    report_id = payload(ran)['report_id']
+    assert payload(cli('reports', 'list', '--pipeline', 'daily', config=path))['total'] == 1
+    assert 'Research [1]' in payload(cli('reports', 'show', report_id, config=path))['markdown']
+    assert cli('reports', 'show', report_id, config=path, json_mode=False).exit_code == 0
+    assert cli('pipelines', 'list', config=path, json_mode=False).exit_code == 0
+    assert cli('items', 'list', '--pipeline', 'daily', config=path, json_mode=False).exit_code == 0
+
+
+@pytest.mark.parametrize('args,code', [
+    (('pipelines', 'run', 'missing'), 3), (('pipelines', 'filter', 'missing'), 3),
+    (('reports', 'show', 'missing'), 3), (('reports', 'list', '--limit', '0'), 2),
+    (('items', 'list', '--passed'), 2),
+    (('items', 'list', '--pipeline', 'x', '--passed', '--rejected'), 2),
+])
+def test_pipeline_usage_and_lookup_errors_are_structured(cli, args, code):
+    result = cli(*args)
+    assert result.exit_code == code and payload(result)['error']['code'] == ('not_found' if code == 3 else 'invalid')
