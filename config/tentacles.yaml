@@ -100,6 +100,13 @@ pipelines:
       - type: keyword
         reject_below: 0.5
         accept_above: 1.0
+      # 可选：填好 OPENROUTER_API_KEY 后取消下面注释，启用 decision 过滤。
+      # 默认仍只用 keyword，避免升级后自动产生额外模型调用。
+      # - type: decision
+      #   model: decision         # 可省略，默认 defaults.models.decision
+      #   relevance_type: noul    # 或 score：四级量表归一化到 0–1
+      #   reject_below: 0.3
+      #   accept_above: 0.8
     processor:
       type: digest
       language: zh-CN

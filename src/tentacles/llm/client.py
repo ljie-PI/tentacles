@@ -3,18 +3,17 @@ from __future__ import annotations
 
 import asyncio
 import math
-import random
-from datetime import datetime, timezone
-from email.utils import parsedate_to_datetime
+from datetime import datetime
 from typing import Any, Callable
 
 import httpx
 
 from tentacles.errors import ConfigError, UpstreamError
 from tentacles.llm.config import ModelSpec
+from tentacles.llm.decision_protocol import normalize_answers, validate_questions, response_metadata
 from tentacles.net import HttpPool
 from tentacles.schemas import Completion, DecisionCompletion, TokenUsage
-from tentacles.timeutil import to_utc
+from tentacles.llm.retry import ModelCredentialsError, ModelHTTPError, RequestGate, retry_after_seconds, retry_delay
 
 
 class ModelClient:
@@ -23,13 +22,20 @@ class ModelClient:
         self.name, self.spec, self._http, self._redact = name, spec, http, redact
         self._clock = clock
 
-    async def _post(self, path: str, body: dict[str, Any], *, headers: dict[str, str] | None = None) -> dict[str, Any]:
+    async def _post(self, path: str, body: dict[str, Any], *, headers: dict[str, str] | None = None,
+                    gate: RequestGate | None = None) -> dict[str, Any]:
         key = self.spec.api_key.get_secret_value()
         if not key:
-            raise UpstreamError(f'model {self.name!r}: api_key is not configured')
+            error = ModelCredentialsError(f'model {self.name!r}: api_key is not configured')
+            if gate is not None:
+                gate.stop(error)
+            raise error
         auth = headers or {'Authorization': f'Bearer {key}'}
         for attempt in range(self.spec.retries + 1):
+            if gate is not None:
+                await gate.wait()
             response: httpx.Response | None = None
+            attempt_delay: float | None = None
             try:
                 response = await self._http.client().post(
                     self.spec.endpoint + path, json=body, headers=auth, timeout=self.spec.timeout,
@@ -41,11 +47,26 @@ class ModelClient:
             else:
                 if response.is_success:
                     break
-                retryable = response.status_code in {408, 409, 425, 429} or response.status_code >= 500
+                now = self._clock()
+                hint = retry_after_seconds(response, now)
+                attempt_delay = retry_delay(response, attempt, now)
+                summary = self._redact(response.text)[:500]
+                failure = ModelHTTPError(f'model {self.name!r}: HTTP {response.status_code}: {summary}',
+                                         response.status_code, hint)
+                if gate is not None:
+                    if response.status_code == 429:
+                        gate.pause(attempt_delay)
+                    elif failure.decision_fatal:
+                        gate.stop(failure)
+                retryable = (response.status_code in {408, 409, 425, 429} or 500 <= response.status_code < 600 or
+                             self.spec.kind == 'decision' and response.status_code == 402 and hint is not None)
                 if not retryable or attempt == self.spec.retries:
-                    summary = self._redact(response.text)[:500]
-                    raise UpstreamError(f'model {self.name!r}: HTTP {response.status_code}: {summary}')
-            await asyncio.sleep(_retry_delay(response, attempt, self._clock()))
+                    raise failure
+            delay = attempt_delay if attempt_delay is not None else retry_delay(response, attempt, self._clock())
+            if gate is not None:
+                await gate.wait(0 if response is not None and response.status_code == 429 else delay)
+            else:
+                await asyncio.sleep(delay)
         assert response is not None
         try:
             data = response.json()
@@ -115,33 +136,28 @@ class ChatModel(ModelClient):
 
 class DecisionModel(ModelClient):
     async def decide(self, state: str | dict[str, Any] | list[Any],
-                     questions: dict[str, Any]) -> DecisionCompletion:
-        body = {'provider': {'data_collection': 'deny'}, **self.spec.extra_body,
-                'model': self.spec.model, 'state': state, 'questions': questions}
-        data = await self._post('/alpha/decisions', body)
+                     questions: dict[str, Any], *,
+                     on_completion: Callable[[Completion], None] | None = None,
+                     gate: RequestGate | None = None) -> DecisionCompletion:
         try:
-            answers = data['answers']
-            if not isinstance(answers, dict) or any(q not in answers for q in questions):
-                raise ValueError('missing answers')
-            result = self._result(data, '', anthropic=True)
-            return DecisionCompletion(answers=answers, model=result.model, usage=result.usage, cost=result.cost)
+            validate_questions(questions)
+        except (ValueError, TypeError, OverflowError):
+            raise ConfigError(f'model {self.name!r}: invalid decision questions') from None
+        extras = dict(self.spec.extra_body)
+        preferences = dict(extras.pop('provider', None) or {})
+        if preferences.get('data_collection') is None:
+            preferences['data_collection'] = 'deny'
+        body = {**extras, 'provider': preferences, 'model': self.spec.model,
+                'state': state, 'questions': questions}
+        data = await self._post('/alpha/decisions', body, gate=gate)
+        try:
+            metadata, valid = response_metadata(data, self.spec.model)
+            result = self._result(metadata, '', anthropic=True)
+            if on_completion is not None:
+                on_completion(result)
+            if not valid:
+                raise ValueError('invalid decision response metadata')
+            answers = normalize_answers(data['answers'], questions)
+            return DecisionCompletion(answers=answers, model=data['model'], usage=result.usage, cost=result.cost)
         except (KeyError, TypeError, ValueError, AttributeError):
             raise UpstreamError(f'model {self.name!r}: invalid decision response') from None
-
-
-def _retry_delay(response: httpx.Response | None, attempt: int, now: datetime) -> float:
-    value = response.headers.get('Retry-After') if response is not None else None
-    if value is not None:
-        try:
-            seconds = float(value)
-        except ValueError:
-            try:
-                deadline = parsedate_to_datetime(value)
-                if deadline.tzinfo is None:
-                    deadline = deadline.replace(tzinfo=timezone.utc)
-                seconds = (deadline - to_utc(now)).total_seconds()
-            except (ValueError, TypeError, OverflowError):
-                seconds = float('nan')
-        if math.isfinite(seconds):
-            return min(60.0, max(0.0, seconds))
-    return min(30.0, 2 ** min(attempt, 5) + random.random())

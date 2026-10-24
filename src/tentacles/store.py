@@ -343,7 +343,7 @@ class Store:
             [(to_iso(now), e.pipeline_id, e.item_id) for e in evaluations])
 
     def save_report(self, report: ReportView, evaluations: list[Evaluation], run_id: int,
-                    stats: dict[str, Any]) -> None:
+                    stats: dict[str, Any], cost: float | None = None) -> None:
         """Publish one exclusive file and its database record/consumption together.
 
         A failed SQL commit removes only the file created by this operation.
@@ -367,7 +367,7 @@ class Store:
                      report.markdown, json.dumps(report.item_ids), report.model,
                      report.usage.model_dump_json(), report.cost, report.path, to_iso(report.created_at)))
                 self._consume(evaluations, report.created_at, report.id)
-                self._finish_run(run_id, status='ok', now=report.created_at, stats=stats, cost=report.cost)
+                self._finish_run(run_id, status='ok', now=report.created_at, stats=stats, cost=cost if cost is not None else report.cost)
                 self._complete_task_run(run_id, 'ok', None)
         except BaseException:
             if created:
@@ -379,13 +379,13 @@ class Store:
             raise
 
     def consume_without_report(self, evaluations: list[Evaluation], run_id: int, now: datetime,
-                               stats: dict[str, Any]) -> None:
+                               stats: dict[str, Any], cost: float | None = None) -> None:
         with self._lock, self._conn:
             self._conn.execute('BEGIN IMMEDIATE')
             self._require_running(run_id)
             self._check_pending(evaluations)
             self._consume(evaluations, now)
-            self._finish_run(run_id, status='ok', now=now, stats=stats)
+            self._finish_run(run_id, status='ok', now=now, stats=stats, cost=cost)
             self._complete_task_run(run_id, 'ok', None)
 
     def list_reports(self, pipeline_id: str | None, limit: int, offset: int) -> tuple[list[ReportView], int]:
@@ -403,7 +403,7 @@ class Store:
         return _row_to_report(row) if row else None
 
     def save_evaluations(self, evaluations: list[Evaluation], run_id: int, now: datetime,
-                         stats: dict[str, Any]) -> None:
+                         stats: dict[str, Any], cost: float | None = None, error: str | None = None) -> None:
         with self._lock, self._conn:
             self._conn.execute('BEGIN IMMEDIATE')
             self._require_running(run_id)
@@ -416,8 +416,9 @@ class Store:
                      evaluation.reason, evaluation.stage,
                      json.dumps([s.model_dump() for s in evaluation.stage_scores], ensure_ascii=False),
                      to_iso(evaluation.evaluated_at), evaluation.pipeline_id, evaluation.item_id))
-            self._finish_run(run_id, status='ok', now=now, stats=stats)
-            self._complete_task_run(run_id, 'ok', None)
+            status = 'failed' if error is not None else 'ok'
+            self._finish_run(run_id, status=status, now=now, stats=stats, cost=cost, error=error)
+            self._complete_task_run(run_id, status, error)
 
     def item_evaluations(self, item_id: str, pipeline_id: str | None = None) -> list[Evaluation]:
         where = 'e.item_id = ?'

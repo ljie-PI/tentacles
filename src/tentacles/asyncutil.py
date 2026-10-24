@@ -27,3 +27,20 @@ async def run_store_call(fn: Callable[..., _T], *args: Any, **kwargs: Any) -> _T
                 raise cancellation
             return result
 
+
+
+async def gather_draining(tasks: list[asyncio.Task[_T]]) -> list[_T]:
+    """On cancellation/failure, drain every child before its owner closes resources."""
+    try:
+        return list(await asyncio.gather(*tasks))
+    except BaseException:
+        for task in tasks:
+            task.cancel()
+        cleanup = asyncio.gather(*tasks, return_exceptions=True)
+        while not cleanup.done():
+            try:
+                await asyncio.shield(cleanup)
+            except asyncio.CancelledError:
+                pass
+        cleanup.result()
+        raise

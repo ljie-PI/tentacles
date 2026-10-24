@@ -83,7 +83,7 @@
 | `max_tokens` | 正整数，默认 4096；Anthropic 始终发送 |
 | `timeout` | 每次 HTTP 请求超时秒数，默认 60 |
 | `retries` | 首次请求之后最多重试次数，默认 2 |
-| `concurrency` | decision 并发配置，默认 8（由后续 decision 过滤阶段使用） |
+| `concurrency` | decision 每批固定 worker 上限，默认 8 |
 | `extra_body` | 原样合并的 JSON 额外参数；不允许覆盖 `model/messages/system/stream/state/questions` 协议字段 |
 
 显式调用的 token/温度参数优先于配置。OpenAI 兼容模型可以在 `extra_body` 设置
@@ -92,7 +92,7 @@
 
 重试范围：408、409、425、429、所有 5xx（含 524、529）、网络错误和超时。
 `Retry-After` 支持秒数和 HTTP 日期，上限 60 秒；否则指数退避加抖动，上限 30 秒。
-其余 4xx 不重试，诊断包含脱敏后的响应体前 500 字符。不跟随模型请求重定向，避免将认证头发往另一地址。
+其余 4xx 不重试（decision 的明确瞬时 402 见下文），诊断包含脱敏后的响应体前 500 字符。不跟随模型请求重定向，避免将认证头发往另一地址。
 
 纯 RSS 配置可以省略整个模型注册表；配置模型时必须显式为五个阶段提供种类匹配的默认引用。
 `decision` 阶段只用 decision 模型，其余阶段用 chat；单次操作显式指定的名称优先于阶段默认值。
@@ -219,6 +219,47 @@ exclude 优先得 0，include 得 1，否则 0.5。`regex: true` 使用 Unicode 
 `--reevaluate` 先删除窗口内当前 Persona 版本的评估再重算；独立的 pipeline/条目消费账本不会删除。
 变更过滤配置不会自动清空既有缓存。Persona 版本变化后按新版本独立评估，
 但消费记录不受版本或重算影响：已报告或已被 none 消费的条目不会再次处理。
+
+### Decision 过滤阶段
+
+```yaml
+filters:
+  - type: decision
+    model: decision
+    relevance_type: noul
+    reject_below: 0.3
+    accept_above: 0.8
+  - type: keyword
+```
+
+- `model` 可省略，解析 defaults.models.decision；显式覆盖必须存在且 kind=decision，加载配置时校验。
+- `relevance_type` 是 noul（默认，返回“想读”概率）或 score（四级量表 0–3，按最大值 3 归一化）。
+  通用 Decisions 客户端按实际量表长度减一归一化，并保留 raw_score。
+- 每个条目单独请求，state 包含截断到 12000 字的 Persona（profile+优先标签）、source/title/author 和前 1000 字摘要。
+- 有标签时加 choice 题：选项使用稳定的位置 ID 对应真实标签，另有保留选项 other（不返回任何标签）。
+  这样即使用户标签名叫 other 也不会与保留选项冲突。模型看到每个标签的名称/描述。
+- 分数、标签、理由和各阶段轨迹在 items list/show 中可见；stage_scores.details 包含实际 model、归一化 answers、标签 ID 映射。
+  choice 保留 probabilities/confidence，score 保留 raw_score/归一化 score，模型名的日期后缀不修改。
+- 无效概率、量表越界、未知选项或响应元数据缺失只让该条目出错。错误不当作 0 分；后续阶段继续，最后阶段出错不缓存。
+
+固定 worker 池大小为模型 concurrency 与本批条目数的较小值，不为每个条目创建一个任务。
+输出槽位按输入索引存放，即使 HTTP 响应乱序也不会把分数/标签配给别的条目。
+429 对同批所有 worker 共享一个最大暂停截止点；新的 429 可以延后它，重试耗尽的条目也会触发这次公共暂停。
+Retry-After 支持秒数和 HTTP 日期、最多 60 秒；无合法提示时指数退避加抖动、最多 30 秒。
+
+401/403/非瞬时 402 立即停止本批新派发（含重试），**不取消已发出的请求**，等待它们返回后上报批失败。
+402 仅在有合法 Retry-After 时视为明确瞬时错误，否则保守地按终止性错误处理。其它非重试 4xx（含 400/413）只影响本条。
+等待公共暂停/本地退避的 worker 会被终止信号立即唤醒，不需再等完 60 秒。
+已获得最终通过/淘汰结论的条目即使本批随后终止也会缓存；需要后续阶段才能判定的条目保持未评估，下一次重试。
+终止批返回 status=error、运行记为 failed，stage 的 aborted/abort_status 标明原因，不保存请求正文/原始响应。
+
+默认 provider.data_collection=deny；合并额外 provider 偏好时保留默认，null 也按 deny。
+只有显式配置 allow 才放宽。其它 provider 路由参数仍原样传递。
+
+计费记录：每阶段 models/usage/cost 汇总已返回的有效元数据，包含答案校验失败或外部取消之前已返回的用量。
+未提供的费用不估算。pipeline 运行的总量包含其过滤子运行与处理器，stats.filter_run_id 指向子记录；
+**汇总全部 runs 时不要把父 pipeline 与这个子 filter 再加一遍**。单个报告的 usage/cost 仅表示报告生成。
+即使 status=no_new，也可能已经进行了付费过滤。外部取消会取消并等待所有 worker 清理，再关闭共享 HTTP/数据库资源。
 
 ### `pipelines run ID`
 

@@ -1,22 +1,23 @@
 """Pipeline evaluation and operation views shared by Service adapters."""
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
-from tentacles.llm.types import TokenUsage
+from tentacles.llm.types import TokenUsage, UsageTotals
 
 
 class StageScore(BaseModel):
     index: int
     type: str
-    score: float | None = None
+    score: float | None = Field(default=None, ge=0, le=1, allow_inf_nan=False)
     tags: list[str] = Field(default_factory=list)
     reason: str = ''
     error: str | None = None
+    details: dict[str, Any] = Field(default_factory=dict)
 
 
 class Evaluation(BaseModel):
@@ -31,6 +32,23 @@ class Evaluation(BaseModel):
     stage_scores: list[StageScore] = Field(default_factory=list)
     evaluated_at: datetime
     reported_at: datetime | None = None
+
+
+@dataclass
+class StageBatch:
+    scores: list[StageScore]
+    metrics: UsageTotals = field(default_factory=UsageTotals)
+    model_name: str | None = None
+    error: str | None = None
+    http_status: int | None = None
+
+
+@dataclass
+class FilterBatch:
+    evaluations: list[Evaluation]
+    stages: list[dict[str, Any]]
+    error: str | None = None
+    batches: list[StageBatch] = field(default_factory=list)
 
 
 class PipelineOutcome(BaseModel):

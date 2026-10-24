@@ -13,6 +13,7 @@ from tentacles.errors import UpstreamError
 from tentacles.llm.registry import ModelRegistry
 from tentacles.models import Item
 from tentacles.personas.models import PersonaView
+from tentacles.personas.render import render_persona
 from tentacles.pipelines.config import PipelineSpec
 from tentacles.pipelines.models import Evaluation, ReportView
 from tentacles.schemas import Completion
@@ -25,11 +26,6 @@ _SYSTEM = '''基于给定材料编写新闻日报，按用户画像取舍、排�
 每个事实用给定编号 [编号] 引用；不得编造来源、引用编号或使用材料之外的知识。
 输出 Markdown。'''
 
-
-def render_persona(persona: PersonaView, limit: int = 12000) -> str:
-    text = persona.profile + '\n\nPriority tags:\n' + '\n'.join(
-        f'{i + 1}. {tag.tag}: {tag.description}' for i, tag in enumerate(persona.tags))
-    return text[:limit]
 
 
 async def make_digest(config: AppConfig, spec: PipelineSpec, persona: PersonaView,

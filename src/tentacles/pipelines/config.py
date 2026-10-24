@@ -4,7 +4,7 @@ from __future__ import annotations
 import regex as re
 from datetime import timedelta
 from pathlib import Path
-from typing import Literal
+from typing import Annotated, Any, Literal, Union
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -12,12 +12,8 @@ from tentacles.schedule import Schedule
 from tentacles.timeutil import parse_duration
 
 
-class StageSpec(BaseModel):
+class ThresholdSpec(BaseModel):
     model_config = ConfigDict(extra='forbid')
-    type: Literal['keyword'] = 'keyword'
-    include: list[str] = Field(default_factory=list)
-    exclude: list[str] = Field(default_factory=list)
-    regex: bool = False
     reject_below: float | None = Field(default=None, ge=0, le=1, allow_inf_nan=False)
     min_score: float | None = Field(default=None, ge=0, le=1, allow_inf_nan=False)
     accept_above: float | None = Field(default=None, ge=0, le=1, allow_inf_nan=False)
@@ -27,9 +23,20 @@ class StageSpec(BaseModel):
         return self.reject_below if self.reject_below is not None else self.min_score if self.min_score is not None else 0.5
 
     @model_validator(mode='after')
-    def _parameters(self):
+    def _thresholds(self):
         if self.accept_above is not None and self.accept_above < self.rejection:
             raise ValueError('accept_above must not be below the rejection threshold')
+        return self
+
+
+class KeywordSpec(ThresholdSpec):
+    type: Literal['keyword'] = 'keyword'
+    include: list[str] = Field(default_factory=list)
+    exclude: list[str] = Field(default_factory=list)
+    regex: bool = False
+
+    @model_validator(mode='after')
+    def _keywords(self):
         for pattern in self.include + self.exclude:
             if not pattern.strip():
                 raise ValueError('keywords must not be blank')
@@ -39,6 +46,15 @@ class StageSpec(BaseModel):
                 except re.error:
                     raise ValueError('invalid keyword regular expression') from None
         return self
+
+
+class DecisionSpec(ThresholdSpec):
+    type: Literal['decision']
+    model: str | None = None
+    relevance_type: Literal['noul', 'score'] = 'noul'
+
+
+StageSpec = Annotated[Union[KeywordSpec, DecisionSpec], Field(discriminator='type')]
 
 
 class ProcessorSpec(BaseModel):
@@ -64,6 +80,13 @@ class PipelineSpec(BaseModel):
     max_items: int = Field(default=500, ge=1, le=5000)
     filters: list[StageSpec] = Field(default_factory=list)
     processor: ProcessorSpec = Field(default_factory=ProcessorSpec)
+
+    @field_validator('filters', mode='before')
+    @classmethod
+    def _default_stage_type(cls, value: Any) -> Any:
+        if isinstance(value, list):
+            return [{'type': 'keyword', **stage} if isinstance(stage, dict) else stage for stage in value]
+        return value
 
     @field_validator('window')
     @classmethod

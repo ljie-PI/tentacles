@@ -21,7 +21,7 @@ from tentacles.llm.config import Stage
 from tentacles.llm.json import extract_json
 from tentacles.schemas import ConfigCheck, FetchOutcome, ItemDetail, ItemView, Page, RunView, SourceView, TaskView, ModelView, Completion, ModelTest, TickOutcome
 from tentacles.sources.runner import fetch_source
-from tentacles.asyncutil import run_store_call
+from tentacles.asyncutil import run_store_call, gather_draining
 from tentacles.store import ItemQuery, Store
 from tentacles.personas.manager import PersonaManager
 from tentacles.personas.models import PersonaView
@@ -278,21 +278,7 @@ class TentaclesService:
                     return await self._fetch_task(spec, http, due_only=due_only)
 
             tasks = [asyncio.create_task(one(s)) for s in specs]
-            try:
-                return [result for result in await asyncio.gather(*tasks) if result is not None]
-            except BaseException:
-                # gather can return as soon as a semaphore waiter is cancelled,
-                # while active sources are still draining their database workers.
-                for task in tasks:
-                    task.cancel()
-                cleanup = asyncio.gather(*tasks, return_exceptions=True)
-                while not cleanup.done():
-                    try:
-                        await asyncio.shield(cleanup)
-                    except asyncio.CancelledError:
-                        pass  # repeated cancellation must not interrupt resource cleanup
-                cleanup.result()
-                raise
+            return [result for result in await gather_draining(tasks) if result is not None]
 
     # ---- items --------------------------------------------------------------
 

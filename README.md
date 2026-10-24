@@ -2,7 +2,7 @@
 
 个人信息与新闻管理系统：从多种信息源抓取内容，按个人 persona 过滤，再用 LLM 加工成日报、深度报道或邮件简报。整体设计见 [#18](https://github.com/ljie-PI/tentacles/issues/18)，实施进度见它的子 issue。
 
-> 目前已完成骨架：配置驱动的 RSS 抓取、去重入库、条目查询、运行记录、持久化调度、命名模型注册表/连通性测试、版本化 Persona 管理，以及 keyword 级联过滤和 digest 日报。pipeline 自动调度已接入；其他过滤/处理、邮件和网页源、Web 端将陆续加入。
+> 目前已完成骨架：配置驱动的 RSS 抓取、去重入库、条目查询、运行记录、持久化调度、命名模型注册表/连通性测试、版本化 Persona 管理，以及 keyword/decision 级联过滤和 digest 日报。pipeline 自动调度已接入；其他过滤/处理、邮件和网页源、Web 端将陆续加入。
 
 ## 快速开始
 
@@ -117,6 +117,27 @@ tentacles reports show REPORT_ID
 消费账本不会被清除，不会让已报告条目重新进入报告。
 `processor.type: none` 不调用模型、不生成文件，但将选中的条目标记为已消费。
 完整参数和自定义提示词格式见 [agent 命令说明](docs/agent-cli.md)。
+
+## Decision（JEV）过滤
+
+可以在 pipeline.filters 中加入 OpenRouter Decisions 阶段：
+
+```yaml
+- type: decision
+  model: decision          # 可省略，使用 defaults.models.decision
+  relevance_type: noul     # 或 score：四级有序量表
+  reject_below: 0.3
+  accept_above: 0.8
+```
+
+每条候选内容分别判断“用户是否想读”；Persona 有兴趣标签时同时选择一个标签（或 other）。
+score 的原始分数按量表最大值归一化，保存原分数、概率/置信度及实际返回的模型名。
+模型的 `concurrency` 控制固定 worker 池；结果保持输入对应关系，429 对同一批所有 worker 共享暂停点。
+401/403/非瞬时 402 会停止新派发，等待在途请求完成，再将本批记为失败；400/413 只影响该条目。
+已完成的最终评估仍缓存，重试不会为它们重复请求；取消也会保留已返回的已知用量和成本。
+
+默认要求服务方不收集数据，额外 provider 路由偏好不会移除这个默认值；只有显式 `data_collection: allow` 才放宽。
+示例配置中的阶段保持注释，启用后会实际调用模型并产生费用。`models test decision` 可先用固定 noul 题探测。
 
 ## 自动抓取
 

@@ -70,8 +70,14 @@ class ModelSpec(BaseModel):
 
     @model_validator(mode='after')
     def _decision_provider(self):
-        if self.kind == 'decision' and self.provider != 'openrouter':
-            raise ValueError('decision models require the openrouter provider')
+        if self.kind == 'decision':
+            if self.provider != 'openrouter':
+                raise ValueError('decision models require the openrouter provider')
+            preferences = self.extra_body.get('provider')
+            if preferences is not None and not isinstance(preferences, dict):
+                raise ValueError('decision provider preferences must be an object')
+            if preferences and preferences.get('data_collection') not in (None, 'allow', 'deny'):
+                raise ValueError('decision data_collection must be allow or deny')
         return self
 
     @property
