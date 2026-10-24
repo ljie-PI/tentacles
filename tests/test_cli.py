@@ -211,3 +211,41 @@ def test_model_probe_failure_remains_structured(cli, write_config):
     result = cli('models', 'test', 'fast', config=path)
     assert result.exit_code == 0
     assert payload(result)['ok'] is False and 'fast' in payload(result)['error']
+
+
+def test_persona_cli_reads_text_file_and_stdin_and_exports_snapshot(cli, write_config, tmp_path):
+    import yaml
+    path = write_config({})
+    text = cli('persona', 'set', 'default', '--text', '# First', '--include', 'AI',
+               '--include', 'ai', '--exclude', 'Ads', '--skip-tags', '--note', 'created', config=path)
+    assert text.exit_code == 0 and payload(text)['version'] == 1
+    assert payload(text)['include'] == ['AI']
+    profile = tmp_path / 'profile.md'
+    profile.write_text('# From file\n中文', encoding='utf-8')
+    from_file = cli('persona', 'set', 'default', '--file', str(profile), '--skip-tags', config=path)
+    assert from_file.exit_code == 0 and payload(from_file)['profile'] == '# From file\n中文'
+    piped = CliRunner().invoke(app, ['--config', str(path), '--json', 'persona', 'set', 'default',
+        '--stdin', '--skip-tags', '--remove-exclude', 'ADS'], input='# From stdin\n')
+    assert piped.exit_code == 0 and payload(piped)['version'] == 3 and payload(piped)['exclude'] == []
+    shown = cli('persona', 'show', 'default', '--version', '1', config=path)
+    assert shown.exit_code == 0 and payload(shown)['profile'] == '# First'
+    assert payload(cli('persona', 'list', config=path))[0]['version'] == 3
+    assert len(payload(cli('persona', 'history', 'default', config=path))) == 3
+    exported = cli('persona', 'export', 'default', config=path)
+    assert exported.exit_code == 0 and yaml.safe_load(payload(exported))['version'] == 3
+    human = cli('persona', 'export', 'default', config=path, json_mode=False)
+    assert yaml.safe_load(human.stdout)['profile'] == '# From stdin\n'
+    rolled = cli('persona', 'rollback', 'default', '1', config=path)
+    assert rolled.exit_code == 0 and payload(rolled)['version'] == 4 and payload(rolled)['source'] == 'rollback'
+    assert cli('persona', 'show', 'default', config=path, json_mode=False).exit_code == 0
+
+
+@pytest.mark.parametrize('args,code', [
+    (('show', 'missing'), 3), (('history', 'missing'), 3), (('export', 'missing'), 3),
+    (('set', 'new'), 2), (('set', 'new', '--text', 'a', '--stdin'), 2),
+    (('set', 'new', '--file', '/does/not/exist'), 2), (('show', 'missing', '--version', '0'), 2),
+])
+def test_persona_cli_errors_remain_structured(cli, args, code):
+    result = cli('persona', *args)
+    assert result.exit_code == code
+    assert payload(result)['error']['code'] == ('not_found' if code == 3 else 'invalid')

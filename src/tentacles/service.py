@@ -23,6 +23,8 @@ from tentacles.schemas import ConfigCheck, FetchOutcome, ItemDetail, ItemView, P
 from tentacles.sources.runner import fetch_source
 from tentacles.asyncutil import run_store_call
 from tentacles.store import ItemQuery, Store
+from tentacles.personas.manager import PersonaManager
+from tentacles.personas.models import PersonaView
 from tentacles.timeutil import parse_since, utcnow, to_utc
 from tentacles.tasks import Task
 
@@ -41,9 +43,11 @@ class TentaclesService:
         self._clock = clock
         self._model_http = HttpPool(transport)
         self.models = ModelRegistry(config.models, config.defaults, self._model_http, clock=clock)
+        self.personas = PersonaManager(store, self.models, clock)
         self._tasks = {s.id: Task('fetch', s.id, s.schedule, config.app.timezone, s.enabled)
                        for s in config.sources}
         try:
+            self.personas.seed(config)
             store.register_tasks(list(self._tasks.values()), to_utc(clock()))
         except BaseException:
             store.close()
@@ -68,6 +72,31 @@ class TentaclesService:
     def check_config(self) -> ConfigCheck:
         # 能打开 Service 就说明配置已通过全部校验
         return ConfigCheck(ok=True, path=str(self.config.path), sources=len(self.config.sources))
+
+    # ---- personas -----------------------------------------------------------
+
+    def list_personas(self) -> list[PersonaView]:
+        return self.personas.list_personas()
+
+    def get_persona(self, name: str, version: int | None = None) -> PersonaView:
+        return self.personas.get(name, version)
+
+    def persona_history(self, name: str) -> list[PersonaView]:
+        return self.personas.history(name)
+
+    def export_persona(self, name: str, version: int | None = None) -> str:
+        return self.personas.export(name, version)
+
+    async def rollback_persona(self, name: str, version: int, *, note: str | None = None) -> PersonaView:
+        return await self.personas.rollback(name, version, note)
+
+    async def set_persona(self, name: str, *, profile: str | None = None, skip_tags: bool = False,
+                          include_add: list[str] | None = None, include_remove: list[str] | None = None,
+                          exclude_add: list[str] | None = None, exclude_remove: list[str] | None = None,
+                          note: str | None = None) -> PersonaView:
+        return await self.personas.set(name, profile=profile, skip_tags=skip_tags,
+                                       include_add=include_add, include_remove=include_remove,
+                                       exclude_add=exclude_add, exclude_remove=exclude_remove, note=note)
 
     # ---- models -------------------------------------------------------------
 

@@ -98,6 +98,77 @@
 `decision` 阶段只用 decision 模型，其余阶段用 chat；单次操作显式指定的名称优先于阶段默认值。
 模型客户端及 JSON 提取是后续过滤、persona 和处理器的共享能力，并通过同一个可注入 HTTP 边界测试。
 
+### `persona list` / `persona show NAME [--version N]`
+
+`list` 返回每个名称的最新版本数组；`show` 返回单个完整版本，默认最新。
+支持多个 persona；名称可以是中文，不能是空白或包含控制字符。
+
+```json
+{"name":"default","version":2,"profile":"优先关注 AI 与开源","tags":[],
+ "include":["AI"],"exclude":["广告"],"source":"manual","note":"更新方向",
+ "created_at":"2026-10-25T00:00:00Z","tag_status":"skipped","tag_error":null}
+```
+
+`tags` 元素为 `{"tag":"名称","description":"含义"}`，按优先级排序。
+`source` 是 `seed` / `manual` / `llm` / `rollback`；手动编辑即使辅助调用标签模型也记为 manual，
+llm 来源留给后续演化操作。`tag_status` 为 `ok` / `error` / `skipped` / `unchanged`。
+不存在的名称或版本返回 `not_found`，版本号非正数返回 `invalid`。
+
+### `persona set NAME`
+
+名称不存在则创建第一版，否则追加一个新版本。
+
+| 选项 | 作用 |
+|---|---|
+| `--text TEXT` | 用参数中的文本替换 profile |
+| `--file PATH` | 从 UTF-8 文件替换 profile；`--file -` 从标准输入读 |
+| `--stdin` | 从标准输入读完整 profile |
+| `--include KEY` / `--exclude KEY` | 增加关键词，可重复 |
+| `--remove-include KEY` / `--remove-exclude KEY` | 删除关键词，可重复 |
+| `--note TEXT` | 本版本备注 |
+| `--skip-tags` | 保留当前标签，不调用模型 |
+
+三个 profile 输入选项互斥；可以只修改关键词或备注，不提供任何修改则返回 `invalid`。
+关键词 trim 后不允许空白，不区分大小写去重/删除，保留首次拼写和顺序；同次操作先删除再增加。
+不提供 profile 就保留当前内容。仅改关键词/备注、profile 内容相同或指定 `--skip-tags` 均不触发抽取。
+新建时如果只有关键词，profile 为空。
+
+profile 变化后，通过阶段 `persona` 的模型生成 5–20 个标签；旧标签提供给模型，要求语义相同保留原名。
+初次提取参考 TrendRadar 的细分、不重叠、具体描述和优先级规则；更新使用 keep/add/remove 和最终 order。
+验证名称非空、数量 5–20、无大小写重复、旧标签都有明确去留、order 无缺漏。
+抽取失败时仍保存 profile 和关键词、保留旧标签，返回版本中 `tag_status: "error"` 与脱敏诊断。
+调用方应检查此字段；降级是成功保存，不是整次修改失败。`runs list --kind persona` 可查看用量、成本和降级状态。
+
+仅修改关键词时，在同一 SQLite 事务中基于最新版本合并，版本号不会重复。
+提供 profile 且未指定 `--skip-tags` 时，会保护读取到的版本，包括 profile 内容相同而不调用模型的快捷路径。
+提交前若版本变化，返回 `conflict`（退出码 4），不会覆盖新版本或混用新标签；刷新后可重试。
+取消时会等待数据库写入结束，已提交的新版本与成功运行记录会保留。
+
+### `persona history NAME`
+
+返回全部历史版本数组，按版本号倒序。每版包括来源、备注、UTC 创建时间、标签抽取状态。
+旧版本永不原地修改。
+
+### `persona rollback NAME VERSION [--note TEXT]`
+
+把指定旧版的 profile、标签、全部 include/exclude 复制为一个新版本，来源记为 rollback。
+不删除任何历史，不重新调用标签模型。返回新的完整版本。
+
+### `persona export NAME [--version N]`
+
+导出完整 YAML 版本快照，包含 profile、标签、关键词和版本元数据。
+人类模式 stdout 是原始 YAML，适合重定向；JSON 模式 stdout 是 **一个 JSON 字符串**，解析该字符串即可得到 YAML。
+导出不修改数据库，不自动写文件；快照不是纯 profile，不能直接作为 `set --file` 的输入。
+
+```sh
+tentacles persona export default > persona-snapshot.yaml
+tentacles --json persona export default | jq -r . > persona-snapshot.yaml
+```
+
+配置中 `personas` 是名称到初始种子的映射，profile/profile_file 二选一，另可指定 include/exclude/note。
+只在数据库不存在该名称时读取并导入；首次导入为 seed v1，跳过标签模型。
+已有名称会忽略后续种子内容和文件，即使原文件已移除也能启动。所有新种子同一事务导入，失败不会留下半批种子。
+
 ### `sources list`
 
 列出信息源及其抓取状态，包含 `next_run_at`（禁用源为 null）。

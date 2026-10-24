@@ -14,7 +14,8 @@ from typing import Any, Callable
 from tentacles.dedup import split_similar
 from tentacles.models import Item, item_id
 from tentacles.errors import Conflict
-from tentacles.timeutil import from_iso, to_iso
+from tentacles.personas.models import PersonaEdit, PersonaView, edit_keywords, keywords
+from tentacles.timeutil import from_iso, to_iso, to_utc
 from tentacles.tasks import Claim, Task, TaskState
 
 
@@ -128,7 +129,16 @@ def _migrate_v3(conn: sqlite3.Connection) -> None:
     )""")
 
 
-MIGRATIONS: list[Callable[[sqlite3.Connection], None]] = [_migrate_v1, _migrate_v2, _migrate_v3]
+def _migrate_v4(conn: sqlite3.Connection) -> None:
+    conn.execute("""CREATE TABLE persona_versions (
+        name TEXT NOT NULL, version INTEGER NOT NULL, profile TEXT NOT NULL,
+        tags TEXT NOT NULL, include_keywords TEXT NOT NULL, exclude_keywords TEXT NOT NULL,
+        source TEXT NOT NULL, note TEXT NOT NULL, created_at TEXT NOT NULL,
+        tag_status TEXT NOT NULL, tag_error TEXT, PRIMARY KEY (name, version)
+    )""")
+
+
+MIGRATIONS: list[Callable[[sqlite3.Connection], None]] = [_migrate_v1, _migrate_v2, _migrate_v3, _migrate_v4]
 
 _ITEM_COLUMNS = ("id, source_id, kind, external_id, url, title, author, summary, content,"
                  " published, fetched_at, fingerprint, meta")
@@ -173,6 +183,71 @@ class Store:
     def close(self) -> None:
         with self._lock:
             self._conn.close()
+
+    # ---- versioned personas ------------------------------------------------
+
+    def seed_personas(self, seeds: list[tuple[str, Callable[[], PersonaView]]]) -> None:
+        with self._lock, self._conn:
+            self._conn.execute("BEGIN IMMEDIATE")
+            for name, load in seeds:
+                if self.get_persona(name) is None:
+                    self._insert_persona(load())
+
+    def get_persona(self, name: str, version: int | None = None) -> PersonaView | None:
+        with self._lock:
+            if version is None:
+                row = self._conn.execute(
+                    "SELECT * FROM persona_versions WHERE name = ? ORDER BY version DESC LIMIT 1",
+                    (name,)).fetchone()
+            else:
+                row = self._conn.execute("SELECT * FROM persona_versions WHERE name = ? AND version = ?",
+                                         (name, version)).fetchone()
+        return _row_to_persona(row) if row else None
+
+    def list_personas(self) -> list[PersonaView]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT p.* FROM persona_versions p JOIN"
+                " (SELECT name, MAX(version) AS version FROM persona_versions GROUP BY name) latest"
+                " USING (name, version) ORDER BY name").fetchall()
+        return [_row_to_persona(row) for row in rows]
+
+    def persona_history(self, name: str) -> list[PersonaView]:
+        with self._lock:
+            rows = self._conn.execute("SELECT * FROM persona_versions WHERE name = ? ORDER BY version DESC",
+                                      (name,)).fetchall()
+        return [_row_to_persona(row) for row in rows]
+
+    def save_persona(self, edit: PersonaEdit, now: datetime, run_id: int) -> PersonaView:
+        with self._lock, self._conn:
+            self._conn.execute("BEGIN IMMEDIATE")
+            old = self.get_persona(edit.name)
+            version = old.version if old else 0
+            if edit.expected_version is not None and edit.expected_version != version:
+                raise Conflict('persona changed while preparing the edit; refresh and retry')
+            view = PersonaView(
+                name=edit.name, version=version + 1,
+                profile=edit.profile if edit.profile is not None else old.profile if old else '',
+                tags=edit.tags if edit.tags is not None else old.tags if old else [],
+                include=keywords(edit.include_replace) if edit.include_replace is not None else
+                        edit_keywords(old.include if old else [], edit.include_add, edit.include_remove),
+                exclude=keywords(edit.exclude_replace) if edit.exclude_replace is not None else
+                        edit_keywords(old.exclude if old else [], edit.exclude_add, edit.exclude_remove),
+                source=edit.source, note=edit.note, created_at=to_utc(now),
+                tag_status=edit.tag_status, tag_error=edit.tag_error)
+            self._insert_persona(view)
+            self._finish_run(run_id, status='ok', now=now, stats={
+                'version': view.version, 'tag_status': view.tag_status, 'tag_error': view.tag_error, **edit.run_stats},
+                             cost=edit.cost, error=edit.tag_error)
+            return view
+
+    def _insert_persona(self, view: PersonaView) -> None:
+        self._conn.execute(
+            "INSERT INTO persona_versions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (view.name, view.version, view.profile,
+             json.dumps([tag.model_dump() for tag in view.tags], ensure_ascii=False),
+             json.dumps(view.include, ensure_ascii=False), json.dumps(view.exclude, ensure_ascii=False),
+             view.source, view.note, to_iso(view.created_at), view.tag_status, view.tag_error))
 
     # ---- scheduler tasks ---------------------------------------------------
 
@@ -418,6 +493,10 @@ class Store:
         assert cur.lastrowid is not None
         return cur.lastrowid
 
+    def finish_run(self, run_id: int, *, status: str, now: datetime, error: str | None = None) -> None:
+        with self._lock, self._conn:
+            self._finish_run(run_id, status=status, now=now, error=error)
+
     def _run_is_running(self, run_id: int) -> bool:
         row = self._conn.execute("SELECT status FROM runs WHERE id = ?", (run_id,)).fetchone()
         return row is not None and row['status'] == 'running'
@@ -458,3 +537,11 @@ def _row_to_item(r: sqlite3.Row) -> Item:
         fetched_at=from_iso(r["fetched_at"]), fingerprint=r["fingerprint"],
         meta=json.loads(r["meta"]),
     )
+
+
+def _row_to_persona(row: sqlite3.Row) -> PersonaView:
+    return PersonaView(name=row['name'], version=row['version'], profile=row['profile'],
+                       tags=json.loads(row['tags']), include=json.loads(row['include_keywords']),
+                       exclude=json.loads(row['exclude_keywords']), source=row['source'], note=row['note'],
+                       created_at=from_iso(row['created_at']), tag_status=row['tag_status'],
+                       tag_error=row['tag_error'])

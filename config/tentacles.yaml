@@ -49,6 +49,18 @@ defaults:
     persona: smart
     process: smart
 
+# 只在数据库不存在同名 persona 时导入；之后修改这里不会覆盖已存版本。
+# profile 与 profile_file 二选一；文件路径相对本 YAML 所在目录。
+# 首次导入不调用模型；persona set 修改 profile 才抽取标签（可 --skip-tags）。
+personas:
+  default:
+    profile: |
+      优先关注人工智能与开源软件的实质进展。
+      其次关注科技产业、机器人、科学和能源。
+      不关注重复营销、广告和缺乏事实依据的炒作。
+    include: [人工智能, AI, 开源]
+    exclude: [广告, 促销]
+
 # 信息源。通用字段：id（唯一）、type、schedule（抓取频率：30m / 2h / 1d 等间隔，
 # 或 @hourly/@daily/@weekly、5 段 cron 表达式）、name（可选显示名）、enabled（默认 true）。
 #
