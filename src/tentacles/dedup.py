@@ -35,8 +35,7 @@ def _tokenize(title: str) -> set[str]:
     return tokens
 
 
-def title_similarity(a: str, b: str) -> float:
-    ta, tb = _tokenize(a), _tokenize(b)
+def _similarity(a: str, ta: set[str], b: str, tb: set[str]) -> float:
     if not ta or not tb:
         return 0.0
     jaccard = len(ta & tb) / len(ta | tb)
@@ -44,6 +43,10 @@ def title_similarity(a: str, b: str) -> float:
         return 0.0
     ratio = SequenceMatcher(None, a, b).ratio()
     return 0.7 * jaccard + 0.3 * ratio
+
+
+def title_similarity(a: str, b: str) -> float:
+    return _similarity(a, _tokenize(a), b, _tokenize(b))
 
 
 def dedup_articles(articles: list[Item], threshold: float = 0.72) -> list[Item]:
@@ -58,8 +61,16 @@ def dedup_articles(articles: list[Item], threshold: float = 0.72) -> list[Item]:
     return kept
 
 
-def drop_similar_to(items: list[Item], titles: list[str], threshold: float = 0.72) -> list[Item]:
-    """Drop items whose title nearly matches one of `titles` (stories already
-    seen from other outlets)."""
-    return [it for it in items
-            if not any(title_similarity(it.title, seen) >= threshold for seen in titles)]
+def split_similar(items: list[Item], titles: list[str],
+                  threshold: float = 0.72) -> tuple[list[Item], list[Item]]:
+    """Split items into (kept, similar): `similar` nearly match one of `titles`
+    (stories already seen from other outlets). Titles are tokenized once."""
+    seen = [(s, _tokenize(s)) for s in titles]
+    kept, similar = [], []
+    for it in items:
+        tokens = _tokenize(it.title)
+        if any(_similarity(it.title, tokens, s, ts) >= threshold for s, ts in seen):
+            similar.append(it)
+        else:
+            kept.append(it)
+    return kept, similar

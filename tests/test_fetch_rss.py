@@ -221,3 +221,57 @@ def test_changing_the_feed_url_drops_old_validators(web, write_config, open_serv
 
     assert "If-None-Match" not in web.requests_to(NEW)[0].headers
     assert outcome.new == 1
+
+
+def test_relative_links_resolve_against_the_feed_url(web, write_config, open_service):
+    web.serve(FEED, rss_feed({"title": "Rel", "link": "/post/1"}))
+    other = "https://other.example.org/rss"
+    web.serve(other, rss_feed({"title": "Different story", "link": "/post/1"}))
+    svc = open_service(write_config({"sources": [
+        {"id": "news", "type": "rss", "url": FEED, "schedule": "30m"},
+        {"id": "other", "type": "rss", "url": other, "schedule": "30m"}]}))
+
+    out = {o.source_id: o for o in asyncio.run(svc.fetch_sources())}
+
+    assert out["news"].new == 1 and out["other"].new == 1
+    assert {i.url for i in svc.list_items().items} == {"https://news.example.com/post/1",
+                                                      "https://other.example.org/post/1"}
+
+
+def test_entries_suppressed_as_cross_source_duplicates_stay_suppressed(web, write_config):
+    from datetime import datetime, timedelta, timezone
+    from tentacles.service import TentaclesService
+
+    now = [datetime(2026, 10, 24, 8, 0, tzinfo=timezone.utc)]
+    other = "https://other.example.org/rss"
+    web.serve(other, rss_feed({"title": "Officials report major earthquake in Japan", "link": "https://o.org/q"}))
+    web.serve(FEED, rss_feed({"title": "Officials report major earthquake in Japan!", "link": "https://n.com/q"}))
+    svc = TentaclesService.open(write_config({"sources": [
+        {"id": "news", "type": "rss", "url": FEED, "schedule": "30m"},
+        {"id": "other", "type": "rss", "url": other, "schedule": "30m"}]}),
+        transport=web.transport(), env={}, clock=lambda: now[0])
+    try:
+        asyncio.run(svc.fetch_sources(["other"]))
+        assert asyncio.run(svc.fetch_sources(["news"]))[0].new == 0
+        now[0] += timedelta(days=3)  # 另一来源的标题已经超出 48 小时窗口
+        assert asyncio.run(svc.fetch_sources(["news"]))[0].new == 0
+    finally:
+        svc.store.close()
+
+
+def test_an_html_page_instead_of_a_feed_is_an_error_but_an_empty_feed_is_not(web, write_config, open_service):
+    web.serve(FEED, "<html><body>Not a feed</body></html>", headers={"Content-Type": "text/html"})
+    svc = open_service(write_config(rss_config()))
+    assert asyncio.run(svc.fetch_sources())[0].status == "error"
+
+    web.serve(FEED, rss_feed(), headers={"Content-Type": "text/html"})  # 合法 feed，只是类型标错且为空
+    assert asyncio.run(svc.fetch_sources())[0].status == "ok"
+
+
+def test_an_empty_body_is_reported_as_not_a_feed(web, write_config, open_service):
+    web.serve(FEED, b"", headers={"Content-Type": "application/json"})
+    svc = open_service(write_config(rss_config()))
+
+    [outcome] = asyncio.run(svc.fetch_sources())
+
+    assert outcome.status == "error" and outcome.error.startswith("cannot parse feed")

@@ -32,7 +32,7 @@ class FetchResult:
 class Source(ABC):
     type: ClassVar[str]
     Options: ClassVar[Type[BaseModel]]
-    # 同批次标题相似去重；邮件等主题经常重复的类型应关闭
+    # 跨来源近似标题去重（其他来源 48 小时内报道过的同一条）；邮件等主题经常重复的类型应关闭
     dedup_titles: ClassVar[bool] = True
 
     def __init__(self, spec: SourceSpec, options: BaseModel):

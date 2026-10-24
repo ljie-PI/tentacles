@@ -129,3 +129,21 @@ def test_naive_since_is_read_in_the_configured_timezone(cli, web, write_config):
     result = cli("items", "list", "--since", "2026-10-24T00:00")
 
     assert [i["title"] for i in payload(result)["items"]] == ["Early"]
+
+
+@pytest.mark.parametrize("limit", ["0", "-1", "501"])
+def test_runs_limit_is_bounded(cli, limit):
+    result = cli("runs", "list", "--limit", limit)
+
+    assert result.exit_code == 2 and payload(result)["error"]["code"] == "invalid"
+
+
+@pytest.mark.parametrize("value", ["y", "t", "TRUE", "on"])
+def test_json_env_values_also_cover_usage_errors(web, write_config, value):
+    path = write_config({"sources": []})
+
+    result = CliRunner().invoke(app, ["--config", str(path), "items", "list", "--limit", "abc"],
+                                env={"TENTACLES_JSON": value})
+
+    assert result.exit_code == 2
+    assert payload(result)["error"]["code"] == "invalid"

@@ -216,3 +216,15 @@ def test_z_suffixed_times_from_json_output_are_accepted(web, write_config, open_
     svc = seeded(web, write_config, open_service)
 
     assert svc.list_items(since="2026-10-23T00:00:00Z").total == 2
+
+
+def test_history_of_a_removed_source_can_still_be_filtered(web, write_config, open_service):
+    web.serve(A, rss_feed({"title": "Kept history", "link": "https://a.com/h"}))
+    svc = open_service(write_config(config(A)))
+    fetch(svc)
+
+    svc2 = open_service(write_config({"sources": [{"id": "renamed", "type": "rss", "url": B, "schedule": "1h"}]}))
+
+    assert [i.title for i in svc2.list_items(sources=["s0"]).items] == ["Kept history"]
+    with pytest.raises(NotFound):
+        svc2.list_items(sources=["never-existed"])

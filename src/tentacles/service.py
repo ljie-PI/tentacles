@@ -83,8 +83,11 @@ class TentaclesService:
             raise ConfigError("limit must be between 1 and 500")
         if offset < 0:
             raise ConfigError("offset must be >= 0")
-        for s in sources or []:
-            self.config.source(s)
+        if sources:
+            known = {s.id for s in self.config.sources} | self.store.source_ids()
+            for s in sources:  # 已从配置移除的源仍可按 id 查询历史条目
+                if s not in known:
+                    raise NotFound(f"unknown source {s!r}")
         q = ItemQuery(source_ids=sources or None, kinds=kinds or None, since=self._time(since),
                       until=self._time(until), search=search or None, limit=limit, offset=offset)
         items, total = self.store.list_items(q)
@@ -101,6 +104,8 @@ class TentaclesService:
 
     def list_runs(self, *, kind: str | None = None, target: str | None = None,
                   limit: int = 50) -> list[RunView]:
+        if not 1 <= limit <= 500:
+            raise ConfigError("limit must be between 1 and 500")
         return [RunView.model_validate(r, from_attributes=True)
                 for r in self.store.list_runs(kind, target, limit)]
 

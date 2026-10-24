@@ -179,6 +179,19 @@ class Store:
             return True
         return it.kind != "email" and bool(c.execute(self._DUP_BY_FP, (it.fingerprint,)).fetchone())
 
+    def unknown(self, items: Iterable[Item]) -> list[Item]:
+        """Items not already stored under the same (source, external id) or url —
+        the cheap indexed checks, used before costlier similarity work."""
+        with self._lock:
+            c = self._conn
+            return [it for it in items
+                    if not c.execute(self._DUP_BY_ID, (it.source_id, it.external_id)).fetchone()
+                    and not (it.url and c.execute(self._DUP_BY_URL, (it.url,)).fetchone())]
+
+    def source_ids(self) -> set[str]:
+        with self._lock:
+            return {r[0] for r in self._conn.execute("SELECT DISTINCT source_id FROM items")}
+
     def explain_duplicate_lookup(self) -> list[str]:
         """Query plans of the duplicate checks (diagnostics: they must not scan)."""
         with self._lock:

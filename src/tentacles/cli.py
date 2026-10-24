@@ -32,8 +32,12 @@ from typer.core import TyperGroup
 from tentacles.errors import TentaclesError, exit_code
 from tentacles.service import TentaclesService
 
+# 与 click 布尔参数的环境变量取值保持一致
+_TRUTHY = {"1", "true", "t", "yes", "y", "on"}
+
+
 def _json_requested(argv: list[str]) -> bool:
-    return "--json" in argv or os.environ.get("TENTACLES_JSON", "").lower() in {"1", "true", "yes", "on"}
+    return "--json" in argv or os.environ.get("TENTACLES_JSON", "").lower() in _TRUTHY
 
 
 class _JsonErrorsGroup(TyperGroup):

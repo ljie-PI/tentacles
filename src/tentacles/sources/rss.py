@@ -12,7 +12,7 @@ import httpx
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from tentacles.errors import UpstreamError
-from tentacles.models import Item, normalize_url
+from tentacles.models import Item
 from tentacles.sources.base import FetchContext, FetchResult, Source, register
 from tentacles.text import html_to_text, truncate
 
@@ -58,7 +58,7 @@ def entry_to_item(entry, source_id: str) -> Item | None:
     return Item(
         source_id=source_id,
         kind="rss",
-        external_id=(entry.get("id") or "").strip() or normalize_url(link),
+        external_id=(entry.get("id") or "").strip(),  # 为空时 Item 用规范化后的 url
         url=link,
         title=title,
         author=entry.get("author") or "",
@@ -91,10 +91,13 @@ class RssSource(Source):
         if not resp.is_success:
             raise UpstreamError(f"GET {opts.url} returned HTTP {resp.status_code}")
 
-        # 把 Content-Type 交给 feedparser，只在 HTTP 头里声明的字符集（如 gbk）才能正确解码
-        ctype = resp.headers.get("content-type")
-        parsed = feedparser.parse(resp.content, response_headers={"content-type": ctype} if ctype else None)
-        if parsed.bozo and not parsed.entries:
+        # content-location 让相对链接按 feed 地址补全；content-type 让只在 HTTP 头里声明的字符集（如 gbk）生效
+        response_headers = {"content-location": str(resp.url)}
+        if resp.headers.get("content-type"):
+            response_headers["content-type"] = resp.headers["content-type"]
+        parsed = feedparser.parse(resp.content, response_headers=response_headers)
+        # bozo 也会因内容类型不规范等无害原因置位；只有根本没识别出 feed 才算失败
+        if not parsed.get("version") and not parsed.entries:
             raise UpstreamError(f"cannot parse feed {opts.url}: {parsed.bozo_exception}")
 
         cutoff = None if opts.max_age_days is None else ctx.now - timedelta(days=opts.max_age_days)
