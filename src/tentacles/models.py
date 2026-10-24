@@ -1,13 +1,16 @@
-"""Core data models and normalization helpers."""
+"""Core data model (Item) and normalization helpers."""
 
 from __future__ import annotations
 
 import hashlib
 import re
-from datetime import datetime, timezone
+from datetime import datetime
+from typing import Any, Literal
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 from pydantic import BaseModel, Field, field_validator
+
+from tentacles.timeutil import to_utc, utcnow
 
 # 常见追踪参数，抓取内容时无意义
 _TRACKING_PARAMS = {
@@ -15,6 +18,8 @@ _TRACKING_PARAMS = {
     "utm_id", "spm", "from", "ref", "ref_src", "share_token", "share_id",
     "scene", "nsukey", "fbclid", "gclid", "igshid",
 }
+
+ItemKind = Literal["rss", "email", "web"]
 
 
 def normalize_url(url: str) -> str:
@@ -35,30 +40,43 @@ def content_fingerprint(title: str, summary: str = "") -> str:
     return hashlib.sha1(text.encode("utf-8")).hexdigest()
 
 
-def utcnow() -> datetime:
-    return datetime.now(timezone.utc)
+def item_id(source_id: str, external_id: str) -> str:
+    return hashlib.sha1(f"{source_id}\0{external_id}".encode("utf-8")).hexdigest()[:16]
 
 
-class Article(BaseModel):
-    """一条从 feed 抓到的原始文章。"""
+class Item(BaseModel):
+    """一条从任意信息源抓到的内容（文章、邮件、网页变更）。"""
 
     id: str = ""
+    source_id: str
+    kind: ItemKind
+    external_id: str = ""
     url: str = ""
-    source: str = ""
-    title: str = ""
+    title: str
+    author: str = ""
     summary: str = ""
+    content: str = ""
     published: datetime | None = None
     fetched_at: datetime = Field(default_factory=utcnow)
     fingerprint: str = ""
-    cluster_id: str | None = None
+    meta: dict[str, Any] = Field(default_factory=dict)
 
-    @field_validator("title", "summary")
+    @field_validator("title", "summary", "author")
     @classmethod
     def _clean(cls, v: str) -> str:
         return re.sub(r"\s+", " ", v).strip()
 
+    @field_validator("published", "fetched_at")
+    @classmethod
+    def _utc(cls, v: datetime | None) -> datetime | None:
+        return None if v is None else to_utc(v)
+
     def model_post_init(self, __context) -> None:
-        self.url = normalize_url(self.url)
-        self.fingerprint = content_fingerprint(self.title, self.summary)
+        if self.url:
+            self.url = normalize_url(self.url)
+        if not self.fingerprint:
+            self.fingerprint = content_fingerprint(self.title, self.summary)
+        if not self.external_id:
+            self.external_id = self.url or self.fingerprint
         if not self.id:
-            self.id = self.fingerprint[:16]
+            self.id = item_id(self.source_id, self.external_id)

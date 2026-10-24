@@ -1,11 +1,11 @@
 from tentacles.dedup import dedup_articles, title_similarity
-from tentacles.models import Article
+from tentacles.models import Item
 
 import pytest
 
 
-def make_article(title: str, url: str = "https://example.com/a") -> Article:
-    return Article(source="test", url=f"{url}?u={abs(hash(title))}", title=title,
+def make_article(title: str, url: str = "https://example.com/a") -> Item:
+    return Item(source_id="test", kind="rss", url=f"{url}?u={abs(hash(title))}", title=title,
                    summary="some summary")
 
 
@@ -19,13 +19,13 @@ def test_title_similarity(a, b):
 
 
 def test_normalize_url_strips_tracking():
-    a = Article(source="t", url="https://example.com/x?utm_source=foo&id=2#top", title="T")
+    a = Item(source_id="t", kind="rss", url="https://example.com/x?utm_source=foo&id=2#top", title="T")
     assert a.url == "https://example.com/x?id=2"
 
 
 def test_fingerprint_same_title_different_url():
-    a = Article(source="t", url="https://a.com/1", title="标题 ABC", summary="内容")
-    b = Article(source="u", url="https://b.com/2", title="标题 ABC", summary="内容")
+    a = Item(source_id="t", kind="rss", url="https://a.com/1", title="标题 ABC", summary="内容")
+    b = Item(source_id="u", kind="rss", url="https://b.com/2", title="标题 ABC", summary="内容")
     assert a.fingerprint == b.fingerprint
 
 

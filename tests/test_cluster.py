@@ -1,9 +1,9 @@
 from tentacles.cluster import MAJOR_EVENT_SIZE, cluster_articles
-from tentacles.models import Article
+from tentacles.models import Item
 
 
-def make_article(title: str, source: str) -> Article:
-    return Article(source=source, url="https://s/" + title, title=title)
+def make_article(title: str, source: str) -> Item:
+    return Item(source_id=source, kind="rss", url="https://s/" + title, title=title)
 
 
 def test_same_event_groups_together():

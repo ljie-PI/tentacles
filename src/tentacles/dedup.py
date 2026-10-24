@@ -1,12 +1,12 @@
 """Same-story deduplication: URL/fingerprint handled in the store, here we
-collapse near-identical titles that came from different outlets."""
+collapse near-identical titles within a batch and across different outlets."""
 
 from __future__ import annotations
 
 import re
 from difflib import SequenceMatcher
 
-from tentacles.models import Article
+from tentacles.models import Item
 
 _PUNCT = re.compile(r"[\s\W]+", re.UNICODE)
 
@@ -35,8 +35,7 @@ def _tokenize(title: str) -> set[str]:
     return tokens
 
 
-def title_similarity(a: str, b: str) -> float:
-    ta, tb = _tokenize(a), _tokenize(b)
+def _similarity(a: str, ta: set[str], b: str, tb: set[str]) -> float:
     if not ta or not tb:
         return 0.0
     jaccard = len(ta & tb) / len(ta | tb)
@@ -46,9 +45,13 @@ def title_similarity(a: str, b: str) -> float:
     return 0.7 * jaccard + 0.3 * ratio
 
 
-def dedup_articles(articles: list[Article], threshold: float = 0.72) -> list[Article]:
+def title_similarity(a: str, b: str) -> float:
+    return _similarity(a, _tokenize(a), b, _tokenize(b))
+
+
+def dedup_articles(articles: list[Item], threshold: float = 0.72) -> list[Item]:
     """保留每次出现的第一条，丢弃与其后出现标题高度相似的文章。"""
-    kept: list[Article] = []
+    kept: list[Item] = []
     titles: list[str] = []
     for article in articles:
         if any(title_similarity(article.title, seen) >= threshold for seen in titles):
@@ -56,3 +59,20 @@ def dedup_articles(articles: list[Article], threshold: float = 0.72) -> list[Art
         kept.append(article)
         titles.append(article.title)
     return kept
+
+
+def split_similar(items: list[Item], titles: list[str],
+                  threshold: float = 0.72) -> tuple[list[Item], list[Item]]:
+    """Split items into (kept, similar): `similar` nearly match one of `titles`
+    (stories already seen from other outlets) or an earlier kept item in this
+    batch. Titles are tokenized once."""
+    seen = [(s, _tokenize(s)) for s in titles]
+    kept, similar = [], []
+    for it in items:
+        tokens = _tokenize(it.title)
+        if any(_similarity(it.title, tokens, s, ts) >= threshold for s, ts in seen):
+            similar.append(it)
+        else:
+            kept.append(it)
+            seen.append((it.title, tokens))
+    return kept, similar
