@@ -147,3 +147,15 @@ def test_json_env_values_also_cover_usage_errors(web, write_config, value):
 
     assert result.exit_code == 2
     assert payload(result)["error"]["code"] == "invalid"
+
+
+def test_interrupt_in_json_mode_still_yields_one_json_value(cli, web):
+    def interrupt(request):
+        raise KeyboardInterrupt
+
+    web.handle(FEED, interrupt)
+
+    result = cli("sources", "fetch")
+
+    assert result.exit_code == 130
+    assert payload(result)["error"]["code"] == "aborted"

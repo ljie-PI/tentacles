@@ -60,6 +60,7 @@ CREATE TABLE items (
 CREATE INDEX idx_items_url ON items (url) WHERE url != '';
 CREATE INDEX idx_items_fp ON items (fingerprint);
 CREATE INDEX idx_items_time ON items (COALESCE(published, fetched_at));
+CREATE INDEX idx_items_fetched ON items (fetched_at);
 CREATE TABLE source_state (
     source_id TEXT PRIMARY KEY, cursor TEXT NOT NULL DEFAULT '{}', last_fetch_at TEXT,
     last_status TEXT, last_error TEXT, total_items INTEGER NOT NULL DEFAULT 0
@@ -253,14 +254,23 @@ class Store:
         return SourceState(source_id, json.loads(row["cursor"]), from_iso(row["last_fetch_at"]),
                            row["last_status"], row["last_error"], row["total_items"])
 
+    def add_source_items(self, source_id: str, n: int) -> None:
+        """Atomic increment, so concurrent fetchers can't lose each other's counts."""
+        with self._lock, self._conn:
+            self._conn.execute(
+                "INSERT INTO source_state (source_id, total_items) VALUES (?, ?)"
+                " ON CONFLICT (source_id) DO UPDATE SET total_items = total_items + excluded.total_items",
+                (source_id, n))
+
     def save_source_state(self, st: SourceState) -> None:
+        """Saves cursor and fetch status; total_items only changes via add_source_items."""
         with self._lock, self._conn:
             self._conn.execute(
                 "INSERT INTO source_state (source_id, cursor, last_fetch_at, last_status,"
                 " last_error, total_items) VALUES (?, ?, ?, ?, ?, ?)"
                 " ON CONFLICT (source_id) DO UPDATE SET cursor = excluded.cursor,"
                 " last_fetch_at = excluded.last_fetch_at, last_status = excluded.last_status,"
-                " last_error = excluded.last_error, total_items = excluded.total_items",
+                " last_error = excluded.last_error",
                 (st.source_id, json.dumps(st.cursor, ensure_ascii=False), to_iso(st.last_fetch_at),
                  st.last_status, st.last_error, st.total_items),
             )

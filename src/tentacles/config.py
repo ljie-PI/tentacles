@@ -90,6 +90,7 @@ class AppConfig(BaseModel):
         return self._path
 
     def resolve(self, p: Path) -> Path:
+        p = p.expanduser()
         return p if p.is_absolute() else (self._path.parent / p).resolve()
 
     @property

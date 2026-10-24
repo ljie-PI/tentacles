@@ -39,7 +39,7 @@ class UpstreamError(TentaclesError):
     code = "upstream"
 
 
-EXIT_CODES = {"invalid": 2, "not_found": 3, "conflict": 4, "busy": 4, "upstream": 5}
+EXIT_CODES = {"invalid": 2, "not_found": 3, "conflict": 4, "busy": 4, "upstream": 5, "aborted": 130}
 
 
 def exit_code(code: str) -> int:

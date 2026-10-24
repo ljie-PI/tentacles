@@ -82,3 +82,21 @@ def test_malformed_schedules_are_rejected(write_config, schedule):
 @pytest.mark.parametrize("schedule", ["90s", "30m", "@daily", "0 8,20 * * *", "*/15 9-18 * * 1-5"])
 def test_wellformed_schedules_are_accepted(write_config, open_service, schedule):
     assert open_service(write_config({"sources": [src(schedule=schedule)]})).config.sources[0].schedule == schedule
+
+
+def test_blank_proxy_from_an_unset_env_var_means_no_proxy(write_config, open_service, web):
+    import asyncio
+    from conftest import rss_feed
+
+    web.serve(FEED, rss_feed({"title": "A", "link": "https://news.example.com/a"}))
+    svc = open_service(write_config({"sources": [src(proxy="${HTTP_PROXY:-}")]}))
+
+    assert asyncio.run(svc.fetch_sources())[0].status == "ok"
+
+
+def test_home_relative_paths_expand(write_config, open_service, tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+
+    svc = open_service(write_config({"app": {"data_dir": "~/tentacles-data"}, "sources": []}))
+
+    assert svc.config.db_path == tmp_path / "home" / "tentacles-data" / "tentacles.db"

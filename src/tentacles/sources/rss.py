@@ -26,6 +26,11 @@ class RssOptions(BaseModel):
     proxy: str | None = None
     timeout: float = 30
 
+    @field_validator("proxy")
+    @classmethod
+    def _blank_is_none(cls, v: str | None) -> str | None:
+        return v or None  # ${HTTP_PROXY:-} 未设置时插值为空串
+
     @field_validator("url")
     @classmethod
     def _http(cls, v: str) -> str:
@@ -98,7 +103,8 @@ class RssSource(Source):
         parsed = feedparser.parse(resp.content, response_headers=response_headers)
         # bozo 也会因内容类型不规范等无害原因置位；只有根本没识别出 feed 才算失败
         if not parsed.get("version") and not parsed.entries:
-            raise UpstreamError(f"cannot parse feed {opts.url}: {parsed.get("bozo_exception", "not a feed")}")
+            reason = parsed.get("bozo_exception", "not a feed")
+            raise UpstreamError(f"cannot parse feed {opts.url}: {reason}")
 
         cutoff = None if opts.max_age_days is None else ctx.now - timedelta(days=opts.max_age_days)
         items, too_old = [], 0
