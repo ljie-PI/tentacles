@@ -567,3 +567,37 @@ def test_serve_usage_and_invalid_options_are_cli_contracts(cli):
     for args in [('serve', '--port', '0'), ('serve', '--host', ' '), ('serve', '--port', '70000')]:
         result = cli(*args)
         assert result.exit_code == 2 and payload(result)['error']['code'] == 'invalid'
+
+
+def test_persona_web_options_and_feedback_read_remain_available_to_agents(cli, web, write_config):
+    import httpx
+    from test_models import CHAT_URL, chat_reply, model_config
+    from test_persona_evolution import evolved_content
+    from test_pipelines import pipeline_config
+    from tentacles.personas.models import FeedbackView, PersonaProposal, PersonaView
+    path = write_config({**model_config(), **pipeline_config()})
+    changed = cli('persona', 'set', 'default', '--text', 'New interests', '--skip-tags', '--expected-version', '1', config=path)
+    assert changed.exit_code == 0
+    PersonaView.model_validate(payload(changed))
+    stale = cli('persona', 'set', 'default', '--text', 'Stale', '--skip-tags', '--expected-version', '1', config=path)
+    assert stale.exit_code == 4 and payload(stale)['error']['code'] == 'conflict'
+    restored = cli('persona', 'rollback', 'default', '1', '--expected-version', '2', config=path)
+    assert restored.exit_code == 0
+    PersonaView.model_validate(payload(restored))
+    web.serve(FEED, rss_feed({'title': 'CLI feedback contract', 'guid': 'one'}))
+    cli('sources', 'fetch', config=path)
+    item_id = payload(cli('items', 'list', config=path))['items'][0]['id']
+    assert payload(cli('items', 'feedback', item_id, config=path)) is None
+    submitted = cli('feedback', item_id, '--dislike', config=path)
+    shown = cli('items', 'feedback', item_id, config=path)
+    assert shown.exit_code == 0 and FeedbackView.model_validate(payload(shown)).id == payload(submitted)['id']
+
+    def respond(request):
+        body = json.loads(json.loads(request.content)['messages'][1]['content'])
+        assert body['feedback'] == []
+        return httpx.Response(200, json=chat_reply(json.dumps(evolved_content())))
+
+    web.handle(CHAT_URL, respond)
+    preview = cli('persona', 'evolve', '--instruction', 'More research', '--no-feedback', '--expected-version', '3', '--dry-run', config=path)
+    assert preview.exit_code == 0
+    PersonaProposal.model_validate(payload(preview))

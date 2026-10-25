@@ -63,22 +63,23 @@ function PersonaEditor({ persona, workChanged }: { persona: Persona; workChanged
   const history = useQuery({ queryKey: ['persona', persona.name, 'history'], queryFn: () => api<Persona[]>(`/personas/history?${new URLSearchParams({ name: persona.name })}`) })
   const dirty = draft.profile !== base.profile || lines(draft.include).join('\n') !== (base.include || []).join('\n') || lines(draft.exclude).join('\n') !== (base.exclude || []).join('\n') || !!draft.note.trim()
   const refresh = async () => { await Promise.all(['personas', 'persona', 'pipelines', 'items', 'item', 'runs'].map(key => client.invalidateQueries({ queryKey: [key] }))) }
-  const accept = (value: Persona, notice: string) => { setBase(value); setDraft(draftOf(value)); setPreview(null); setRollbackVersion(null); setMessage(notice); void refresh() }
+  const accept = (value: Persona, notice: string, discardEvolution = false) => { setBase(value); setDraft(draftOf(value)); setPreview(null); setRollbackVersion(null); if (discardEvolution) { setInstruction(''); setUseFeedback(true) }; setMessage(notice); void refresh() }
   const save = useMutation({ mutationFn: () => api<Persona>('/personas', { method: 'PATCH', body: JSON.stringify({ name: base.name, expected_version: base.version, profile: draft.profile, include_add: lines(draft.include), include_remove: base.include || [], exclude_add: lines(draft.exclude), exclude_remove: base.exclude || [], skip_tags: !draft.updateTags, note: draft.note }) }), onSuccess: value => accept(value, `已保存为版本 ${value.version}`) })
   const evolve = useMutation({ mutationFn: (snapshot: Persona) => api<PersonaProposal>('/personas/evolve', { method: 'POST', body: JSON.stringify({ name: snapshot.name, expected_version: snapshot.version, instruction, use_feedback: useFeedback }) }), onMutate: () => setPreview(null), onSuccess: (proposal, snapshot) => { setPreview({ base: snapshot, proposal }); setMessage('提案已生成，尚未修改画像。') } })
-  const apply = useMutation({ mutationFn: (proposal: PersonaProposal) => api<Persona>('/personas/apply', { method: 'POST', body: JSON.stringify(proposal) }), onSuccess: value => accept(value, `提案已应用，当前版本 ${value.version}`) })
-  const rollback = useMutation({ mutationFn: (version: number) => api<Persona>('/personas/rollback', { method: 'POST', body: JSON.stringify({ name: base.name, expected_version: base.version, version }) }), onSuccess: value => accept(value, `已回滚，创建了新版本 ${value.version}`) })
+  const apply = useMutation({ mutationFn: (proposal: PersonaProposal) => api<Persona>('/personas/apply', { method: 'POST', body: JSON.stringify(proposal) }), onSuccess: value => accept(value, `提案已应用，当前版本 ${value.version}`, true) })
+  const rollback = useMutation({ mutationFn: (version: number) => api<Persona>('/personas/rollback', { method: 'POST', body: JSON.stringify({ name: base.name, expected_version: base.version, version }) }), onSuccess: value => accept(value, `已回滚，创建了新版本 ${value.version}`, true) })
   const busy = save.isPending || evolve.isPending || apply.isPending || rollback.isPending
   const errors = [save.error, evolve.error, apply.error, rollback.error].filter((value): value is Error => !!value)
   const conflict = errors.some(isConflict)
   const historical = history.data?.find(value => value.version === viewVersion)
   async function discardAndRefresh() {
     const value = await api<Persona>(personaUrl(base.name))
-    setBase(value); setDraft(draftOf(value)); setPreview(null); setRollbackVersion(null); setMessage('已放弃草稿，载入服务器最新版本。')
-    save.reset(); evolve.reset(); apply.reset(); rollback.reset(); void refresh()
+    accept(value, '已放弃草稿和演化输入，载入服务器最新版本。', true)
+    save.reset(); evolve.reset(); apply.reset(); rollback.reset()
   }
   const reload = useMutation({ mutationFn: discardAndRefresh })
-  const hasWork = dirty || busy || reload.isPending || !!preview
+  const evolutionDirty = instruction !== '' || !useFeedback
+  const hasWork = dirty || evolutionDirty || busy || reload.isPending || !!preview
   useEffect(() => { workChanged(hasWork); return () => workChanged(false) }, [hasWork, workChanged])
   return <>
     <section className="persona-panel"><div className="card-heading"><h2>{base.name} <span className="tag">版本 {base.version}</span></h2><span className="small muted">{dirty ? '有未保存的修改' : '已保存快照'}</span></div>
@@ -89,13 +90,13 @@ function PersonaEditor({ persona, workChanged }: { persona: Persona; workChanged
     </section>
     <section className="persona-panel"><h2>演化画像</h2><p className="section-note">根据指令和可选反馈生成提案，预览后才应用。生成提案会调用模型，可能产生费用；未保存的手动修改不会发送。</p>
       <label>演化指令<textarea name="instruction" rows={4} value={instruction} disabled={busy || reload.isPending} onChange={event => { setInstruction(event.target.value); setPreview(null) }} placeholder="例如：更看重有实证的研究，减少营销内容" /></label><label className="checkbox-label"><input type="checkbox" checked={useFeedback} disabled={busy || reload.isPending} onChange={event => { setUseFeedback(event.target.checked); setPreview(null) }} />参考近期反馈（服务端窗口和数量限制生效）</label>
-      {dirty && <p className="small muted">请先保存或放弃手动修改，再生成演化提案。</p>}<button disabled={busy || reload.isPending || dirty || (!instruction.trim() && !useFeedback)} onClick={() => evolve.mutate(base)}>{evolve.isPending ? '生成中…' : '生成演化提案'}</button>
+      {dirty && <p className="small muted">请先保存或放弃手动修改，再生成演化提案。</p>}<button disabled={busy || reload.isPending || dirty || (!instruction.trim() && !useFeedback)} onClick={() => evolve.mutate(base)}>{evolve.isPending ? '生成中…' : '生成演化提案'}</button>{evolutionDirty && <button disabled={busy || reload.isPending} onClick={() => { setInstruction(''); setUseFeedback(true); setPreview(null); setMessage('已清空演化输入。') }}>清空演化输入</button>}
       {preview && <><ProposalPreview base={preview.base} proposal={preview.proposal} /><div className="pipeline-actions"><button className="primary" disabled={busy || reload.isPending || dirty} onClick={() => apply.mutate(preview.proposal)}>{apply.isPending ? '应用中…' : '应用提案'}</button><button disabled={busy} onClick={() => setPreview(null)}>丢弃提案</button></div></>}
     </section>
     <section className="persona-panel"><h2>版本历史</h2>{history.error && <Notice error>{history.error.message}</Notice>}{history.isPending && <Notice>正在读取历史…</Notice>}
       {history.data && <div className="table-wrap"><table><thead><tr><th>版本 / 来源</th><th>备注 / 时间</th><th>操作</th></tr></thead><tbody>{history.data.map(version => <tr key={version.version}><td><strong>v{version.version}</strong><span className="small muted">{version.source}</span></td><td>{version.note || '—'}<div className="small muted">{formatTime(version.created_at)}</div></td><td><div className="pipeline-actions"><button disabled={busy} onClick={() => setViewVersion(version.version)}>查看</button><button disabled={busy || reload.isPending} onClick={() => setRollbackVersion(version.version)}>回滚到此版本</button></div></td></tr>)}</tbody></table></div>}
       {historical && <div className="history-preview"><h3>查看版本 {historical.version} <span className="small muted">只读</span></h3><pre className="profile-text">{historical.profile}</pre><p className="small">包含：{historical.include?.join('、') || '无'}<br />排除：{historical.exclude?.join('、') || '无'}</p><Tags persona={historical} /></div>}
-      {rollbackVersion != null && <Notice>确认回滚到版本 {rollbackVersion}？会创建新版本，替换当前内容及未保存草稿；历史不会删除。<button className="primary" disabled={busy || reload.isPending} onClick={() => rollback.mutate(rollbackVersion)}>确认回滚</button><button disabled={busy} onClick={() => setRollbackVersion(null)}>取消</button></Notice>}
+      {rollbackVersion != null && <Notice>确认回滚到版本 {rollbackVersion}？会创建新版本，替换当前内容、未保存草稿和演化输入；历史不会删除。<button className="primary" disabled={busy || reload.isPending} onClick={() => rollback.mutate(rollbackVersion)}>确认回滚</button><button disabled={busy} onClick={() => setRollbackVersion(null)}>取消</button></Notice>}
     </section>
   </>
 }

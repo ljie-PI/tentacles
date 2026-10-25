@@ -60,12 +60,13 @@ export default function Feed() {
   const pipeline = params.get('pipeline') || '', passed = params.get('passed') || ''
   const selected = params.get('item')
   const sources = useQuery({ queryKey: ['sources'], queryFn: () => api<Source[]>('/sources') })
-  const pipelines = useQuery({ queryKey: ['pipelines'], queryFn: () => api<Pipeline[]>('/pipelines') })
+  const pipelines = useQuery({ queryKey: ['pipelines'], queryFn: () => api<Pipeline[]>('/pipelines'), retry: false })
   const personas = useQuery({ queryKey: ['personas'], queryFn: () => api<Persona[]>('/personas') })
   const pipelinePersona = pipelines.data?.find(row => row.id === pipeline)?.persona
   const preferredPersona = params.get('feedback_persona') || (personas.data?.some(row => row.name === 'default') ? 'default' : personas.data?.[0]?.name || '')
-  const feedbackPersona = pipelinePersona || preferredPersona
-  const feedbackDisabled = !!(pipeline && pipelines.isPending) || !personas.data?.some(row => row.name === feedbackPersona)
+  const unresolvedPipeline = !!pipeline && (pipelines.isPending || pipelines.isError || !pipelinePersona)
+  const feedbackPersona = pipeline ? (unresolvedPipeline ? '' : pipelinePersona || '') : preferredPersona
+  const feedbackDisabled = unresolvedPipeline || !personas.data?.some(row => row.name === feedbackPersona)
   const feed = useInfiniteQuery({
     queryKey: ['items', source, since, search, pipeline, passed], initialPageParam: 0,
     queryFn: ({ pageParam, signal }) => {
@@ -86,11 +87,11 @@ export default function Feed() {
   return <>
     <header className="page-heading"><div><p className="eyebrow">YOUR SIGNAL, NOT THE NOISE</p><h1>信息流<span className="accent">.</span></h1><p className="muted">把分散的线索，汇聚在一个安静的地方。</p></div><div className="total"><strong>{feed.data?.pages[0]?.total ?? '—'}</strong><span>条匹配内容</span></div></header>
     <FeedFilters key={JSON.stringify([source, since, search, pipeline, passed])} filters={{ source, since, search, pipeline, passed }} sources={sources.data} pipelines={pipelines.data} apply={next => { const preferred = params.get('feedback_persona'); if (preferred) next.set('feedback_persona', preferred); setParams(next) }} />
-    <div className="feedback-context"><label>反馈画像<select aria-label="反馈画像" value={feedbackPersona} disabled={!!pipelinePersona || personas.isPending} onChange={event => setParams(current => { const next = new URLSearchParams(current); next.set('feedback_persona', event.target.value); return next })}>{!personas.data?.length && <option value="">未配置 Persona</option>}{personas.data?.map(row => <option key={row.name} value={row.name}>{row.name}</option>)}{feedbackPersona && !personas.data?.some(row => row.name === feedbackPersona) && <option value={feedbackPersona}>{feedbackPersona}</option>}</select></label><p className="muted small">{pipelinePersona ? '使用所选流程的画像。' : '反馈只影响所选画像，演化预览时可选择是否参考。'}{personas.data?.length === 0 && <Link className="inline-link" to="/persona">创建 Persona</Link>}</p></div>
+    <div className="feedback-context"><label>反馈画像<select aria-label="反馈画像" value={feedbackPersona} disabled={!!pipeline || personas.isPending} onChange={event => setParams(current => { const next = new URLSearchParams(current); next.set('feedback_persona', event.target.value); return next })}>{unresolvedPipeline ? <option value="">无法确认流程画像</option> : !personas.data?.length && <option value="">未配置 Persona</option>}{personas.data?.map(row => <option key={row.name} value={row.name}>{row.name}</option>)}{feedbackPersona && !personas.data?.some(row => row.name === feedbackPersona) && <option value={feedbackPersona}>{feedbackPersona}</option>}</select></label><p className="muted small">{unresolvedPipeline ? '无法确认所选流程使用的画像，反馈已停用。请重试，或清除流程筛选后明确选择反馈画像。' : pipelinePersona ? '使用所选流程的画像。' : '反馈只影响所选画像，演化预览时可选择是否参考。'}{personas.data?.length === 0 && <Link className="inline-link" to="/persona">创建 Persona</Link>}</p></div>
     {personas.error && <Notice error>{personas.error.message}</Notice>}
     {display.error && <Notice error>{display.error.message}</Notice>}
     {feed.error && <Notice error>{feed.error.message} <button onClick={() => void feed.refetch()}>重试</button></Notice>}
-    {pipelines.error && <Notice error>处理流程列表加载失败：{pipelines.error.message}</Notice>}
+    {pipelines.error && <Notice error>处理流程列表加载失败：{pipelines.error.message}<button onClick={() => void pipelines.refetch()}>重新加载流程</button></Notice>}
     {sources.error && <Notice error>信息源列表加载失败：{sources.error.message}</Notice>}
     {feed.isPending && <Notice>正在汇聚信息…</Notice>}
     {!feed.isPending && !feed.error && items.length === 0 && <div className="empty"><span aria-hidden="true">◎</span><h2>这里还很安静</h2><p>试着调整筛选条件，或前往「信息源」立即抓取。</p></div>}

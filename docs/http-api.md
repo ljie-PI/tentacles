@@ -135,3 +135,12 @@ refresh is explicitly labeled as abandoning the draft. Switching named personas 
 work; new-persona creation is an exclusive form. Changed evolution instruction/feedback choice clears
 an old preview. Profile diffs use jsdiff line changes, with bounded work and a full-text fallback for
 very large differences; no model-provided HTML is rendered.
+
+The corresponding agent CLI exposes optional `--expected-version` on set/evolve/rollback,
+`--no-feedback` on evolution, and `items feedback` for latest-vote reads. Existing defaults are unchanged.
+Unsaved evolution instructions and feedback-choice changes are included in the editor's work guard;
+manual profile saves retain these inputs, while apply/confirmed rollback/explicit discard clears them.
+
+When Feed has a selected pipeline, feedback stays disabled until that pipeline's persona metadata is
+successfully resolved. Missing or failed metadata never silently falls back to default, even when an
+old cache entry exists. Clear the pipeline filter to choose an explicit standalone feedback persona.

@@ -299,6 +299,7 @@ def persona_set(
     remove_exclude: Optional[list[str]] = typer.Option(None, "--remove-exclude", help="删除 exclude 关键词，可重复"),
     note: Optional[str] = typer.Option(None, help="版本备注"),
     skip_tags: bool = typer.Option(False, help="跳过标签模型调用，保留已有标签"),
+    expected_version: Optional[int] = typer.Option(None, min=0, help="可选并发校验；0 表示预期名称不存在"),
 ) -> None:
     """修改或创建 persona；成功后写成新版本。"""
     def apply(service: TentaclesService):
@@ -314,7 +315,7 @@ def persona_set(
                 raise ConfigError(f'cannot read UTF-8 profile file {profile_file}') from None
         return service.set_persona(name, profile=profile, include_add=include, include_remove=remove_include,
                                    exclude_add=exclude, exclude_remove=remove_exclude,
-                                   note=note, skip_tags=skip_tags)
+                                   note=note, skip_tags=skip_tags, expected_version=expected_version)
     _run(ctx, apply, _render_persona)
 
 
@@ -338,9 +339,11 @@ def _render_evolution(result, out: Console, when: TimeFmt) -> None:
 @persona_app.command("evolve")
 def persona_evolve(ctx: typer.Context, name: str = typer.Argument('default'),
                    instruction: str = typer.Option('', help="一句话指令；也可只使用近期反馈"),
-                   dry_run: bool = typer.Option(False, help="只返回提案，不写库；模型调用可能产生费用")) -> None:
+                   dry_run: bool = typer.Option(False, help="只返回提案，不写库；模型调用可能产生费用"),
+                   use_feedback: bool = typer.Option(True, "--feedback/--no-feedback", help="是否参考近期反馈"),
+                   expected_version: Optional[int] = typer.Option(None, min=0, help="可选基准版本并发校验")) -> None:
     """根据指令和/或反馈改写 persona；默认直接应用，--dry-run 仅预览。"""
-    _run(ctx, lambda s: s.evolve_persona(name, instruction=instruction, dry_run=dry_run),
+    _run(ctx, lambda s: s.evolve_persona(name, instruction=instruction, dry_run=dry_run, use_feedback=use_feedback, expected_version=expected_version),
          _render_evolution, snapshot=dry_run)
 
 
@@ -361,9 +364,10 @@ def persona_apply(ctx: typer.Context,
 @persona_app.command("rollback")
 def persona_rollback(ctx: typer.Context, name: str = typer.Argument(...),
                      version: int = typer.Argument(..., min=1),
-                     note: Optional[str] = typer.Option(None)) -> None:
+                     note: Optional[str] = typer.Option(None),
+                     expected_version: Optional[int] = typer.Option(None, min=0, help="可选当前版本并发校验")) -> None:
     """复制旧内容为新版本，不删除历史，也不重新抽取标签。"""
-    _run(ctx, lambda s: s.rollback_persona(name, version, note=note), _render_persona)
+    _run(ctx, lambda s: s.rollback_persona(name, version, note=note, expected_version=expected_version), _render_persona)
 
 
 # ---- models -----------------------------------------------------------------
@@ -470,6 +474,16 @@ def items_show(ctx: typer.Context, item_id: str = typer.Argument(..., help="条�
         out.print(f"{d.source_id} · {when(d.published or d.fetched_at)} · {d.url}\n", markup=False)
         out.print(d.content or d.summary, markup=False)
     _run(ctx, lambda s: s.get_item(item_id), render)
+
+
+@items_app.command('feedback')
+def items_feedback(ctx: typer.Context, item_id: str = typer.Argument(...),
+                   persona: Optional[str] = typer.Option(None)) -> None:
+    """查看该条目在指定画像下的最新反馈，未反馈时 JSON 为 null。"""
+    _run(ctx, lambda service: service.get_feedback(item_id, persona=persona),
+         lambda value, out, when: out.print(Text('尚无反馈') if value is None else _table(
+             'Latest feedback', ['item', 'persona', 'rating', 'note', 'created'],
+             [[value.item_id, value.persona, value.rating, value.note, when(value.created_at)]])))
 
 
 @app.command("feedback")

@@ -564,3 +564,13 @@ fetch 的 pending 为 null。同一 pipeline 的两个调度角色显示相同 p
 ### 回答"今天有什么新内容"
 
 运行 `tentacles --json items list --since 24h --limit 100`，然后对感兴趣的条目运行 `items show ID` 读取正文。
+
+### Browser/agent option parity
+
+- `persona set NAME [--expected-version N]`: optional compare-and-swap; `0` expects a new name.
+- `persona evolve NAME [--feedback | --no-feedback] [--expected-version N] [--dry-run]`:
+  feedback stays enabled by default. `--no-feedback` uses only the instruction; an instruction is then required.
+- `persona rollback NAME VERSION [--expected-version N]`: optionally fence the current version before copying history.
+- `items feedback ITEM_ID [--persona NAME]`: read the latest persisted feedback; JSON is `null` if none.
+
+Omitting the new flags preserves existing CLI behavior. Version conflicts use exit 4 and code `conflict`.
