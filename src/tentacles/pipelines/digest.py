@@ -8,7 +8,6 @@ from typing import Any, Callable
 from zoneinfo import ZoneInfo
 
 from tentacles.config import AppConfig
-from tentacles.errors import UpstreamError
 from tentacles.llm.registry import ModelRegistry
 from tentacles.models import Item
 from tentacles.personas.models import PersonaView
@@ -16,8 +15,9 @@ from tentacles.personas.render import render_persona
 from tentacles.pipelines.config import PipelineSpec
 from tentacles.pipelines.models import Evaluation, ReportView
 from tentacles.pipelines.report_path import new_report_location
+from tentacles.pipelines.report_writing import complete_report, require_citations
 from tentacles.schemas import Completion
-from tentacles.prompts import load_prompt, MAX_PROMPT_CHARS
+from tentacles.prompts import load_prompt
 from tentacles.timeutil import to_utc
 
 _SYSTEM = '''基于给定材料编写新闻日报，按用户画像取舍、排序，并按兴趣标签分板块。
@@ -48,17 +48,11 @@ async def make_digest(config: AppConfig, spec: PipelineSpec, persona: PersonaVie
         prompt = load_prompt(config.resolve(spec.processor.prompt_file))
         system = prompt.system
         user = prompt.render({**payload, 'items': items, 'tags': [tag.model_dump() for tag in persona.tags]})
-    if len(user) > MAX_PROMPT_CHARS:
-        raise UpstreamError('digest prompt exceeds size limit')
-    system += f'\n输出语言：{spec.processor.language}\n追加指令：{spec.processor.instructions}'
-    name = models.resolve('process', spec.processor.model)
-    result = await models.chat(name).complete([{'role': 'user', 'content': user}], system=system,
-                                             on_completion=on_completion)
+    result = await complete_report(spec.processor, models, system, user, on_completion)
     now = to_utc(clock())
-    content = models.redact(result.text).strip()
+    content = result.text
     references = [int(value) for value in re.findall(r'\[(\d+)\]', content)]
-    if not content or not references or any(not 1 <= number <= len(items) for number in references):
-        raise UpstreamError('digest returned no valid numbered citations')
+    require_citations('digest', content, references, len(items))
     title = f'{spec.name or spec.id} {now.astimezone(ZoneInfo(config.app.timezone)):%Y-%m-%d}'
     appendix = '\n'.join(f'[{item["number"]}] {item["source"]}: {item["title"]} {item["url"]}' for item in items)
     markdown = f'# {title}\n\n{content}\n\n## Sources\n\n{appendix}\n'

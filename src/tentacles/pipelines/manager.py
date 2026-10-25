@@ -15,6 +15,7 @@ from tentacles.llm.config import Stage
 from tentacles.personas.models import PersonaView
 from tentacles.pipelines.config import PipelineSpec
 from tentacles.pipelines.digest import make_digest
+from tentacles.pipelines.deep import make_deep
 from tentacles.pipelines.summarize import make_summarize
 from tentacles.pipelines.filtering import filter_items, filter_stats
 from tentacles.pipelines.models import PipelineOutcome, PipelineQuery, PipelineView, FilterBatch
@@ -202,21 +203,12 @@ class PipelineManager:
                 op.outcome.stats['no_new'] = True
 
                 def finish_empty() -> None:
-                    self._store.consume_without_report([], op.outcome.run_id, to_utc(self._clock()), op.outcome.stats, cost=op.cost)
+                    self._store.save_reports([], [], op.outcome.run_id, to_utc(self._clock()), op.outcome.stats, cost=op.cost)
                     op.completed = True
                 await run_store_call(finish_empty)
                 return
             evaluations = [evaluation for _, evaluation in selected]
             op.outcome.stats['consumed'] = 0
-            if spec.processor.type == 'none':
-                def consume() -> None:
-                    success = {**op.outcome.stats, 'consumed': len(selected)}
-                    self._store.consume_without_report(evaluations, op.outcome.run_id,
-                                                       to_utc(self._clock()), success, cost=op.cost)
-                    op.outcome.stats = success
-                    op.completed = True
-                await run_store_call(consume)
-                return
             def record_completion(result: Completion) -> None:
                 if result.cost is not None:
                     op.cost = (op.cost or 0) + result.cost
@@ -225,15 +217,22 @@ class PipelineManager:
                                             for key, value in result.usage.model_dump().items()}
                 op.outcome.stats['cost'] = op.cost
                 op.outcome.stats['model'] = result.model
-            make_report = make_summarize if spec.processor.type == 'summarize' else make_digest
-            report = await make_report(self._config, spec, persona, selected, self._models,
-                                       self._clock, record_completion)
+            if spec.processor.type == 'deep':
+                reports = await make_deep(self._config, spec, persona, selected, self._models,
+                                          self._clock, record_completion)
+            elif spec.processor.type == 'none':
+                reports = []
+            else:
+                make_report = make_summarize if spec.processor.type == 'summarize' else make_digest
+                reports = [await make_report(self._config, spec, persona, selected, self._models,
+                                              self._clock, record_completion)]
 
             def publish() -> None:
-                success = {**op.outcome.stats, 'consumed': len(selected)}
-                self._store.save_report(report, evaluations, op.outcome.run_id, success, cost=op.cost)
+                success = {**op.outcome.stats, 'consumed': len(selected), 'report_ids': [r.id for r in reports]}
+                self._store.save_reports(reports, evaluations, op.outcome.run_id, to_utc(self._clock()),
+                                         success, cost=op.cost)
                 op.outcome.stats = success
-                op.outcome.report_id = report.id
+                op.outcome.report_id = reports[0].id if reports else None
                 op.completed = True
             await run_store_call(publish)
         return await self._execute(spec, 'pipeline', work, due_only=due_only)

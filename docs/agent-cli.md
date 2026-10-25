@@ -332,6 +332,32 @@ Digest 使用 process 默认模型或 processor `model` 覆盖，按 Persona 取
 
 `processor.type: none` 不生成报告、不调用模型，但选中的前 N 条仍会被标记为已消费（evaluations.reported_at）。
 
+### deep 处理器
+
+`processor.type: deep` 使用既有贪心标题聚类（算法不变），按事件条目数、来源数降序处理。
+`min_cluster_size` 默认为 3，`max_reports` 默认为 3，范围都是 1–500。
+规模是条目数，不是独立来源数；阈值含等号，达标事件每个一份，超出上限的事件本次不生成报告。
+共用的 `max_items` 仍是按评估分数取出的消费条目数上限（不是每个事件的上限）。
+
+每份报告 kind 为 `deep`，标题为 `深度报道：事件标题`，仅关联其事件成员。
+默认提示词沿用原有深度报道要求：导语、背景、各方说法、数据与疑点、影响与后续、尚待确认的问题；
+模型不得使用材料之外的知识。输入保留每条至多 1200 字符摘要，按事件从 1 编号。
+输出需含合法编号引用（`来源1`、`[来源1]` 或 `[1]`），并附确定的编号来源清单。
+模型选择为显式 `processor.model` 优先，否则使用 `defaults.models.process`。
+自定义提示词格式同 digest，`items` 仅含当前事件，`groups.event` 同 `items`；
+还可使用 `persona`、`tags`、`now`、`pipeline`。语言和追加指令同样生效。
+
+`pipelines run ID` 的 `report_id` 保持单值，为本批第一份报告或 null；`stats.report_ids` 返回本批全部 ID。
+即使全部事件低于阈值，也返回 `status=ok`，并消费所有选中条目；没有待处理条目则为 `no_new`。
+超出 `max_reports` 的条目同样消费，不会在下次补写。`none` 不调用模型、不生成报告，仍消费选中条目。
+消费账本独立于 persona 版本或重新评估，因此不会因修改兴趣而重复报道。
+
+所有事件生成完成后，全部文件、报告记录与消费标记在同一受租约保护的事务内发布。
+任一模型、引用、文件或数据库错误都会使本批失败，不留下半批报告，选中条目留待重试。
+取消和租约到期同样不能提前消费；已知 usage/cost 保存在本次运行记录，每份报告只记录其自身费用。
+已提交批次即使遇到取消也保留完整结果。文件独占创建、默认 0600，不覆盖已有文件。
+验证全程用 HTTP 替身，不需要付费模型。
+
 ### summarize 处理器
 
 将 pipeline 的 `processor.type` 设为 `summarize`，然后调用 `pipelines run ID`。先检查返回的 `status`；
@@ -363,7 +389,7 @@ Digest 使用 process 默认模型或 processor `model` 覆盖，按 Persona 取
 
 ### 自定义处理器提示词
 
-处理器共用字段：`type`（digest/summarize/none）、`model`、`language`（默认 zh-CN）、`instructions`（追加指令）、
+处理器共用字段：`type`（digest/deep/summarize/none）、`model`、`language`（默认 zh-CN）、`instructions`（追加指令）、
 `max_items` 和 `prompt_file`。prompt_file 相对配置目录，UTF-8；以下是 digest 示例：
 
 ```text

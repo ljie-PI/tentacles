@@ -65,12 +65,14 @@ StageSpec = Annotated[Union[KeywordSpec, DecisionSpec, LLMSpec], Field(discrimin
 
 class ProcessorSpec(BaseModel):
     model_config = ConfigDict(extra='forbid')
-    type: Literal['digest', 'summarize', 'none'] = 'digest'
+    type: Literal['digest', 'deep', 'summarize', 'none'] = 'digest'
     model: str | None = None
     language: str = Field(default='zh-CN', min_length=1)
     instructions: str = ''
     max_items: int = Field(default=60, ge=1, le=500)
     prompt_file: Path | None = None
+    min_cluster_size: int = Field(default=3, ge=1, le=500)
+    max_reports: int = Field(default=3, ge=1, le=500)
 
 
 class PipelineSpec(BaseModel):

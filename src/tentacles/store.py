@@ -376,57 +376,51 @@ class Store:
             if row is None or _row_to_evaluation(row) != evaluation or evaluation.reported_at is not None:
                 raise Conflict('evaluations changed while preparing the report')
 
-    def _consume(self, evaluations: list[Evaluation], now: datetime, report_id: str | None = None) -> None:
+    def _consume(self, evaluations: list[Evaluation], now: datetime, reports: list[ReportView]) -> None:
+        report_ids = {item_id: report.id for report in reports for item_id in report.item_ids}
         self._conn.executemany('INSERT INTO pipeline_consumption VALUES (?, ?, ?, ?)',
-            [(e.pipeline_id, e.item_id, to_iso(now), report_id) for e in evaluations])
+            [(e.pipeline_id, e.item_id, to_iso(now), report_ids.get(e.item_id)) for e in evaluations])
         self._conn.executemany('UPDATE evaluations SET reported_at = ? WHERE pipeline_id = ? AND item_id = ?',
             [(to_iso(now), e.pipeline_id, e.item_id) for e in evaluations])
 
-    def save_report(self, report: ReportView, evaluations: list[Evaluation], run_id: int,
-                    stats: dict[str, Any], cost: float | None = None) -> None:
-        """Publish one exclusive file and its database record/consumption together.
+    def save_reports(self, reports: list[ReportView], evaluations: list[Evaluation], run_id: int,
+                     now: datetime, stats: dict[str, Any], cost: float | None = None) -> None:
+        """Publish the entire batch and consumption in one fenced transaction.
 
-        A failed SQL commit removes only the file created by this operation.
-        Worker IO is drained by the caller before cancellation may close Store.
+        No reports (none/deep below threshold) still consumes the selected items.
+        Rollback removes only files created by this operation, including on a
+        later file/SQL failure. Caller drains worker IO before closing Store.
         """
-        path, created = Path(report.path), False
+        created: list[Path] = []
         try:
             with self._lock, self._conn:
                 self._conn.execute('BEGIN IMMEDIATE')
                 self._require_running(run_id)
                 self._check_pending(evaluations)
-                path.parent.mkdir(parents=True, exist_ok=True)
-                with open(path, 'x', encoding='utf-8',
-                          opener=lambda target, flags: os.open(target, flags, 0o600)) as handle:
-                    created = True
-                    handle.write(report.markdown)
-                    handle.flush()
-                    os.fsync(handle.fileno())
-                self._conn.execute('INSERT INTO reports VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-                    (report.id, report.pipeline_id, report.persona_version, report.kind, report.title,
-                     report.markdown, json.dumps(report.item_ids), report.model,
-                     report.usage.model_dump_json(), report.cost, report.path, to_iso(report.created_at)))
-                self._consume(evaluations, report.created_at, report.id)
-                self._finish_run(run_id, status='ok', now=report.created_at, stats=stats, cost=cost if cost is not None else report.cost)
+                for report in reports:
+                    path = Path(report.path)
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    with open(path, 'x', encoding='utf-8',
+                              opener=lambda target, flags: os.open(target, flags, 0o600)) as handle:
+                        created.append(path)
+                        handle.write(report.markdown)
+                        handle.flush()
+                        os.fsync(handle.fileno())
+                    self._conn.execute('INSERT INTO reports VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+                        (report.id, report.pipeline_id, report.persona_version, report.kind, report.title,
+                         report.markdown, json.dumps(report.item_ids), report.model,
+                         report.usage.model_dump_json(), report.cost, report.path, to_iso(report.created_at)))
+                self._consume(evaluations, now, reports)
+                self._finish_run(run_id, status='ok', now=now, stats=stats, cost=cost)
                 self._complete_task_run(run_id, 'ok', None)
         except BaseException:
-            if created:
+            for path in created:
                 try:
                     path.unlink(missing_ok=True)
                 except OSError as cleanup_error:
                     log.warning('could not remove uncommitted report file (%s)', type(cleanup_error).__name__)
                     # The original failure remains visible; never remove an unowned file.
             raise
-
-    def consume_without_report(self, evaluations: list[Evaluation], run_id: int, now: datetime,
-                               stats: dict[str, Any], cost: float | None = None) -> None:
-        with self._lock, self._conn:
-            self._conn.execute('BEGIN IMMEDIATE')
-            self._require_running(run_id)
-            self._check_pending(evaluations)
-            self._consume(evaluations, now)
-            self._finish_run(run_id, status='ok', now=now, stats=stats, cost=cost)
-            self._complete_task_run(run_id, 'ok', None)
 
     def list_reports(self, pipeline_id: str | None, limit: int, offset: int) -> tuple[list[ReportView], int]:
         condition = 'pipeline_id = ?' if pipeline_id is not None else '1 = 1'
