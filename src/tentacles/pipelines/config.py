@@ -65,7 +65,7 @@ StageSpec = Annotated[Union[KeywordSpec, DecisionSpec, LLMSpec], Field(discrimin
 
 class ProcessorSpec(BaseModel):
     model_config = ConfigDict(extra='forbid')
-    type: Literal['digest', 'none'] = 'digest'
+    type: Literal['digest', 'summarize', 'none'] = 'digest'
     model: str | None = None
     language: str = Field(default='zh-CN', min_length=1)
     instructions: str = ''

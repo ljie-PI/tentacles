@@ -15,6 +15,7 @@ from tentacles.llm.config import Stage
 from tentacles.personas.models import PersonaView
 from tentacles.pipelines.config import PipelineSpec
 from tentacles.pipelines.digest import make_digest
+from tentacles.pipelines.summarize import make_summarize
 from tentacles.pipelines.filtering import filter_items, filter_stats
 from tentacles.pipelines.models import PipelineOutcome, PipelineQuery, PipelineView, FilterBatch
 from tentacles.store import Store
@@ -224,7 +225,8 @@ class PipelineManager:
                                             for key, value in result.usage.model_dump().items()}
                 op.outcome.stats['cost'] = op.cost
                 op.outcome.stats['model'] = result.model
-            report = await make_digest(self._config, spec, persona, selected, self._models,
+            make_report = make_summarize if spec.processor.type == 'summarize' else make_digest
+            report = await make_report(self._config, spec, persona, selected, self._models,
                                        self._clock, record_completion)
 
             def publish() -> None:
