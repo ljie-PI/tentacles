@@ -278,10 +278,10 @@ class TentaclesService:
                     # The token is known even if cancellation arrived after acquisition committed.
                     await run_store_call(self.store.finish_task, task, token, to_utc(self._clock()))
                 except Exception as exc:
-                    log.warning('could not finish task %s: %s', spec.id, exc)
+                    log.warning('could not finish task %s (%s)', spec.id, type(exc).__name__)
                     failure = failure or exc
         if failure is not None:
-            error = f'{type(failure).__name__}: {failure}'
+            error = f'fetch task failed ({type(failure).__name__})'
             log.warning('fetch %s failed: %s', spec.id, error)
             return FetchOutcome(source_id=spec.id, run_id=run_id, status='error',
                                 new=outcome.new if outcome else 0, dup=outcome.dup if outcome else 0,

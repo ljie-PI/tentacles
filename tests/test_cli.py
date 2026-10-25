@@ -601,3 +601,16 @@ def test_persona_web_options_and_feedback_read_remain_available_to_agents(cli, w
     preview = cli('persona', 'evolve', '--instruction', 'More research', '--no-feedback', '--expected-version', '3', '--dry-run', config=path)
     assert preview.exit_code == 0
     PersonaProposal.model_validate(payload(preview))
+
+
+def test_unexpected_model_exception_is_not_dumped_to_cli_json_or_stderr(cli, web, write_config):
+    from test_models import CHAT_URL, model_config
+    marker = 'synthetic-private-model-response'
+
+    def respond(request):
+        raise RuntimeError(marker)
+
+    web.handle(CHAT_URL, respond)
+    result = cli('models', 'test', 'fast', config=write_config(model_config()))
+    assert result.exit_code == 1 and payload(result)['error']['code'] == 'error'
+    assert marker not in result.stdout + result.stderr and 'Traceback' not in result.stderr

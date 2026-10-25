@@ -144,3 +144,8 @@ manual profile saves retain these inputs, while apply/confirmed rollback/explici
 When Feed has a selected pipeline, feedback stays disabled until that pipeline's persona metadata is
 successfully resolved. Missing or failed metadata never silently falls back to default, even when an
 old cache entry exists. Clear the pipeline filter to choose an explicit standalone feedback persona.
+
+Source diagnostics retain safe error categories and HTTP status rather than source URLs, raw network/
+parser messages, arbitrary exception text or tracebacks. This applies to logs, fetch outcomes, source
+state and run records, including failure-recording/lease cleanup. CLI unexpected failures likewise
+report a category only; structured expected domain errors retain their normal safe diagnostics.

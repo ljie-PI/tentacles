@@ -155,8 +155,8 @@ def _run(ctx: typer.Context, op: Callable[[TentaclesService], Awaitable[Any] | A
     except KeyboardInterrupt:
         _fail(state, "aborted", "interrupted")
     except Exception as exc:  # noqa: BLE001 — unexpected bugs still yield a structured error
-        logging.getLogger(__name__).exception("unexpected error")
-        _fail(state, "error", f"{type(exc).__name__}: {exc}")
+        logging.getLogger(__name__).error("unexpected operation failure (%s)", type(exc).__name__)
+        _fail(state, "error", f"operation failed ({type(exc).__name__})")
     if state.json:
         typer.echo(json.dumps(_jsonable(result), ensure_ascii=False))
     else:
