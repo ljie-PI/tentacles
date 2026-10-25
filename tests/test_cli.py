@@ -411,11 +411,14 @@ def test_evolution_human_diff_is_colored_while_json_stays_plain(write_config, we
     runner = CliRunner()
     args = ['-c', str(path), 'persona', 'evolve', '--instruction', 'More robotics', '--dry-run']
     result = runner.invoke(app, args, obj={'transport': web.transport()}, color=True,
-                           env={'FORCE_COLOR': '1', 'TERM': 'xterm-256color'})
+                           env={'FORCE_COLOR': '1', 'TERM': 'xterm-256color', 'NO_COLOR': None})
     assert result.exit_code == 0
     assert '\x1b[31m-Original profile' in result.stdout
     assert '\x1b[32m+AI and robotics first' in result.stdout
+    no_color = runner.invoke(app, args, obj={'transport': web.transport()}, color=True,
+                              env={'FORCE_COLOR': '1', 'NO_COLOR': '1'})
+    assert no_color.exit_code == 0 and '\x1b[31m' not in no_color.stdout and '\x1b[32m' not in no_color.stdout
     result = runner.invoke(app, ['--json', *args], obj={'transport': web.transport()}, color=True,
-                           env={'FORCE_COLOR': '1', 'TERM': 'xterm-256color'})
+                           env={'FORCE_COLOR': '1', 'TERM': 'xterm-256color', 'NO_COLOR': None})
     assert result.exit_code == 0 and '\x1b[' not in result.stdout
     assert payload(result)['base_version'] == 1
