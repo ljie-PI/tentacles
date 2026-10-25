@@ -18,11 +18,10 @@ from dateparser.search import search_dates
 import httpx
 import soupsieve
 from bs4 import BeautifulSoup, Tag
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, field_validator
 
 from tentacles.asyncutil import gather_draining, run_blocking, run_store_call
-from tentacles.errors import ConfigError, UpstreamError
-from tentacles.config import AppConfig
+from tentacles.errors import UpstreamError
 from tentacles.models import Item, normalize_url
 from tentacles.sources.base import FetchContext, FetchResult, Source, register
 from tentacles.text import html_to_text, truncate
@@ -140,14 +139,6 @@ class WebOptions(BaseModel):
         if value is not None and Selector.parse(value).attribute is not None:
             raise ValueError('page selector must select nodes, not an attribute')
         return value
-
-    @model_validator(mode='after')
-    def _mode_options(self):
-        if self.mode == 'list' and self.selectors is None:
-            raise ValueError('list mode requires selectors')
-        if self.model is not None and self.mode != 'llm':
-            raise ValueError('model override is only supported in llm mode')
-        return self
 
 
 def _link(base: str, value: str) -> str | None:
@@ -288,15 +279,6 @@ _EXTRACT_SYSTEM = '''从给定网页的“文本 + 链接”抽取真实文章�
 class WebSource(Source):
     type: ClassVar[str] = 'web'
     Options: ClassVar[Type[BaseModel]] = WebOptions
-
-    @classmethod
-    def validate_config(cls, options: BaseModel, config: AppConfig, where: str) -> None:
-        opts = cast(WebOptions, options)
-        if opts.mode == 'llm':
-            name = opts.model if opts.model is not None else config.defaults.models.get('extract')
-            model = config.models.get(name) if name is not None else None
-            if model is None or model.kind != 'chat':
-                raise ConfigError(f'{where}.model requires an existing chat model or extract-stage default')
 
     async def _get(self, url: str, ctx: FetchContext) -> httpx.Response:
         opts = cast(WebOptions, self.options)

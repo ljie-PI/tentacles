@@ -2,7 +2,7 @@ import { useInfiniteQuery, useQueries, useQuery } from '@tanstack/react-query'
 import { Link, useParams, useSearchParams } from 'react-router-dom'
 import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
-import { api, safeUrl, type ItemDetail, type Pipeline, type Report, type ReportPage } from './api'
+import { api, safeUrl } from './api'
 import { useDisplayTime } from './display-time'
 import { formatCost } from './format'
 import { Notice } from './shared'
@@ -21,7 +21,7 @@ function MarkdownReport({ markdown }: { markdown: string }) {
 }
 
 function References({ ids }: { ids: string[] }) {
-  const references = useQueries({ queries: ids.map(id => ({ queryKey: ['item', id], queryFn: () => api<ItemDetail>(`/items/${encodeURIComponent(id)}`) })) })
+  const references = useQueries({ queries: ids.map(id => ({ queryKey: ['item', id], queryFn: () => api('/api/items/{item_id}', 'get', { path: { item_id: id } }) })) })
   return <section className="report-references"><h2>引用条目 <span className="muted small">{ids.length} 条</span></h2>{ids.length === 0 && <p className="muted">这份报告没有关联条目。</p>}<ol>{ids.map((id, index) => <li key={id}><Link to={`/feed?item=${encodeURIComponent(id)}`}>{references[index]?.data?.title || id}</Link><span className="muted small">{references[index]?.error ? ' 条目不可用' : references[index]?.data?.source_id ? ` · ${references[index].data.source_id}` : ' 加载中…'}</span></li>)}</ol></section>
 }
 
@@ -29,7 +29,7 @@ export function ReportDetail() {
   const { id = '' } = useParams()
   const [params] = useSearchParams()
   const { formatTime, error: displayError } = useDisplayTime()
-  const query = useQuery({ queryKey: ['report', id], queryFn: () => api<Report>(`/reports/${encodeURIComponent(id)}`) })
+  const query = useQuery({ queryKey: ['report', id], queryFn: () => api('/api/reports/{report_id}', 'get', { path: { report_id: id } }) })
   const report = query.data
   return <>
     <Link className="inline-link small" to={`/reports?${params}`}>← 返回报告列表</Link>
@@ -42,9 +42,9 @@ export default function Reports() {
   const [params, setParams] = useSearchParams()
   const pipeline = params.get('pipeline') || ''
   const { formatTime, error: displayError } = useDisplayTime()
-  const pipelines = useQuery({ queryKey: ['pipelines'], queryFn: () => api<Pipeline[]>('/pipelines') })
+  const pipelines = useQuery({ queryKey: ['pipelines'], queryFn: () => api('/api/pipelines', 'get') })
   const query = useInfiniteQuery({ queryKey: ['reports', pipeline], initialPageParam: 0,
-    queryFn: ({ pageParam, signal }) => { const search = new URLSearchParams({ limit: '20', offset: String(pageParam) }); if (pipeline) search.set('pipeline', pipeline); return api<ReportPage>(`/reports?${search}`, { signal }) },
+    queryFn: ({ pageParam, signal }) => api('/api/reports', 'get', { query: { limit: 20, offset: pageParam, pipeline: pipeline || undefined }, signal }),
     getNextPageParam: page => page.offset + page.items.length < page.total ? page.offset + page.items.length : undefined,
   })
   const reports = [...new Map((query.data?.pages.flatMap(page => page.items) || []).map(report => [report.id, report])).values()]

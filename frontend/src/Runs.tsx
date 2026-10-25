@@ -1,6 +1,6 @@
 import { useQuery } from '@tanstack/react-query'
 import { useSearchParams } from 'react-router-dom'
-import { api, type Run } from './api'
+import { api } from './api'
 import { useDisplayTime } from './display-time'
 import { formatCost, formatDuration, formatStats } from './format'
 import { Notice } from './shared'
@@ -9,10 +9,9 @@ export default function Runs() {
   const [params, setParams] = useSearchParams()
   const kind = params.get('kind') || '', target = params.get('target') || ''
   const { formatTime, error: displayError } = useDisplayTime()
-  const query = useQuery({ queryKey: ['runs', kind, target], queryFn: () => {
-    const search = new URLSearchParams({ limit: '100' }); if (kind) search.set('kind', kind); if (target) search.set('target', target)
-    return api<Run[]>(`/runs?${search}`)
-  }, refetchInterval: 5000 })
+  const query = useQuery({ queryKey: ['runs', kind, target], queryFn: () =>
+    api('/api/runs', 'get', { query: { limit: 100, kind: kind || undefined, target: target || undefined } }),
+  refetchInterval: 5000 })
   return <>
     <header className="page-heading"><div><p className="eyebrow">THE WORK BEHIND THE SIGNAL</p><h1>运行记录<span className="accent">.</span></h1><p className="muted">页面可见时每 5 秒自动刷新，未知费用不会被当作零。</p></div></header>
     <form className="filters" key={`${kind}/${target}`} onSubmit={event => { event.preventDefault(); const data = new FormData(event.currentTarget); const search = new URLSearchParams(); for (const key of ['kind', 'target']) { const value = String(data.get(key) || '').trim(); if (value) search.set(key, value) }; setParams(search) }}><label>类型<select name="kind" defaultValue={kind}><option value="">全部类型</option>{['fetch', 'filter', 'pipeline', 'persona'].map(value => <option value={value} key={value}>{value}</option>)}{kind && !['fetch', 'filter', 'pipeline', 'persona'].includes(kind) && <option value={kind}>{kind}</option>}</select></label><label className="search-field">目标<input name="target" defaultValue={target} placeholder="信息源或 pipeline ID" /></label><button className="primary">筛选记录</button></form>

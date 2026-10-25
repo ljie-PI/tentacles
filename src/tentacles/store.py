@@ -383,45 +383,6 @@ class Store:
         self._conn.executemany('UPDATE evaluations SET reported_at = ? WHERE pipeline_id = ? AND item_id = ?',
             [(to_iso(now), e.pipeline_id, e.item_id) for e in evaluations])
 
-    def save_reports(self, reports: list[ReportView], evaluations: list[Evaluation], run_id: int,
-                     now: datetime, stats: dict[str, Any], cost: float | None = None) -> None:
-        """Publish the entire batch and consumption in one fenced transaction.
-
-        No reports (none/deep below threshold) still consumes the selected items.
-        Rollback removes only files created by this operation, including on a
-        later file/SQL failure. Caller drains worker IO before closing Store.
-        """
-        created: list[Path] = []
-        try:
-            with self._lock, self._conn:
-                self._conn.execute('BEGIN IMMEDIATE')
-                self._require_running(run_id)
-                self._check_pending(evaluations)
-                for report in reports:
-                    path = Path(report.path)
-                    path.parent.mkdir(parents=True, exist_ok=True)
-                    with open(path, 'x', encoding='utf-8',
-                              opener=lambda target, flags: os.open(target, flags, 0o600)) as handle:
-                        created.append(path)
-                        handle.write(report.markdown)
-                        handle.flush()
-                        os.fsync(handle.fileno())
-                    self._conn.execute('INSERT INTO reports VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-                        (report.id, report.pipeline_id, report.persona_version, report.kind, report.title,
-                         report.markdown, json.dumps(report.item_ids), report.model,
-                         report.usage.model_dump_json(), report.cost, report.path, to_iso(report.created_at)))
-                self._consume(evaluations, now, reports)
-                self._finish_run(run_id, status='ok', now=now, stats=stats, cost=cost)
-                self._complete_task_run(run_id, 'ok', None)
-        except BaseException:
-            for path in created:
-                try:
-                    path.unlink(missing_ok=True)
-                except OSError as cleanup_error:
-                    log.warning('could not remove uncommitted report file (%s)', type(cleanup_error).__name__)
-                    # The original failure remains visible; never remove an unowned file.
-            raise
-
     def list_reports(self, pipeline_id: str | None, limit: int, offset: int) -> tuple[list[ReportView], int]:
         condition = 'pipeline_id = ?' if pipeline_id is not None else '1 = 1'
         args = [pipeline_id] if pipeline_id is not None else []
@@ -435,24 +396,6 @@ class Store:
         with self._lock:
             row = self._conn.execute('SELECT * FROM reports WHERE id = ?', (report_id,)).fetchone()
         return _row_to_report(row) if row else None
-
-    def save_evaluations(self, evaluations: list[Evaluation], run_id: int, now: datetime,
-                         stats: dict[str, Any], cost: float | None = None, error: str | None = None) -> None:
-        with self._lock, self._conn:
-            self._conn.execute('BEGIN IMMEDIATE')
-            self._require_running(run_id)
-            for evaluation in evaluations:
-                self._conn.execute(
-                    'INSERT OR IGNORE INTO evaluations VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?,'
-                    ' (SELECT consumed_at FROM pipeline_consumption WHERE pipeline_id = ? AND item_id = ?))',
-                    (evaluation.pipeline_id, evaluation.item_id, evaluation.persona_version,
-                     evaluation.passed, evaluation.score, json.dumps(evaluation.tags, ensure_ascii=False),
-                     evaluation.reason, evaluation.stage,
-                     json.dumps([s.model_dump() for s in evaluation.stage_scores], ensure_ascii=False),
-                     to_iso(evaluation.evaluated_at), evaluation.pipeline_id, evaluation.item_id))
-            status = 'failed' if error is not None else 'ok'
-            self._finish_run(run_id, status=status, now=now, stats=stats, cost=cost, error=error)
-            self._complete_task_run(run_id, status, error)
 
     def item_evaluations(self, item_id: str, pipeline_id: str | None = None) -> list[Evaluation]:
         where = 'e.item_id = ?'
@@ -863,6 +806,31 @@ class Store:
 
     # ---- runs ---------------------------------------------------------------
 
+    def commit_run(self, run_id: int, write: Callable[[RunWriter], None], *, now: datetime,
+                   stats: dict[str, Any], cost: float | None = None, error: str | None = None) -> None:
+        """Fence domain writes, Run completion and task progress in one transaction.
+
+        File rollback is best effort on an observed failure, not crash atomicity.
+        Only newly created files are removed, including on a later SQL/commit
+        failure. Callers must drain worker IO before closing Store.
+        """
+        writer = RunWriter(self, now)
+        try:
+            with self._lock, self._conn:
+                self._conn.execute('BEGIN IMMEDIATE')
+                self._require_running(run_id)
+                write(writer)
+                status = 'failed' if error is not None else 'ok'
+                self._finish_run(run_id, status=status, now=now, stats=stats, cost=cost, error=error)
+                self._complete_task_run(run_id, status, error)
+        except BaseException:
+            for path in writer._created_files:
+                try:
+                    path.unlink(missing_ok=True)
+                except OSError as cleanup_error:
+                    log.warning('could not remove uncommitted report file (%s)', type(cleanup_error).__name__)
+            raise
+
     def start_run(self, kind: str, target: str, now: datetime) -> int:
         with self._lock, self._conn:
             cur = self._conn.execute(
@@ -925,6 +893,43 @@ class Store:
         return [RunRecord(r["id"], r["kind"], r["target"], r["status"], from_iso(r["started_at"]),
                           from_iso(r["finished_at"]), json.loads(r["stats"]), r["cost"], r["error"])
                 for r in rows]
+
+
+class RunWriter:
+    """Domain writes available only inside Store.commit_run's fenced transaction."""
+
+    def __init__(self, store: Store, now: datetime) -> None:
+        self._store, self._now = store, now
+        self._created_files: list[Path] = []
+
+    def save_evaluations(self, evaluations: list[Evaluation]) -> None:
+        for evaluation in evaluations:
+            self._store._conn.execute(
+                'INSERT OR IGNORE INTO evaluations VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?,'
+                ' (SELECT consumed_at FROM pipeline_consumption WHERE pipeline_id = ? AND item_id = ?))',
+                (evaluation.pipeline_id, evaluation.item_id, evaluation.persona_version,
+                 evaluation.passed, evaluation.score, json.dumps(evaluation.tags, ensure_ascii=False),
+                 evaluation.reason, evaluation.stage,
+                 json.dumps([s.model_dump() for s in evaluation.stage_scores], ensure_ascii=False),
+                 to_iso(evaluation.evaluated_at), evaluation.pipeline_id, evaluation.item_id))
+
+    def save_reports(self, reports: list[ReportView], evaluations: list[Evaluation]) -> None:
+        """An empty report batch still consumes all selected evaluations."""
+        self._store._check_pending(evaluations)
+        for report in reports:
+            path = Path(report.path)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with open(path, 'x', encoding='utf-8',
+                      opener=lambda target, flags: os.open(target, flags, 0o600)) as handle:
+                self._created_files.append(path)
+                handle.write(report.markdown)
+                handle.flush()
+                os.fsync(handle.fileno())
+            self._store._conn.execute('INSERT INTO reports VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+                (report.id, report.pipeline_id, report.persona_version, report.kind, report.title,
+                 report.markdown, json.dumps(report.item_ids), report.model,
+                 report.usage.model_dump_json(), report.cost, report.path, to_iso(report.created_at)))
+        self._store._consume(evaluations, self._now, reports)
 
 
 def _row_to_item(r: sqlite3.Row) -> Item:

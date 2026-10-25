@@ -1,15 +1,15 @@
 import { useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link, useSearchParams } from 'react-router-dom'
-import { api, getToken, saveToken, type Model, type ModelTest, type SchedulerLoop, type Task, type TickOutcome } from './api'
+import { api, getToken, saveToken, type ModelTest } from './api'
 import { useDisplayTime } from './display-time'
 import { formatCost } from './format'
 import { Notice } from './shared'
 
 function Models() {
-  const query = useQuery({ queryKey: ['models'], queryFn: () => api<Model[]>('/models') })
+  const query = useQuery({ queryKey: ['models'], queryFn: () => api('/api/models', 'get') })
   const [results, setResults] = useState<Record<string, ModelTest>>({})
-  const probe = useMutation({ mutationFn: (name: string) => api<ModelTest>(`/models/${encodeURIComponent(name)}/test`, { method: 'POST' }),
+  const probe = useMutation({ mutationFn: (name: string) => api('/api/models/{name}/test', 'post', { path: { name } }),
     onSuccess: (result, name) => setResults(current => ({ ...current, [name]: result })) })
   return <section className="settings-section"><h2>模型连通性</h2><p className="section-note">只有点击「测试模型」才发出请求，测试也可能产生费用。模型和密钥通过 YAML／环境变量管理。</p>
     {query.isPending && <Notice>正在读取模型…</Notice>}{query.error && <Notice error>{query.error.message}</Notice>}{probe.error && <Notice error>{probe.error.message}</Notice>}
@@ -21,9 +21,9 @@ function Models() {
 function Scheduler() {
   const client = useQueryClient()
   const { formatTime, error: displayError } = useDisplayTime()
-  const tasks = useQuery({ queryKey: ['scheduler', 'tasks'], queryFn: () => api<Task[]>('/scheduler'), refetchInterval: 5000 })
-  const loop = useQuery({ queryKey: ['scheduler', 'loop'], queryFn: () => api<SchedulerLoop>('/scheduler/loop'), refetchInterval: 5000 })
-  const tick = useMutation({ mutationFn: () => api<TickOutcome[]>('/scheduler/tick', { method: 'POST' }), onSettled: async () => {
+  const tasks = useQuery({ queryKey: ['scheduler', 'tasks'], queryFn: () => api('/api/scheduler', 'get'), refetchInterval: 5000 })
+  const loop = useQuery({ queryKey: ['scheduler', 'loop'], queryFn: () => api('/api/scheduler/loop', 'get'), refetchInterval: 5000 })
+  const tick = useMutation({ mutationFn: () => api('/api/scheduler/tick', 'post'), onSettled: async () => {
     await Promise.all(['scheduler', 'sources', 'pipelines', 'items', 'item', 'reports', 'runs'].map(key => client.invalidateQueries({ queryKey: [key] })))
   } })
   return <section className="settings-section"><div className="card-heading"><h2>调度状态</h2><button disabled={tick.isPending} onClick={() => tick.mutate()}>{tick.isPending ? '执行中…' : '执行一次到期任务'}</button></div><p className="section-note">每 5 秒刷新。手动执行可能抓取信息源或运行 pipeline，并调用付费模型；只处理已启用且到期的任务。</p>

@@ -1,14 +1,14 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { api, type FetchOutcome, type Source } from './api'
+import { api } from './api'
 import { Notice } from './shared'
 import { useDisplayTime } from './display-time'
 
 export default function Sources() {
   const { formatTime, error: displayError } = useDisplayTime()
   const client = useQueryClient()
-  const query = useQuery({ queryKey: ['sources'], queryFn: () => api<Source[]>('/sources'), refetchInterval: 30000 })
+  const query = useQuery({ queryKey: ['sources'], queryFn: () => api('/api/sources', 'get'), refetchInterval: 30000 })
   const fetch = useMutation({
-    mutationFn: (id: string) => api<FetchOutcome>(`/sources/${encodeURIComponent(id)}/fetch`, { method: 'POST' }),
+    mutationFn: (id: string) => api('/api/sources/{source_id}/fetch', 'post', { path: { source_id: id } }),
     onSettled: async () => {
       await Promise.all(['sources', 'items', 'runs', 'scheduler'].map(key => client.invalidateQueries({ queryKey: [key] })))
     },

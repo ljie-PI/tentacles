@@ -1,15 +1,17 @@
 import { Link } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { api, type Pipeline, type PipelineOutcome } from './api'
+import { api } from './api'
 import { useDisplayTime } from './display-time'
 import { Notice } from './shared'
 
 export default function Pipelines() {
   const client = useQueryClient()
   const { formatTime, error: displayError } = useDisplayTime()
-  const query = useQuery({ queryKey: ['pipelines'], queryFn: () => api<Pipeline[]>('/pipelines'), refetchInterval: 15000 })
+  const query = useQuery({ queryKey: ['pipelines'], queryFn: () => api('/api/pipelines', 'get'), refetchInterval: 15000 })
   const action = useMutation({
-    mutationFn: ({ id, kind }: { id: string; kind: 'filter' | 'run' }) => api<PipelineOutcome>(`/pipelines/${encodeURIComponent(id)}/${kind}`, { method: 'POST' }),
+    mutationFn: ({ id, kind }: { id: string; kind: 'filter' | 'run' }) => kind === 'filter'
+      ? api('/api/pipelines/{pipeline_id}/filter', 'post', { path: { pipeline_id: id } })
+      : api('/api/pipelines/{pipeline_id}/run', 'post', { path: { pipeline_id: id } }),
     onSettled: async () => {
       await Promise.all(['pipelines', 'items', 'item', 'reports', 'runs', 'scheduler'].map(key => client.invalidateQueries({ queryKey: [key] })))
     },

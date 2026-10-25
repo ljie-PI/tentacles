@@ -38,13 +38,27 @@
 
 ### `config check`
 
-校验配置文件，包括 `${VAR}` 插值、id 是否唯一，以及各信息源的选项。
+一次收集配置结构、`${VAR}` 插值、id 唯一性、Source 选项/引用、模型默认值、
+Pipeline Stage/Processor 模型种类、prompt 文件和 Persona 引用的所有错误。
+已有数据库只读查询 Persona 名（含 `persona set` 创建的名称）；不存在的数据库或尚无
+Persona 表的旧 schema 视为空。不创建数据目录、数据库，不迁移、seed 或注册/同步任务。
+为避免 SQLite 只读连接仍创建 WAL/SHM，已有数据库及其 WAL/journal 会复制到私有临时目录，
+仅对副本执行 SQLite 恢复和查询，完成后删除。不修改原库或其 sidecar；包含尚未 checkpoint 的
+已提交 WAL 数据。复制期间数据库若变化，最多重试三次，仍变化则以配置错误退出并提示重试。
 
 ```json
 {"ok": true, "path": "/abs/config/tentacles.yaml", "sources": 11}
 ```
 
-校验失败时退出码为 2，`message` 会指出出错的位置，例如 `sources[3].url: must be an http(s) URL`。
+校验失败时退出码为 2，保留 `error.code` / `error.message`，并在 `error.errors` 列出
+每条错误的配置路径和信息，不输出原始配置值、密钥或文件内容：
+
+```json
+{"error":{"code":"invalid","message":"sources[0].url: Field required\npipelines[0].persona: unknown Persona","errors":[{"path":"sources[0].url","message":"Field required"},{"path":"pipelines[0].persona","message":"unknown Persona"}]}}
+```
+
+其他命令启动 Service 时使用相同校验；通过后仍执行原有迁移、Persona seed 和调度/任务引导。
+数据库已有的 Persona 不会重新读取或覆盖配置中的 seed profile 文件。
 
 ### `models list`
 

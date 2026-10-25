@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { useInfiniteQuery, useQuery } from '@tanstack/react-query'
 import { Link, useSearchParams } from 'react-router-dom'
-import { api, safeUrl, type Item, type ItemDetail, type ItemPage, type Source, type Pipeline, type Persona } from './api'
+import { api, ApiError, safeUrl, type Item, type Source, type Pipeline } from './api'
 import { Drawer, Notice, ScoreBadge } from './shared'
 import FeedbackButtons from './Feedback'
 import { useDisplayTime, type TimeFormatter } from './display-time'
@@ -19,7 +19,7 @@ function ItemCard({ item, open, formatTime, persona, feedbackDisabled }: { item:
 
 function Detail({ id, close, persona, feedbackDisabled }: { id: string; close: () => void; persona: string; feedbackDisabled: boolean }) {
   const { formatTime } = useDisplayTime()
-  const query = useQuery({ queryKey: ['item', id], queryFn: () => api<ItemDetail>(`/items/${encodeURIComponent(id)}`) })
+  const query = useQuery({ queryKey: ['item', id], queryFn: () => api('/api/items/{item_id}', 'get', { path: { item_id: id } }) })
   const item = query.data
   return <Drawer title={item?.title || '加载条目…'} close={close}>
     {query.isPending && <Notice>正在读取正文…</Notice>}
@@ -35,6 +35,15 @@ function Detail({ id, close, persona, feedbackDisabled }: { id: string; close: (
 }
 
 type Filters = { source: string; since: string; search: string; pipeline: string; passed: string }
+
+function passedFilter(value: string): boolean | undefined {
+  if (!value) return undefined
+  // Match FastAPI's boolean URL values without silently treating an invalid
+  // bookmark as "false"; retain the backend's validation notice.
+  if (['1', 'true', 'on', 'yes', 'y', 't'].includes(value.toLowerCase())) return true
+  if (['0', 'false', 'off', 'no', 'n', 'f'].includes(value.toLowerCase())) return false
+  throw new ApiError(400, 'invalid request parameters')
+}
 
 function FeedFilters({ filters, sources, pipelines, apply }: { filters: Filters; sources: Source[] | undefined; pipelines: Pipeline[] | undefined; apply: (query: URLSearchParams) => void }) {
   const [draft, setDraft] = useState(filters)
@@ -59,9 +68,9 @@ export default function Feed() {
   const source = params.get('source') || '', since = params.get('since') || '', search = params.get('search') || ''
   const pipeline = params.get('pipeline') || '', passed = params.get('passed') || ''
   const selected = params.get('item')
-  const sources = useQuery({ queryKey: ['sources'], queryFn: () => api<Source[]>('/sources') })
-  const pipelines = useQuery({ queryKey: ['pipelines'], queryFn: () => api<Pipeline[]>('/pipelines'), retry: false })
-  const personas = useQuery({ queryKey: ['personas'], queryFn: () => api<Persona[]>('/personas') })
+  const sources = useQuery({ queryKey: ['sources'], queryFn: () => api('/api/sources', 'get') })
+  const pipelines = useQuery({ queryKey: ['pipelines'], queryFn: () => api('/api/pipelines', 'get'), retry: false })
+  const personas = useQuery({ queryKey: ['personas'], queryFn: () => api('/api/personas', 'get') })
   const pipelinePersona = pipelines.data?.find(row => row.id === pipeline)?.persona
   const preferredPersona = params.get('feedback_persona') || (personas.data?.some(row => row.name === 'default') ? 'default' : personas.data?.[0]?.name || '')
   const unresolvedPipeline = !!pipeline && (pipelines.isPending || pipelines.isError || !pipelinePersona)
@@ -69,15 +78,11 @@ export default function Feed() {
   const feedbackDisabled = unresolvedPipeline || !personas.data?.some(row => row.name === feedbackPersona)
   const feed = useInfiniteQuery({
     queryKey: ['items', source, since, search, pipeline, passed], initialPageParam: 0,
-    queryFn: ({ pageParam, signal }) => {
-      const query = new URLSearchParams({ limit: '20', offset: String(pageParam) })
-      if (source) query.set('sources', source)
-      if (since) query.set('since', since)
-      if (search) query.set('search', search)
-      if (pipeline) query.set('pipeline', pipeline)
-      if (passed) query.set('passed', passed)
-      return api<ItemPage>(`/items?${query}`, { signal })
-    },
+    queryFn: ({ pageParam, signal }) => api('/api/items', 'get', {
+      query: { limit: 20, offset: pageParam, sources: source ? [source] : undefined,
+        since: since || undefined, search: search || undefined, pipeline: pipeline || undefined, passed: passedFilter(passed) },
+      signal,
+    }),
     getNextPageParam: last => last.offset + last.items.length < last.total ? last.offset + last.items.length : undefined,
   })
   const items = [...new Map((feed.data?.pages.flatMap(page => page.items) || []).map(item => [item.id, item])).values()]

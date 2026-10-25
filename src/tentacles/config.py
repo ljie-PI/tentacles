@@ -16,13 +16,13 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import yaml
 from dotenv import dotenv_values
-from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, ValidationError, field_validator
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator
 
-from tentacles.errors import ConfigError, NotFound
+from tentacles.errors import ConfigIssue, ConfigValidationError, NotFound
 from tentacles.server_config import ServerSpec
 from tentacles.schedule import Schedule
-from tentacles.llm.config import Defaults, ModelSpec, STAGES
-from tentacles.personas.models import PersonaSeed, PersonaUpdate, persona_name
+from tentacles.llm.config import Defaults, ModelSpec
+from tentacles.personas.models import PersonaSeed, PersonaUpdate
 from tentacles.pipelines.config import PipelineSpec
 
 DEFAULT_CONFIG = Path("config") / "tentacles.yaml"
@@ -117,8 +117,15 @@ def format_loc(loc: Sequence[str | int]) -> str:
     return out or "<root>"
 
 
-def interpolate(obj: Any, env: Mapping[str, str], where: str = "") -> Any:
+def interpolate(obj: Any, env: Mapping[str, str], where: str = "", *,
+                errors: list[ConfigIssue] | None = None) -> Any:
     """Replace ${VAR} / ${VAR:-default} in every string, recursively."""
+    if errors is None:
+        errors = []
+        result = interpolate(obj, env, where, errors=errors)
+        if errors:
+            raise ConfigValidationError(errors)
+        return result
     if isinstance(obj, str):
         def sub(m: re.Match) -> str:
             name, default = m.group(1), m.group(2)
@@ -126,12 +133,13 @@ def interpolate(obj: Any, env: Mapping[str, str], where: str = "") -> Any:
                 return env[name]
             if default is not None:
                 return default
-            raise ConfigError(f"missing env {name} at {where or '<root>'}")
+            errors.append(ConfigIssue(where or '<root>', f'missing env {name}'))
+            return ''
         return _ENV_REF.sub(sub, obj)
     if isinstance(obj, dict):
-        return {k: interpolate(v, env, f"{where}.{k}" if where else str(k)) for k, v in obj.items()}
+        return {k: interpolate(v, env, f"{where}.{k}" if where else str(k), errors=errors) for k, v in obj.items()}
     if isinstance(obj, list):
-        return [interpolate(v, env, f"{where}[{i}]") for i, v in enumerate(obj)]
+        return [interpolate(v, env, f"{where}[{i}]", errors=errors) for i, v in enumerate(obj)]
     return obj
 
 
@@ -154,67 +162,26 @@ def _load_env(config_path: Path, env: Mapping[str, str] | None) -> dict[str, str
 
 
 def load_config(path: Path | str | None = None, *, env: Mapping[str, str] | None = None) -> AppConfig:
+    from tentacles.config_validation import parse_config
+
     config_path = find_config(path, env)
-    if not config_path.is_file():
-        raise ConfigError(f"config file not found: {config_path}")
     try:
         raw = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError):
+        raise ConfigValidationError([ConfigIssue('<root>', 'cannot read UTF-8 config file')]) from None
     except yaml.YAMLError as exc:
-        raise ConfigError(f"invalid YAML in {config_path}: {exc}") from exc
+        mark = getattr(exc, 'problem_mark', None)
+        location = f' at line {mark.line + 1}, column {mark.column + 1}' if mark is not None else ''
+        raise ConfigValidationError([ConfigIssue('<root>', f'invalid YAML{location}')]) from None
     if raw is None:
         raw = {}
     if not isinstance(raw, dict):
-        raise ConfigError(f"{config_path}: top level must be a mapping")
+        raise ConfigValidationError([ConfigIssue('<root>', 'top level must be a mapping')])
 
-    data = interpolate(raw, _load_env(config_path, env))
+    errors: list[ConfigIssue] = []
     try:
-        config = AppConfig.model_validate(data)
-    except ValidationError as exc:
-        err = exc.errors()[0]
-        raise ConfigError(f"{format_loc(err['loc'])}: {err['msg']}") from exc
-    config._path = config_path
-    _check_sources(config)
-    _check_models(config)
-    pipeline_ids: set[str] = set()
-    for i, pipeline in enumerate(config.pipelines):
-        if pipeline.id in pipeline_ids:
-            raise ConfigError(f'pipelines[{i}].id: duplicate pipeline id')
-        pipeline_ids.add(pipeline.id)
-        unknown = set(pipeline.sources) - {source.id for source in config.sources}
-        if unknown:
-            raise ConfigError(f'pipelines[{i}].sources: unknown source {sorted(unknown)[0]!r}')
-    for name in config.personas:
-        if persona_name(name) != name:
-            raise ConfigError('personas: names must not have leading or trailing whitespace')
-    return config
-
-
-def _check_sources(config: AppConfig) -> None:
-    from tentacles.sources import validate_source  # source types register on import
-
-    seen: set[str] = set()
-    for i, spec in enumerate(config.sources):
-        if spec.id in seen:
-            raise ConfigError(f"sources[{i}].id: duplicate source id {spec.id!r}")
-        seen.add(spec.id)
-        validate_source(spec, where=f"sources[{i}]", config=config)
-
-
-def _check_models(config: AppConfig) -> None:
-    # RSS-only configurations remain valid without any model configuration.
-    if not config.models and not config.defaults.models:
-        return
-    for name in config.models:
-        if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]*', name):
-            raise ConfigError('models: names must use letters, digits, dot, dash or underscore')
-    for stage in STAGES:
-        where = f'defaults.models.{stage}'
-        default_name = config.defaults.models.get(stage)
-        if not default_name:
-            raise ConfigError(f'{where}: a default model is required')
-        spec = config.models.get(default_name)
-        if spec is None:
-            raise ConfigError(f'{where}: unknown model {default_name!r}')
-        kind = 'decision' if stage == 'decision' else 'chat'
-        if spec.kind != kind:
-            raise ConfigError(f'{where}: model {default_name!r} must have kind {kind}')
+        env_values = _load_env(config_path, env)
+    except (OSError, UnicodeError):
+        raise ConfigValidationError([ConfigIssue('<root>', 'cannot read UTF-8 environment file')]) from None
+    data = interpolate(raw, env_values, errors=errors)
+    return parse_config(data, config_path, errors)

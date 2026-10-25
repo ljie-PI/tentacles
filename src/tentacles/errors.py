@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 
 class TentaclesError(Exception):
     code = "error"
@@ -15,6 +17,20 @@ class ConfigError(TentaclesError):
     """Invalid configuration or arguments."""
 
     code = "invalid"
+
+
+@dataclass(frozen=True)
+class ConfigIssue:
+    path: str
+    message: str
+
+
+class ConfigValidationError(ConfigError):
+    """Collected configuration diagnostics, without raw inputs or credentials."""
+
+    def __init__(self, errors: list[ConfigIssue]):
+        self.errors = errors
+        super().__init__("\n".join(f"{error.path}: {error.message}" for error in errors))
 
 
 class NotFound(TentaclesError):

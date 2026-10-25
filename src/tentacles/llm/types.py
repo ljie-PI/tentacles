@@ -24,10 +24,15 @@ class UsageTotals:
     models: list[str] = field(default_factory=list)
 
     def record(self, result: UsageRecord) -> None:
-        self.usage.input_tokens += result.usage.input_tokens
-        self.usage.output_tokens += result.usage.output_tokens
-        self.usage.total_tokens += result.usage.total_tokens
-        if result.cost is not None:
-            self.cost = (self.cost or 0) + result.cost
-        if result.model not in self.models:
-            self.models.append(result.model)
+        self.merge(UsageTotals(result.usage, result.cost, [result.model]))
+
+    def merge(self, other: "UsageTotals") -> None:
+        """Include a completed stage or child run, preserving actual model order."""
+        self.usage.input_tokens += other.usage.input_tokens
+        self.usage.output_tokens += other.usage.output_tokens
+        self.usage.total_tokens += other.usage.total_tokens
+        if other.cost is not None:
+            self.cost = (self.cost or 0) + other.cost
+        for model in other.models:
+            if model not in self.models:
+                self.models.append(model)
