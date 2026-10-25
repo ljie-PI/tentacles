@@ -112,6 +112,17 @@ _REPLY_BOUNDARY = re.compile(
     r'\s*[-_]{2,}|Begin forwarded message:)\s*$', re.I)
 
 
+_WEEKDAY = r'(?:Mon(?:day)?|Tue(?:sday)?|Wed(?:nesday)?|Thu(?:rsday)?|Fri(?:day)?|Sat(?:urday)?|Sun(?:day)?)'
+_MONTH = r'(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)'
+_MAIL_DATE = (rf'(?:\d{{1,2}}\s+{_MONTH}\s+\d{{4}}|{_MONTH}\s+\d{{1,2}},?\s+\d{{4}}|'
+              r'\d{4}[-/]\d{1,2}[-/]\d{1,2})')
+_ATTRIBUTION_DATE = re.compile(
+    rf'^(?:On\s+(?:{_WEEKDAY},?\s+)?{_MAIL_DATE}\b|'
+    r'[在于]\s*(?:\d{4}年\d{1,2}月\d{1,2}日|\d{4}[-/]\d{1,2}[-/]\d{1,2}))', re.I)
+_ATTRIBUTION_SENDER = re.compile(
+    r'(?:<[^@\s<>]+@[^@\s<>]+>|(?<!\S)[^@\s<>]+@[^@\s<>]+)\s+(?:wrote:|写道[：:])$', re.I)
+
+
 def _body_parts(msg: MIMEPart) -> list[tuple[str, str]]:
     if msg.get_content_disposition() == 'attachment' or msg.get_filename() or msg.get_content_maintype() == 'message':
         return []
@@ -134,7 +145,7 @@ def _reply_header(lines: list[str], start: int) -> bool:
     header = lines[start].strip()
     if _REPLY_BOUNDARY.fullmatch(header):
         return True
-    if not re.match(r'^(?:On\s|[在于])', header, re.I):
+    if not re.match(r'^(?:On\s|[在于])', header, re.I) or header.endswith(('.', '!', '?', '。', '！', '？')):
         return False
     # Mail clients soft-wrap attribution headers. Join only that bounded,
     # uninterrupted paragraph, requiring date/sender evidence so ordinary prose
@@ -145,9 +156,8 @@ def _reply_header(lines: list[str], start: int) -> bool:
         header += ' ' + line.strip()
         if len(header) > 1000:
             break
-        if _REPLY_BOUNDARY.fullmatch(header) and re.search(
-                r'\d|@|\b(?:Mon(?:day)?|Tue(?:sday)?|Wed(?:nesday)?|Thu(?:rsday)?|'
-                r'Fri(?:day)?|Sat(?:urday)?|Sun(?:day)?)\b', header, re.I):
+        if _REPLY_BOUNDARY.fullmatch(header) and (
+                _ATTRIBUTION_DATE.match(header) or _ATTRIBUTION_SENDER.search(header)):
             return True
     return False
 

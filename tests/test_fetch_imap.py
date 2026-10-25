@@ -498,6 +498,9 @@ def test_failed_logout_falls_back_to_socket_shutdown_without_losing_success(writ
     'On Sun, 25 Oct 2026\nat 10:00, Alice <alice@example.test>\nwrote:',
     '在 2026年10月25日，\nAlice <alice@example.test> 写道：',
     '于 2026年10月25日，\nAlice <alice@example.test> 写道：',
+    'On Sun, 25 Oct 2026 at 10:00,\nAlice wrote:',
+    'On October 25, 2026 at 10:00,\nAlice wrote:',
+    'On 2026-10-25 at 10:00,\nAlice wrote:',
 ])
 def test_wrapped_reply_headers_remove_unprefixed_old_body_and_summary(write_config, reply_header):
     fake = FakeIMAP({'"INBOX"': Mailbox(messages={1: mail(
@@ -528,8 +531,17 @@ def test_imap_arguments_consistently_reject_delete_controls(write_config, field)
     assert field in str(failure.value)
 
 
-def test_reply_cleanup_preserves_normal_paragraph_containing_wrote(write_config):
-    body = 'Fresh update\n\nOn this project we made progress.\nThis is what I wrote:\nNew technical findings'
+@pytest.mark.parametrize('prose', [
+    'On this project we made progress.',
+    'On this project we fixed 2 bugs.',
+    'On this project we completed phase 2',
+    'On this project we completed work on Monday.',
+    'On this project we used @decorators',
+    'On this project we planned 2026-10-25 milestones',
+    'On 2026-10-25 we completed 2 phases.',
+])
+def test_reply_cleanup_preserves_normal_paragraph_containing_wrote(write_config, prose):
+    body = f'Fresh update\n\n{prose}\nThis is what I wrote:\nNew technical findings'
     fake = FakeIMAP({'"INBOX"': Mailbox(messages={1: mail(body=body)})})
     path = write_config(imap_config())
 
