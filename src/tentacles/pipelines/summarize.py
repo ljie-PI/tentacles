@@ -21,6 +21,7 @@ from tentacles.llm.types import UsageTotals
 from tentacles.models import Item
 from tentacles.personas.models import PersonaView
 from tentacles.personas.render import render_persona
+from tentacles.pipelines.adapters import ModelRequirement
 from tentacles.pipelines.config import PipelineSpec
 from tentacles.pipelines.models import Evaluation, ReportView
 from tentacles.pipelines.report_path import new_report_location
@@ -141,11 +142,11 @@ def _entry(item: Item, row: SummaryRow | None, zone: ZoneInfo, redact: Callable[
 
 async def make_summarize(config: AppConfig, spec: PipelineSpec, persona: PersonaView,
                          selected: list[tuple[Item, Evaluation]], models: ModelRegistry,
-                         clock: Callable[[], datetime], on_completion: Callable[[Completion], None]) -> ReportView:
+                         clock: Callable[[], datetime], on_completion: Callable[[Completion], None]) -> list[ReportView]:
     zone = ZoneInfo(config.app.timezone)
     metrics = UsageTotals()
     parsed: dict[str, SummaryRow] = {}
-    name = models.resolve('process', spec.processor.model)
+    name = SummarizeProcessor.models[0].resolve(models, spec.processor.model)
     prompt = load_prompt(config.resolve(spec.processor.prompt_file)) if spec.processor.prompt_file is not None else None
 
     def record(result: Completion) -> None:
@@ -199,7 +200,12 @@ async def make_summarize(config: AppConfig, spec: PipelineSpec, persona: Persona
     for heading, entries in [('需要处理', actions), ('仅供参考', information), ('未能解析', unparsed)]:
         sections.append(f'## {heading}\n\n' + ('\n\n'.join(_entry(item, parsed.get(item.id), zone, models.redact) for item in entries) or '（无）'))
     report_id, path = new_report_location(config, spec.id, 'summarize', title, now)
-    return ReportView(id=report_id, pipeline_id=spec.id, persona_version=persona.version, kind='summarize',
+    return [ReportView(id=report_id, pipeline_id=spec.id, persona_version=persona.version, kind='summarize',
                       title=title, markdown='\n\n'.join(sections) + '\n',
                       item_ids=[item.id for item, _ in selected], model=', '.join(metrics.models) or None,
-                      usage=metrics.usage, cost=metrics.cost, path=str(path), created_at=now)
+                      usage=metrics.usage, cost=metrics.cost, path=str(path), created_at=now)]
+
+
+class SummarizeProcessor:
+    models = (ModelRequirement('process', 'chat'),)
+    process = staticmethod(make_summarize)

@@ -1,44 +1,15 @@
 """Ordered cascade; a stage error never becomes a cached rejection."""
 from __future__ import annotations
 
-import asyncio
-from time import monotonic
-
-import regex as re
 from datetime import datetime
 from typing import Any
 
 from tentacles.models import Item
 from tentacles.personas.models import PersonaView
-from tentacles.pipelines.config import PipelineSpec, KeywordSpec
+from tentacles.pipelines.config import PipelineSpec
 from tentacles.llm.registry import ModelRegistry
-from tentacles.pipelines.decision import score_decisions
-from tentacles.pipelines.llm import score_llm
+from tentacles.pipelines.registry import STAGES
 from tentacles.pipelines.models import Evaluation, StageScore, StageBatch, FilterBatch
-
-
-def _keyword(item: Item, persona: PersonaView, stage: KeywordSpec, index: int) -> StageScore:
-    text = item.title + '\n' + item.summary
-    folded = text.casefold()
-    deadline = monotonic() + 0.05
-
-    def matches(pattern: str) -> bool:
-        if not stage.regex:
-            return pattern.casefold() in folded
-        remaining = deadline - monotonic()
-        if remaining <= 0:
-            raise TimeoutError('keyword regex budget exhausted')
-        return bool(re.search(pattern, text, re.IGNORECASE | re.VERSION1, timeout=remaining))
-
-    if any(matches(word) for word in persona.exclude + stage.exclude):
-        score, reason = 0.0, 'exclude keyword matched'
-    elif any(matches(word) for word in persona.include + stage.include):
-        score, reason = 1.0, 'include keyword matched'
-    else:
-        score, reason = 0.5, 'no keyword matched'
-    tags = [tag.tag for tag in persona.tags if tag.tag.casefold() in text.casefold()]
-    return StageScore(index=index, type=stage.type, score=score, reason=reason, tags=tags)
-
 
 
 async def filter_items(items: list[Item], persona: PersonaView, spec: PipelineSpec,
@@ -59,21 +30,8 @@ async def filter_items(items: list[Item], persona: PersonaView, spec: PipelineSp
         last = i == len(spec.filters) - 1
         forwarded = []
         batch = progress.batches[i]
-        if stage.type == 'decision':
-            await score_decisions(pending, persona, stage, i, models, batch)
-            scores = batch.scores
-        elif stage.type == 'llm':
-            await score_llm(pending, persona, stage, i, models, batch)
-            scores = batch.scores
-        else:
-            scores = []
-            for item in pending:
-                await asyncio.sleep(0)
-                try:
-                    scores.append(_keyword(item, persona, stage, i))
-                except Exception as exc:
-                    scores.append(StageScore(index=i, type=stage.type, error=type(exc).__name__))
-            batch.scores = scores
+        await STAGES[stage.type].score(pending, persona, stage, i, models, batch)
+        scores = batch.scores
         for item, scored in zip(pending, scores):
             traces[item.id].append(scored)
             if scored.score is None:

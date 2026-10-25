@@ -11,7 +11,8 @@ from tentacles.llm.registry import ModelRegistry
 from tentacles.models import Item
 from tentacles.personas.models import PersonaView
 from tentacles.personas.render import render_persona
-from tentacles.pipelines.config import LLMSpec
+from tentacles.pipelines.adapters import ModelRequirement
+from tentacles.pipelines.config import LLMSpec, StageSpec
 from tentacles.pipelines.models import StageBatch, StageScore
 
 _SYSTEM = '''根据用户画像与有序兴趣标签筛选给定新闻，不要推测材料外的事实。
@@ -74,9 +75,10 @@ def _parse(text: str, ids: list[int], labels: list[dict[str, Any]], model: str,
                 reason='not returned by llm filter', details={'model': model, 'id': number}) for number in ids]
 
 
-async def score_llm(items: list[Item], persona: PersonaView, stage: LLMSpec, index: int,
+async def score_llm(items: list[Item], persona: PersonaView, stage: StageSpec, index: int,
                     models: ModelRegistry, progress: StageBatch) -> StageBatch:
-    name = models.resolve('filter', stage.model)
+    assert isinstance(stage, LLMSpec)
+    name = LLMStage.models[0].resolve(models, stage.model)
     progress.model_name = name
     labels = _interest_labels(persona)
     if not labels:
@@ -116,3 +118,8 @@ async def score_llm(items: list[Item], persona: PersonaView, stage: LLMSpec, ind
         except Exception as exc:
             progress.scores.extend(failed(chunk, exc))
     return progress
+
+
+class LLMStage:
+    models = (ModelRequirement('filter', 'chat'),)
+    score = staticmethod(score_llm)

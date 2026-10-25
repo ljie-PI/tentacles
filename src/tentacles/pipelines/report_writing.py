@@ -11,12 +11,11 @@ from tentacles.schemas import Completion
 
 
 async def complete_report(processor: ProcessorSpec, models: ModelRegistry, system: str, user: str,
-                          on_completion: Callable[[Completion], None]) -> Completion:
+                          on_completion: Callable[[Completion], None], *, model: str) -> Completion:
     if len(user) > MAX_PROMPT_CHARS:
         raise UpstreamError(f'{processor.type} prompt exceeds size limit')
     system += f'\n输出语言：{processor.language}\n追加指令：{processor.instructions}'
-    name = models.resolve('process', processor.model)
-    result = await models.chat(name).complete([{'role': 'user', 'content': user}], system=system,
+    result = await models.chat(model).complete([{'role': 'user', 'content': user}], system=system,
                                              on_completion=on_completion)
     return result.model_copy(update={'text': models.redact(result.text).strip()})
 
