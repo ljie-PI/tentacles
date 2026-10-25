@@ -1,4 +1,4 @@
-"""Persona initialization, versioned edits, and extraction lifecycle."""
+"""Persona initialization, feedback, evolution, and versioned edit lifecycle."""
 from __future__ import annotations
 
 import logging
@@ -16,7 +16,7 @@ from tentacles.llm.json import extract_json
 from tentacles.llm.types import UsageTotals
 from tentacles.personas.evolution import evolution_messages, make_proposal
 from tentacles.personas.tags import parse_tags, tag_messages
-from tentacles.personas.models import PersonaEdit, PersonaProposal, PersonaSeed, PersonaUpdate, PersonaView, persona_name, keywords
+from tentacles.personas.models import FeedbackView, PersonaEdit, PersonaProposal, PersonaSeed, PersonaUpdate, PersonaView, persona_name, keywords
 from tentacles.runs import RunLifecycle, RunOperation
 from tentacles.store import RunWriter, Store
 from tentacles.timeutil import parse_duration, to_utc
@@ -75,6 +75,26 @@ class PersonaManager:
     def export(self, name: str, version: int | None = None) -> str:
         return yaml.safe_dump(self.get(name, version).model_dump(mode='json'),
                               allow_unicode=True, sort_keys=False)
+
+    def submit_feedback(self, item_id: str, *, rating: int, persona: str | None = None,
+                        note: str = '') -> FeedbackView:
+        if type(rating) is not int or rating not in (-1, 1):
+            raise ConfigError('feedback rating must be +1 or -1')
+        name = self._feedback_target(item_id, persona)
+        return self._store.submit_feedback(item_id, name, rating, note, self._clock())
+
+    def get_feedback(self, item_id: str, *, persona: str | None = None) -> FeedbackView | None:
+        name = self._feedback_target(item_id, persona)
+        return self._store.get_feedback(item_id, name)
+
+    def _feedback_target(self, item_id: str, name: str | None) -> str:
+        """Validate the item before selecting its Persona, without loading display details."""
+        if not self._store.item_exists(item_id):
+            raise NotFound(f"unknown item {item_id!r}")
+        if name is None:
+            personas = self.list_personas()
+            name = personas[0].name if len(personas) == 1 else 'default'
+        return self.get(name).name
 
     async def rollback(self, name: str, version: int, note: str | None = None,
                        expected_version: int | None = None) -> PersonaView:

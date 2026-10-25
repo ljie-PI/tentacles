@@ -322,21 +322,10 @@ class TentaclesService:
 
     def submit_feedback(self, item_id: str, *, rating: int, persona: str | None = None,
                         note: str = '') -> FeedbackView:
-        if type(rating) is not int or rating not in (-1, 1):
-            raise ConfigError('feedback rating must be +1 or -1')
-        self.get_item(item_id)
-        name = self._feedback_persona(persona)
-        return self.store.submit_feedback(item_id, name, rating, note, self._clock())
-
-    def _feedback_persona(self, name: str | None) -> str:
-        if name is None:
-            personas = self.list_personas()
-            name = personas[0].name if len(personas) == 1 else 'default'
-        return self.get_persona(name).name
+        return self.personas.submit_feedback(item_id, rating=rating, persona=persona, note=note)
 
     def get_feedback(self, item_id: str, *, persona: str | None = None) -> FeedbackView | None:
-        self.get_item(item_id)
-        return self.store.get_feedback(item_id, self._feedback_persona(persona))
+        return self.personas.get_feedback(item_id, persona=persona)
 
     # ---- runs ---------------------------------------------------------------
 

@@ -680,6 +680,10 @@ class Store:
                 (exclude_source, to_iso(since))).fetchall()
         return [r[0] for r in rows]
 
+    def item_exists(self, item_id_: str) -> bool:
+        with self._lock:
+            return self._conn.execute("SELECT 1 FROM items WHERE id = ?", (item_id_,)).fetchone() is not None
+
     def get_item(self, item_id_: str) -> Item | None:
         with self._lock:
             row = self._conn.execute(f"SELECT {_ITEM_COLUMNS} FROM items WHERE id = ?",
