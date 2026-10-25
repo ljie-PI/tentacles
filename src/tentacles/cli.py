@@ -427,8 +427,8 @@ def sources_fetch(ctx: typer.Context,
                   ids: Optional[list[str]] = typer.Argument(None, help="信息源 id；省略则抓取全部启用的源")) -> None:
     """立即抓取信息源。单个源失败不影响其他源，结果中 status=error。"""
     _run(ctx, lambda s: s.fetch_sources(ids or None), lambda rows, out, when: out.print(_table(
-        "Fetch", ["source", "status", "new", "dup", "error"],
-        [[r.source_id, r.status, r.new, r.dup, r.error] for r in rows])))
+        "Fetch", ["source", "status", "new", "updated", "dup", "error"],
+        [[r.source_id, r.status, r.new, r.updated, r.dup, r.error] for r in rows])))
 
 
 # ---- scheduler --------------------------------------------------------------
@@ -437,9 +437,10 @@ def sources_fetch(ctx: typer.Context,
 def tick(ctx: typer.Context) -> None:
     """执行所有到期任务；被占用的任务返回 busy。"""
     _run(ctx, lambda s: s.tick(), lambda rows, out, when: out.print(_table(
-        "Tick", ["kind", "target", "status", "new", "dup", "report", "error"],
+        "Tick", ["kind", "target", "status", "new", "updated", "dup", "report", "error"],
         [[r.kind, r.target, r.status, r.new if r.kind == 'fetch' else None,
-          r.dup if r.kind == 'fetch' else None, r.report_id, r.error] for r in rows])))
+          r.updated if r.kind == 'fetch' else None, r.dup if r.kind == 'fetch' else None,
+          r.report_id, r.error] for r in rows])))
 
 
 @scheduler_app.command("status")
@@ -475,12 +476,12 @@ def items_list(
                                   passed=True if passed else False if rejected else None)
 
     def render(page, out: Console, when: TimeFmt) -> None:
-        columns = ["id", "source", "published", "title"]
+        columns = ["id", "source", "published", "updated", "title"]
         if pipeline is not None:
             columns += ["score", "tags", "reason", "stage"]
         rows = []
         for item in page.items:
-            row = [item.id, item.source_id, when(item.published or item.fetched_at), item.title]
+            row = [item.id, item.source_id, when(item.published or item.fetched_at), when(item.updated_at), item.title]
             if pipeline is not None:
                 row += [item.score, ', '.join(item.tags), item.reason, item.stage]
             rows.append(row)
@@ -494,6 +495,8 @@ def items_show(ctx: typer.Context, item_id: str = typer.Argument(..., help="条�
     def render(d, out: Console, when: TimeFmt) -> None:
         out.print(Text(d.title, style="bold"))
         out.print(f"{d.source_id} · {when(d.published or d.fetched_at)} · {d.url}\n", markup=False)
+        if d.updated_at is not None:
+            out.print(f"updated: {when(d.updated_at)}", markup=False)
         out.print(d.content or d.summary, markup=False)
     _run(ctx, lambda s: s.get_item(item_id), render)
 

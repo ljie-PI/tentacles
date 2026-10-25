@@ -12,7 +12,7 @@ import httpx
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from tentacles.errors import UpstreamError
-from tentacles.models import Item
+from tentacles.models import Item, ItemObservation
 from tentacles.sources.base import FetchContext, FetchResult, Source, register
 from tentacles.text import html_to_text, truncate
 
@@ -73,10 +73,38 @@ def entry_to_item(entry, source_id: str) -> Item | None:
     )
 
 
+def entry_observation(entry, item: Item) -> ItemObservation:
+    """Presence comes from the parsed entry, never Item's default empty strings."""
+    fields: dict[str, Any] = {"stable_external_id": bool((entry.get("id") or "").strip())}
+    for name, key in (("title", "title"), ("url", "link"), ("author", "author")):
+        if key in entry:
+            fields[name] = getattr(item, name) if entry[key] is not None else None
+    # A content body can supply the original summary fallback, but an absent
+    # body/summary must not turn a partial observation into a destructive clear.
+    summary_key = next((key for key in ("summary", "description") if key in entry), None)
+    if summary_key is not None:
+        summary = entry[summary_key]
+        fields["summary"] = None if summary is None else truncate(html_to_text(summary), 2000)
+        if "content" not in entry:
+            fields["content"] = None if summary is None else html_to_text(summary)
+    if "content" in entry:
+        body = entry["content"]
+        value = body[0].get("value") if body else None
+        fields["content"] = None if value is None else html_to_text(value)
+        if summary_key is None:
+            fields["summary"] = None if value is None else truncate(html_to_text(value), 2000)
+    if any(key in entry for key in ("published", "updated", "published_parsed", "updated_parsed")):
+        # Malformed nonempty dates are not successful observations.
+        if item.published is not None or not (entry.get("published") or entry.get("updated")):
+            fields["published"] = item.published
+    return ItemObservation(**fields)
+
+
 @register
 class RssSource(Source):
     type: ClassVar[str] = "rss"
     Options: ClassVar[Type[BaseModel]] = RssOptions
+    supports_updates: ClassVar[bool] = True
 
     async def fetch(self, cursor: dict[str, Any], ctx: FetchContext) -> FetchResult:
         opts = cast(RssOptions, self.options)
@@ -109,6 +137,7 @@ class RssSource(Source):
 
         cutoff = None if opts.max_age_days is None else ctx.now - timedelta(days=opts.max_age_days)
         items, too_old = [], 0
+        observations: dict[str, ItemObservation] = {}
         for entry in parsed.entries:
             item = entry_to_item(entry, self.spec.id)
             if item is None:
@@ -117,7 +146,9 @@ class RssSource(Source):
                 too_old += 1
                 continue
             items.append(item)
+            if self.spec.update_existing:
+                observations.setdefault(item.id, entry_observation(entry, item))
 
         new_cursor = {"url": opts.url, **{k: v for k, v in (
             ("etag", resp.headers.get("etag")), ("last_modified", resp.headers.get("last-modified"))) if v}}
-        return FetchResult(items, new_cursor, {"entries": len(parsed.entries), "too_old": too_old})
+        return FetchResult(items, new_cursor, {"entries": len(parsed.entries), "too_old": too_old}, observations)

@@ -68,6 +68,15 @@ A failed individual fetch's detailed sanitized status is available in run/source
 
 ## Errors
 
+RSS 原位更新默认关闭，仅支持 RSS/Atom 源的 `update_existing: true`。
+`FetchOutcome` / `TickOutcome` 增加默认 0 的 `updated`，抓取 Run 的统计包含
+`fetched`、`new`、`updated`、`dup`，成功批次满足 `fetched = new + updated + dup`。
+Item 列表/详情的 `updated_at` 可空，`is_updated` 表示是否有内容更新；`fetched_at` 仍为首次抓取时间。
+Feed 仍按 `published`（缺失则 `fetched_at`）排序/筛选，不改用内容活动时间。
+pipeline 才按 `updated_at`（缺失则 `fetched_at`）重评/选取待报告条目，
+Evaluation 的 `input_revision` 对应内部内容修订，用于拒绝过期评分/发布。
+历史报告不改写，关联条目显示最新原文，无正文历史可恢复；更多限制与费用见 README。
+
 ```json
 {"error":{"code":"not_found","message":"unknown item 'missing'"}}
 ```

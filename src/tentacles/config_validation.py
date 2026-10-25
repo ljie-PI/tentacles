@@ -156,6 +156,12 @@ def _source_options(data: Mapping[str, Any], where: str) -> tuple[BaseModel | No
         return None, [ConfigIssue(f'{where}.type', 'unknown source type')]
     options = {key: value for key, value in data.items() if key not in SourceSpec.model_fields}
     errors: list[ConfigIssue] = []
+    try:
+        updates = TypeAdapter(bool).validate_python(data.get('update_existing', False))
+    except ValidationError:
+        updates = False  # common schema already reports invalid booleans
+    if updates and not cls.supports_updates:
+        errors.append(ConfigIssue(f'{where}.update_existing', 'updates are not supported for this source type/mode'))
     # Independent cross-field rules must still run when another option (or
     # another semantic rule) fails. Keep field parsing in the Source schemas.
     if source_type == 'web':

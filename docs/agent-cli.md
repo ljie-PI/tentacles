@@ -446,6 +446,10 @@ show 返回完整报告：id/pipeline_id/persona_version/kind/title/markdown/ite
 
 立即抓取指定的信息源。不写 ID 时抓取全部启用的源；显式写出 ID 时，即使该源已禁用也会抓取。
 
+- 源可设置 `update_existing: true`（默认 false，目前仅 RSS/Atom）。同源同稳定外部 ID 原位保留最新内容，详见 README 的 RSS 原位更新说明。
+- JSON 和文本结果区分 `new`、默认 0 的 `updated`、`dup`；成功交付存储的条目满足 `stats.fetched = new + updated + dup`。更新不再计为重复。
+- 内容变化会清除旧评估，并按内容活动时间重新进入 pipeline 窗口（包括已拒绝/已消费条目）；可能再次支付评分费用，但同 pipeline 不重复消费/报告。Feed 的发布时间筛选不变。
+- `items list/show` 及 HTTP 列表/详情返回可空 `updated_at` 和 `is_updated`，首次 `fetched_at` 不变。只存最新原文，旧报告 Markdown 不变；关闭开关不回滚内容。
 - 只有 guid、没有链接的 RSS 条目也会保留；正文只在 description 中时仍完整保存到详情。
 - 单个源失败不会影响其他源。失败的源在结果中 `status` 为 `"error"`，并保留上次的游标，下次抓取时会重试。
 - 手动抓取与 `tick` 共用锁；已经运行的源返回 `status: "busy"`、`run_id: 0`，不产生新运行记录。手动抓取也会推进下次调度时间。
@@ -454,13 +458,13 @@ show 返回完整报告：id/pipeline_id/persona_version/kind/title/markdown/ite
 - 中断会等待在途数据库操作结束。若抓取已经完整提交，保留成功记录；否则记录失败并保留旧游标。
 
 ```json
-[{"source_id": "hacker-news", "run_id": 7, "status": "ok", "new": 5, "dup": 15, "error": null,
-  "stats": {"entries": 20, "too_old": 0, "fetched": 20, "new": 5, "dup": 15}},
- {"source_id": "broken", "run_id": 8, "status": "error", "new": 0, "dup": 0,
-  "error": "GET https://broken.example.com/rss returned HTTP 500", "stats": {}}]
+[{"source_id": "hacker-news", "run_id": 7, "status": "ok", "new": 5, "updated": 2, "dup": 13, "error": null,
+  "stats": {"entries": 20, "too_old": 0, "fetched": 20, "new": 5, "updated": 2, "dup": 13}},
+ {"source_id": "broken", "run_id": 8, "status": "error", "new": 0, "updated": 0, "dup": 0,
+  "error": "RSS request returned HTTP 500", "stats": {}}]
 ```
 
-`dup` 是本次抓到但没有入库的条目数，原因有两类：
+`dup` 是本次交付存储但既非新增也无内容更新的条目数（也包括仅元数据变化），主要原因有两类：
 
 1. **与已入库条目重复**：同源同外部 id、同 url，或同内容指纹（邮件不按指纹去重）。
 2. **近似标题**：同一批次内标题高度相似时保留第一条；也会跳过其他来源最近 48 小时内已入库过的近似标题。这些被跳过条目的外部 id 会持久化保存，重启或超过 48 小时也不会重新入库。同一来源不同批次的近似标题不会仅因此被合并。

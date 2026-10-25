@@ -10,7 +10,7 @@ from tentacles.config import SourceSpec
 from tentacles.net import HttpPool
 from tentacles.runs import RunOperation
 from tentacles.sources.base import FetchContext, build_source
-from tentacles.store import Store
+from tentacles.store import RunWriter, Store
 from tentacles.sources.imap_client import ImapFactory, connect_imap
 
 if TYPE_CHECKING:
@@ -37,9 +37,14 @@ async def fetch_source(spec: SourceSpec, operation: RunOperation, *, store: Stor
     for item in result.items:
         item.fetched_at = ctx.now
     title_since = ctx.now - CROSS_SOURCE_WINDOW if source.dedup_titles else None
-    new_ids, _ = await run_store_call(store.upsert_items, result.items,
-                                   source_id=spec.id, title_since=title_since, run_id=operation.run_id)
     state.cursor = result.cursor
     state.last_fetch_at, state.last_status, state.last_error = ctx.now, "ok", None
-    await operation.commit(lambda writer: writer.save_source_state(state), stats={
-        **result.stats, "fetched": len(result.items), "new": len(new_ids), "dup": len(result.items) - len(new_ids)})
+    stats = {**result.stats, "fetched": len(result.items), "new": 0, "updated": 0, "dup": 0}
+
+    def publish(writer: RunWriter) -> None:
+        saved = writer.upsert_items(result.items, source_id=spec.id, title_since=title_since,
+                                    observations=result.observations if spec.update_existing else {})
+        writer.save_source_state(state)
+        stats.update(new=len(saved.new_ids), updated=saved.updated, dup=saved.dup)
+
+    await operation.commit(publish, stats=stats)

@@ -57,6 +57,7 @@ class SourceSpec(BaseModel):
     schedule: str
     name: str | None = None
     enabled: bool = True
+    update_existing: bool = False
 
     @field_validator("schedule")
     @classmethod

@@ -34,6 +34,24 @@ change the response shape. Store retains exception rollback and best-effort
 cleanup of only this transaction's newly created files; filesystem and SQLite
 publication is not crash-atomic.
 
+Source adapters may return typed `ItemObservation` values alongside Items.
+Only fields explicitly set on an observation may overwrite stored fields;
+explicit null clears, unset preserves. Stable external identity is declared,
+not inferred from a fallback URL/fingerprint. Only opted-in RSS currently emits
+these observations. Store owns target resolution, full downstream-field
+comparison, content revision and evaluation invalidation in its write transaction.
+`RunWriter.upsert_items` shares that implementation so batch writes, source cursor,
+counts and Run completion commit together. Counts-only metadata is not content;
+the `to`/`cc` fields used by summarize do participate in content comparison.
+
+Schema 12 preserves existing rows with revision 1 and null content-update time.
+Pipeline activity is `COALESCE(updated_at, fetched_at)` with expression indexes;
+the Feed deliberately retains `COALESCE(published, fetched_at)`. Filter captures
+the input revision before scoring, and evaluation/report publication validates it
+under the same write lock as updates. Updates delete obsolete evaluations, not
+consumption, feedback or reports. Fresh evaluations inherit the pipeline's
+existing consumption marker even when they reject or accept the latest content.
+
 A temporary no-model Stage can replace an entry in `registry.STAGES` to exercise
 item-error forwarding, rejection/acceptance and batch aborts through the same
 `filter_items` interface; restore the entry after the check. No model client,

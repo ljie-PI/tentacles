@@ -71,6 +71,40 @@ tentacles items list --since 24h  # 查看最近 24 小时的条目
 
 所有命令都支持 `--json`：stdout 只输出一个 JSON 值，日志写到 stderr，退出码按错误类型区分。给 agent 用的完整说明见 [docs/agent-cli.md](docs/agent-cli.md)。
 
+## RSS / Atom 原位更新（可选）
+
+每个源默认 `update_existing: false`，省略时保持原有去重、网络请求和模型调用行为。
+仅 RSS / Atom 目前支持开启；Web（包括 list / llm / page）及 IMAP 设为 true 会明确报配置错误。
+
+```yaml
+sources:
+  - id: example
+    type: rss
+    url: https://example.com/feed.xml
+    schedule: 30m
+    update_existing: true
+```
+
+开启后，仅 Feed 本轮再次提供、未被 `max_age_days` 排除、且同源稳定外部 ID 相同的条目可原位覆盖。
+缺失字段保留旧值，明确空值可清空；比较完整正文及下游实际字段，而非只比较截断摘要。
+外部 ID 改变时不按 URL 寻找更新对象，跨源去重赢家不会被覆盖。只保留最新状态，不保存正文快照。
+条件 GET、304 和发布时间上限不变，不额外请求详情、评论或主动重访历史条目。
+
+内容变化后，条目保留 ID、首次 `fetched_at` 和消费关系，设置 `updated_at` 并使旧评分失效。
+pipeline 的过滤、手动重评、待报告计数和排序按 `updated_at`（否则 `fetched_at`）进入窗口；
+旧帖更新也可重新评分，**可能产生模型费用**，但同一 pipeline 已消费的条目不再次报告。
+不同 pipeline 独立消费；纯元数据计数变化或再次遇到相同内容不会续窗口或触发重评。
+Feed 保持发布时间优先的排序和时间筛选，列表/详情显示更新时间及“已更新”，搜索读取最新字段。
+抓取及 tick 的 `updated` 默认 0；成功交付存储的条目满足 `fetched = new + updated + dup`。
+评分或报告生成期间内容改变会导致修订冲突，Run 显示失败并保留已知用量/费用，下轮可重试。
+
+改回 `update_existing: false` 或删除该配置即可关闭；不会回滚已保存的新内容。
+旧报告 Markdown、反馈及消费记录不变，但关联 Item 显示最新原文，无法恢复生成旧报告时的原文。
+数据库自动迁移到 schema 12：旧 Item 的 `updated_at` 为 null，内容/评估输入修订初始为 1；
+Persona、报告、反馈、消费、游标和身份记录保持不变。迁移前请做一致的 SQLite 备份（含 WAL 已提交数据）。
+不提供降级迁移；要回退旧程序需恢复迁移前备份，否则旧版按列数写入 evaluations 会失败。
+数据库事务失败会回滚本批内容/评分/游标，报告新文件尽力清理；文件系统和 SQLite 仍非崩溃原子。
+
 ## IMAP 邮箱
 
 示例配置的 `inbox` 默认 `enabled: false`，不会因升级自动连接邮箱。填好 `.env` 中的

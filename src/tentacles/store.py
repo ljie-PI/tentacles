@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any, Callable, Literal
 
 from tentacles.dedup import split_similar
-from tentacles.models import Item, item_id
+from tentacles.models import Item, ItemObservation, item_id
 from tentacles.errors import Conflict
 from tentacles.personas.models import FeedbackView, PersonaEdit, PersonaView, edit_keywords, keywords
 from tentacles.timeutil import from_iso, to_iso, to_utc
@@ -236,14 +236,31 @@ def _migrate_v11(conn: sqlite3.Connection) -> None:
     conn.execute('DROP TABLE pipeline_schedule_state')
 
 
-MIGRATIONS: list[Callable[[sqlite3.Connection], None]] = [_migrate_v1, _migrate_v2, _migrate_v3, _migrate_v4, _migrate_v5, _migrate_v6, _migrate_v7, _migrate_v8, _migrate_v9, _migrate_v10, _migrate_v11]
+def _migrate_v12(conn: sqlite3.Connection) -> None:
+    conn.execute('ALTER TABLE items ADD COLUMN updated_at TEXT')
+    conn.execute('ALTER TABLE items ADD COLUMN content_revision INTEGER NOT NULL DEFAULT 1 CHECK (content_revision >= 1)')
+    conn.execute('ALTER TABLE evaluations ADD COLUMN input_revision INTEGER NOT NULL DEFAULT 1 CHECK (input_revision >= 1)')
+    conn.execute('CREATE INDEX idx_items_activity ON items (COALESCE(updated_at, fetched_at))')
+    conn.execute('CREATE INDEX idx_items_source_activity ON items (source_id, COALESCE(updated_at, fetched_at))')
+
+
+MIGRATIONS: list[Callable[[sqlite3.Connection], None]] = [_migrate_v1, _migrate_v2, _migrate_v3, _migrate_v4, _migrate_v5, _migrate_v6, _migrate_v7, _migrate_v8, _migrate_v9, _migrate_v10, _migrate_v11, _migrate_v12]
 
 _ITEM_COLUMNS = ("id, source_id, kind, external_id, url, title, author, summary, content,"
-                 " published, fetched_at, fingerprint, meta, identity_policy")
+                 " published, fetched_at, fingerprint, meta, identity_policy, updated_at, content_revision")
 _EVAL_COLUMNS = ('pipeline_id', 'item_id', 'persona_version', 'passed', 'score', 'tags',
-                 'reason', 'stage', 'stage_scores', 'evaluated_at', 'reported_at')
+                 'reason', 'stage', 'stage_scores', 'evaluated_at', 'reported_at', 'input_revision')
 _EVAL_PROJECTION = ', '.join(f'e.{column} AS eval_{column}' for column in _EVAL_COLUMNS)
 _SORT_TIME = "COALESCE(published, fetched_at)"
+_ACTIVITY_TIME = "COALESCE(updated_at, fetched_at)"
+_CONTENT_FIELDS = ('title', 'summary', 'content', 'author', 'url', 'published')
+
+
+@dataclass(frozen=True)
+class ItemWriteResult:
+    new_ids: list[str]
+    updated: int
+    dup: int
 
 
 class Store:
@@ -341,13 +358,14 @@ class Store:
                 self._require_running(run_id)
                 self._conn.execute('DELETE FROM evaluations WHERE pipeline_id = ? AND persona_version = ?'
                     f' AND item_id IN (SELECT id FROM items WHERE source_id IN ({placeholders})'
-                    ' AND fetched_at >= ? AND fetched_at <= ?)',
+                    f' AND {_ACTIVITY_TIME} >= ? AND {_ACTIVITY_TIME} <= ?)',
                     [q.pipeline_id, q.persona_version, *q.sources, to_iso(q.since), to_iso(q.until)])
             rows = self._conn.execute(
                 f"SELECT {_ITEM_COLUMNS} FROM items WHERE source_id IN ({placeholders})"
-                " AND fetched_at >= ? AND fetched_at <= ? AND NOT EXISTS"
+                f" AND {_ACTIVITY_TIME} >= ? AND {_ACTIVITY_TIME} <= ? AND NOT EXISTS"
                 " (SELECT 1 FROM evaluations e WHERE e.item_id = items.id AND e.pipeline_id = ?"
-                " AND e.persona_version = ?) ORDER BY fetched_at DESC, id LIMIT ?",
+                f" AND e.persona_version = ? AND e.input_revision = items.content_revision)"
+                f" ORDER BY {_ACTIVITY_TIME} DESC, id LIMIT ?",
                 [*q.sources, to_iso(q.since), to_iso(q.until), q.pipeline_id, q.persona_version, q.limit]).fetchall()
         return [_row_to_item(row) for row in rows]
 
@@ -356,7 +374,8 @@ class Store:
         placeholders = ','.join('?' for _ in q.sources)
         sql = (' FROM items i JOIN evaluations e ON e.item_id = i.id'
                f' WHERE e.pipeline_id = ? AND e.persona_version = ? AND i.source_id IN ({placeholders})'
-               ' AND i.fetched_at >= ? AND i.fetched_at <= ? AND e.passed = 1 AND e.reported_at IS NULL'
+               ' AND COALESCE(i.updated_at, i.fetched_at) >= ? AND COALESCE(i.updated_at, i.fetched_at) <= ?'
+               ' AND e.input_revision = i.content_revision AND e.passed = 1 AND e.reported_at IS NULL'
                ' AND NOT EXISTS (SELECT 1 FROM pipeline_consumption c'
                ' WHERE c.pipeline_id = e.pipeline_id AND c.item_id = e.item_id)')
         return sql, [q.pipeline_id, q.persona_version, *q.sources, to_iso(q.since), to_iso(q.until)]
@@ -365,7 +384,8 @@ class Store:
         sql, args = self._pending_from(q)
         with self._lock:
             rows = self._conn.execute(f'SELECT i.*, {_EVAL_PROJECTION}' + sql +
-                ' ORDER BY e.score DESC, i.fetched_at DESC, i.id LIMIT ?', [*args, q.limit]).fetchall()
+                ' ORDER BY e.score DESC, COALESCE(i.updated_at, i.fetched_at) DESC, i.id LIMIT ?',
+                [*args, q.limit]).fetchall()
         return [(_row_to_item(row), _row_to_evaluation(row, 'eval_')) for row in rows]
 
     def pending_count(self, q: PipelineQuery) -> int:
@@ -383,10 +403,11 @@ class Store:
         for evaluation in evaluations:
             row = self._conn.execute(
                 'SELECT * FROM evaluations WHERE pipeline_id = ? AND item_id = ? AND persona_version = ?'
+                ' AND input_revision = (SELECT content_revision FROM items WHERE id = evaluations.item_id)'
                 ' AND NOT EXISTS (SELECT 1 FROM pipeline_consumption c'
                 ' WHERE c.pipeline_id = evaluations.pipeline_id AND c.item_id = evaluations.item_id)',
                 (evaluation.pipeline_id, evaluation.item_id, evaluation.persona_version)).fetchone()
-            if row is None or _row_to_evaluation(row) != evaluation or evaluation.reported_at is not None:
+            if row is None or _row_to_evaluation(row) != evaluation or evaluation.reported_at is not None or not evaluation.passed:
                 raise Conflict('evaluations changed while preparing the report')
 
     def _consume(self, evaluations: list[Evaluation], now: datetime, reports: list[ReportView]) -> None:
@@ -611,49 +632,89 @@ class Store:
         return known
 
     def upsert_items(self, items: list[Item], *, source_id: str,
-                     title_since: datetime | None, run_id: int | None = None) -> tuple[list[str], int]:
-        """Atomically deduplicate and insert a source's batch, including its counts.
-
-        The write lock precedes all duplicate reads, protecting both concurrent
-        worker threads and independent processes sharing the same database.
-        """
-        fetched = len(items)
-        new: list[str] = []
-        counts: dict[str, int] = {}
+                     title_since: datetime | None, run_id: int | None = None,
+                     observations: dict[str, ItemObservation] | None = None,
+                     now: datetime | None = None) -> ItemWriteResult:
+        """Standalone fenced batch seam; RunWriter shares its implementation."""
         with self._lock, self._conn:
             self._conn.execute("BEGIN IMMEDIATE")
             self._require_running(run_id)
-            self._conn.executemany('INSERT OR IGNORE INTO source_seen_ids VALUES (?, ?)',
-                [(source_id, it.external_id) for it in items if it.kind == 'web' and it.identity_policy == 'standard'])
-            suppressed: list[Item] = []
-            if items and title_since is not None:
-                candidates = [it for it in items if not self._is_duplicate(it)]
-                if candidates:
-                    ordinary = [it for it in candidates if it.identity_policy == 'standard']
-                    kept, suppressed = split_similar(ordinary, self._recent_titles(
-                        exclude_source=source_id, since=title_since))
-                    allowed = {it.id for it in kept}
-                    items = [it for it in candidates if it.identity_policy == 'revision' or it.id in allowed]
-                else:
-                    items = []
-            for it in items:
-                if self._is_duplicate(it):
-                    continue
-                self._conn.execute(
-                    f"INSERT INTO items ({_ITEM_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    (it.id, it.source_id, it.kind, it.external_id, it.url, it.title, it.author,
-                     it.summary, it.content, to_iso(it.published), to_iso(it.fetched_at),
-                     it.fingerprint, json.dumps(it.meta, ensure_ascii=False), it.identity_policy),
-                )
-                new.append(it.id)
-                counts[it.source_id] = counts.get(it.source_id, 0) + 1
-            self._conn.executemany(
-                "INSERT INTO source_state (source_id, total_items) VALUES (?, ?)"
-                " ON CONFLICT (source_id) DO UPDATE SET total_items = total_items + excluded.total_items",
-                list(counts.items()))
-            self._conn.executemany("INSERT OR IGNORE INTO suppressed_items VALUES (?, ?)",
-                                   [(it.source_id, it.external_id) for it in suppressed])
-        return new, fetched - len(new)
+            return self._upsert_items(items, source_id=source_id, title_since=title_since,
+                                      observations=observations or {}, now=now)
+
+    def _upsert_items(self, items: list[Item], *, source_id: str, title_since: datetime | None,
+                      observations: dict[str, ItemObservation], now: datetime | None) -> ItemWriteResult:
+        """Caller owns the write transaction before any identity/dedup reads."""
+        if any(it.source_id != source_id for it in items):
+            raise Conflict('source batch identity mismatch')
+        fetched, updated = len(items), 0
+        new: list[str] = []
+        self._conn.executemany('INSERT OR IGNORE INTO source_seen_ids VALUES (?, ?)',
+            [(source_id, it.external_id) for it in items if it.kind == 'web' and it.identity_policy == 'standard'])
+        candidates: list[Item] = []
+        seen: set[str] = set()
+        for it in items:
+            if observations:
+                if it.external_id in seen:
+                    continue  # first observation wins, including unchanged updates
+                seen.add(it.external_id)
+            observation = observations.get(it.id)
+            row = None
+            if observation is not None and observation.stable_external_id and it.identity_policy == 'standard':
+                row = self._conn.execute(f"SELECT {_ITEM_COLUMNS} FROM items"
+                    " WHERE source_id = ? AND external_id = ? AND identity_policy = 'standard'",
+                    (source_id, it.external_id)).fetchone()
+            if row is not None:
+                assert observation is not None
+                old = _row_to_item(row)
+                latest = observation.apply(old)
+                if latest.url and latest.url != old.url and self._conn.execute(
+                        "SELECT 1 FROM items WHERE url = ? AND id != ? AND identity_policy = 'standard'",
+                        (latest.url, old.id)).fetchone():
+                    raise Conflict('updated item URL conflicts with an existing item')
+                changed = (any(getattr(old, key) != getattr(latest, key) for key in _CONTENT_FIELDS)
+                           or any(str(old.meta.get(key, '')) != str(latest.meta.get(key, ''))
+                                  for key in ('to', 'cc')))
+                if changed:
+                    if now is None:
+                        raise ValueError('content updates require an observation time')
+                    self._conn.execute(
+                        'UPDATE items SET title = ?, summary = ?, content = ?, author = ?, url = ?, published = ?,'
+                        ' fingerprint = ?, meta = ?, updated_at = ?, content_revision = content_revision + 1 WHERE id = ?',
+                        (latest.title, latest.summary, latest.content, latest.author, latest.url, to_iso(latest.published),
+                         latest.fingerprint, json.dumps(latest.meta, ensure_ascii=False), to_iso(now), old.id))
+                    self._conn.execute('DELETE FROM evaluations WHERE item_id = ?', (old.id,))
+                    updated += 1
+                elif latest.meta != old.meta:
+                    self._conn.execute('UPDATE items SET meta = ? WHERE id = ?',
+                                       (json.dumps(latest.meta, ensure_ascii=False), old.id))
+            else:
+                candidate = observation.apply(it) if observation is not None else it
+                if not self._is_duplicate(candidate):
+                    candidates.append(candidate)
+        suppressed: list[Item] = []
+        if candidates and title_since is not None:
+            kept, suppressed = split_similar(
+                [it for it in candidates if it.identity_policy == 'standard'],
+                self._recent_titles(exclude_source=source_id, since=title_since))
+            allowed = {it.id for it in kept}
+            candidates = [it for it in candidates if it.identity_policy == 'revision' or it.id in allowed]
+        for it in candidates:
+            if self._is_duplicate(it):
+                continue
+            self._conn.execute(
+                f"INSERT INTO items ({_ITEM_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (it.id, it.source_id, it.kind, it.external_id, it.url, it.title, it.author,
+                 it.summary, it.content, to_iso(it.published), to_iso(it.fetched_at),
+                 it.fingerprint, json.dumps(it.meta, ensure_ascii=False), it.identity_policy, None, 1))
+            new.append(it.id)
+        self._conn.execute(
+            "INSERT INTO source_state (source_id, total_items) VALUES (?, ?)"
+            " ON CONFLICT (source_id) DO UPDATE SET total_items = total_items + excluded.total_items",
+            (source_id, len(new)))
+        self._conn.executemany("INSERT OR IGNORE INTO suppressed_items VALUES (?, ?)",
+                              [(it.source_id, it.external_id) for it in suppressed])
+        return ItemWriteResult(new, updated, fetched - len(new) - updated)
 
     # 三条规则各走自己的索引；合成一个 OR 查询会退化为全表扫描
     _SUPPRESSED = "SELECT 1 FROM suppressed_items WHERE source_id = ? AND external_id = ?"
@@ -702,6 +763,7 @@ class Store:
         extra_columns = ''
         if q.pipeline_id is not None:
             joined = (' JOIN evaluations e ON e.item_id = items.id AND e.pipeline_id = ?'
+                      ' AND e.input_revision = items.content_revision'
                       ' AND e.persona_version = (SELECT MAX(n.persona_version) FROM evaluations n'
                       ' WHERE n.pipeline_id = e.pipeline_id AND n.item_id = e.item_id)')
             args.append(q.pipeline_id)
@@ -723,8 +785,8 @@ class Store:
             args.append(to_iso(q.until))
         if q.search:
             where.append("(instr(casefold(title), ?) > 0 OR instr(casefold(summary), ?) > 0"
-                         " OR instr(casefold(author), ?) > 0)")
-            args += [q.search.casefold()] * 3
+                         " OR instr(casefold(author), ?) > 0 OR instr(casefold(content), ?) > 0)")
+            args += [q.search.casefold()] * 4
         cond = " AND ".join(where)
         with self._lock:
             total = self._conn.execute(f"SELECT COUNT(*) FROM items{joined} WHERE {cond}", args).fetchone()[0]
@@ -852,6 +914,11 @@ class RunWriter:
         self._store, self._now = store, now
         self._created_files: list[Path] = []
 
+    def upsert_items(self, items: list[Item], *, source_id: str, title_since: datetime | None,
+                     observations: dict[str, ItemObservation]) -> ItemWriteResult:
+        return self._store._upsert_items(items, source_id=source_id, title_since=title_since,
+                                         observations=observations, now=self._now)
+
     def save_source_state(self, st: SourceState) -> None:
         """Publish cursor/status without overwriting the upsert's item count."""
         self._store._conn.execute(
@@ -890,14 +957,18 @@ class RunWriter:
 
     def save_evaluations(self, evaluations: list[Evaluation]) -> None:
         for evaluation in evaluations:
+            row = self._store._conn.execute('SELECT content_revision FROM items WHERE id = ?',
+                                            (evaluation.item_id,)).fetchone()
+            if row is None or row['content_revision'] != evaluation.input_revision:
+                raise Conflict('item content changed while evaluating')
             self._store._conn.execute(
                 'INSERT OR IGNORE INTO evaluations VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?,'
-                ' (SELECT consumed_at FROM pipeline_consumption WHERE pipeline_id = ? AND item_id = ?))',
+                ' (SELECT consumed_at FROM pipeline_consumption WHERE pipeline_id = ? AND item_id = ?), ?)',
                 (evaluation.pipeline_id, evaluation.item_id, evaluation.persona_version,
                  evaluation.passed, evaluation.score, json.dumps(evaluation.tags, ensure_ascii=False),
                  evaluation.reason, evaluation.stage,
                  json.dumps([s.model_dump() for s in evaluation.stage_scores], ensure_ascii=False),
-                 to_iso(evaluation.evaluated_at), evaluation.pipeline_id, evaluation.item_id))
+                 to_iso(evaluation.evaluated_at), evaluation.pipeline_id, evaluation.item_id, evaluation.input_revision))
 
     def save_reports(self, drafts: list[ReportDraft], evaluations: list[Evaluation], *,
                      reports_dir: Path) -> list[ReportView]:
@@ -934,6 +1005,7 @@ def _row_to_item(r: sqlite3.Row) -> Item:
         url=r["url"], title=r["title"], author=r["author"], summary=r["summary"],
         content=r["content"], published=from_iso(r["published"]),
         fetched_at=from_iso(r["fetched_at"]), fingerprint=r["fingerprint"],
+        updated_at=from_iso(r["updated_at"]), content_revision=r["content_revision"],
         meta=json.loads(r["meta"]), identity_policy=r["identity_policy"],
     )
 
