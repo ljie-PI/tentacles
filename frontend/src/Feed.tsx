@@ -1,21 +1,23 @@
 import { useState } from 'react'
 import { useInfiniteQuery, useQuery } from '@tanstack/react-query'
-import { useSearchParams } from 'react-router-dom'
-import { api, safeUrl, type Item, type ItemDetail, type ItemPage, type Source, type Pipeline } from './api'
+import { Link, useSearchParams } from 'react-router-dom'
+import { api, safeUrl, type Item, type ItemDetail, type ItemPage, type Source, type Pipeline, type Persona } from './api'
 import { Drawer, Notice, ScoreBadge } from './shared'
+import FeedbackButtons from './Feedback'
 import { useDisplayTime, type TimeFormatter } from './display-time'
 
-function ItemCard({ item, open, formatTime }: { item: Item; open: () => void; formatTime: TimeFormatter }) {
+function ItemCard({ item, open, formatTime, persona, feedbackDisabled }: { item: Item; open: () => void; formatTime: TimeFormatter; persona: string; feedbackDisabled: boolean }) {
   return <article className="item-card">
     <div className="item-meta"><span className="source-dot" />{item.source_id}<span>·</span>{formatTime(item.published || item.fetched_at)}<span className="kind">{item.kind}</span></div>
     <h2><button className="text-button item-title" onClick={open}>{item.title}</button></h2>
     <p className="summary">{item.summary || '暂无摘要，打开详情阅读正文。'}</p>
     <footer className="card-footer"><div className="tags">{item.score != null && <ScoreBadge score={item.score} />}{(item.tags || []).map(tag => <span className="tag" key={tag}>{tag}</span>)}{item.stage && <span className="tag">阶段：{item.stage}</span>}{item.passed != null && <span className="tag">{item.passed ? '通过' : '未通过'}</span>}</div><button className="text-button read-link" onClick={open}>阅读详情 <span aria-hidden="true">↗</span></button></footer>
     {item.reason && <p className="muted small">{item.reason}</p>}
+    <FeedbackButtons itemId={item.id} persona={persona} disabled={feedbackDisabled} />
   </article>
 }
 
-function Detail({ id, close }: { id: string; close: () => void }) {
+function Detail({ id, close, persona, feedbackDisabled }: { id: string; close: () => void; persona: string; feedbackDisabled: boolean }) {
   const { formatTime } = useDisplayTime()
   const query = useQuery({ queryKey: ['item', id], queryFn: () => api<ItemDetail>(`/items/${encodeURIComponent(id)}`) })
   const item = query.data
@@ -25,6 +27,7 @@ function Detail({ id, close }: { id: string; close: () => void }) {
     {item && <>
       <p className="muted">{item.source_id} · {formatTime(item.published || item.fetched_at)}</p>
       {safeUrl(item.url) && <a className="external-link" href={safeUrl(item.url)} target="_blank" rel="noopener noreferrer">在原站阅读 ↗</a>}
+      <FeedbackButtons itemId={item.id} persona={persona} disabled={feedbackDisabled} />
       <div className="item-content">{item.content || item.summary || '此条目没有正文。'}</div>
       {(item.evaluations || []).length > 0 && <section className="evaluations"><h3>Pipeline 评估</h3>{(item.evaluations || []).map(e => <div key={`${e.pipeline_id}-${e.persona_version}`}><strong>{e.pipeline_id}</strong><ScoreBadge score={e.score} /><span className="tag">{e.stage} · {e.passed ? '通过' : '未通过'}</span><p>{e.reason}</p></div>)}</section>}
     </>}
@@ -58,6 +61,11 @@ export default function Feed() {
   const selected = params.get('item')
   const sources = useQuery({ queryKey: ['sources'], queryFn: () => api<Source[]>('/sources') })
   const pipelines = useQuery({ queryKey: ['pipelines'], queryFn: () => api<Pipeline[]>('/pipelines') })
+  const personas = useQuery({ queryKey: ['personas'], queryFn: () => api<Persona[]>('/personas') })
+  const pipelinePersona = pipelines.data?.find(row => row.id === pipeline)?.persona
+  const preferredPersona = params.get('feedback_persona') || (personas.data?.some(row => row.name === 'default') ? 'default' : personas.data?.[0]?.name || '')
+  const feedbackPersona = pipelinePersona || preferredPersona
+  const feedbackDisabled = !!(pipeline && pipelines.isPending) || !personas.data?.some(row => row.name === feedbackPersona)
   const feed = useInfiniteQuery({
     queryKey: ['items', source, since, search, pipeline, passed], initialPageParam: 0,
     queryFn: ({ pageParam, signal }) => {
@@ -77,15 +85,17 @@ export default function Feed() {
   }
   return <>
     <header className="page-heading"><div><p className="eyebrow">YOUR SIGNAL, NOT THE NOISE</p><h1>信息流<span className="accent">.</span></h1><p className="muted">把分散的线索，汇聚在一个安静的地方。</p></div><div className="total"><strong>{feed.data?.pages[0]?.total ?? '—'}</strong><span>条匹配内容</span></div></header>
-    <FeedFilters key={JSON.stringify([source, since, search, pipeline, passed])} filters={{ source, since, search, pipeline, passed }} sources={sources.data} pipelines={pipelines.data} apply={setParams} />
+    <FeedFilters key={JSON.stringify([source, since, search, pipeline, passed])} filters={{ source, since, search, pipeline, passed }} sources={sources.data} pipelines={pipelines.data} apply={next => { const preferred = params.get('feedback_persona'); if (preferred) next.set('feedback_persona', preferred); setParams(next) }} />
+    <div className="feedback-context"><label>反馈画像<select aria-label="反馈画像" value={feedbackPersona} disabled={!!pipelinePersona || personas.isPending} onChange={event => setParams(current => { const next = new URLSearchParams(current); next.set('feedback_persona', event.target.value); return next })}>{!personas.data?.length && <option value="">未配置 Persona</option>}{personas.data?.map(row => <option key={row.name} value={row.name}>{row.name}</option>)}{feedbackPersona && !personas.data?.some(row => row.name === feedbackPersona) && <option value={feedbackPersona}>{feedbackPersona}</option>}</select></label><p className="muted small">{pipelinePersona ? '使用所选流程的画像。' : '反馈只影响所选画像，演化预览时可选择是否参考。'}{personas.data?.length === 0 && <Link className="inline-link" to="/persona">创建 Persona</Link>}</p></div>
+    {personas.error && <Notice error>{personas.error.message}</Notice>}
     {display.error && <Notice error>{display.error.message}</Notice>}
     {feed.error && <Notice error>{feed.error.message} <button onClick={() => void feed.refetch()}>重试</button></Notice>}
     {pipelines.error && <Notice error>处理流程列表加载失败：{pipelines.error.message}</Notice>}
     {sources.error && <Notice error>信息源列表加载失败：{sources.error.message}</Notice>}
     {feed.isPending && <Notice>正在汇聚信息…</Notice>}
     {!feed.isPending && !feed.error && items.length === 0 && <div className="empty"><span aria-hidden="true">◎</span><h2>这里还很安静</h2><p>试着调整筛选条件，或前往「信息源」立即抓取。</p></div>}
-    <div className="feed-list">{items.map(item => <ItemCard item={item} key={item.id} formatTime={display.formatTime} open={() => select(item.id)} />)}</div>
+    <div className="feed-list">{items.map(item => <ItemCard item={item} key={item.id} formatTime={display.formatTime} persona={feedbackPersona} feedbackDisabled={feedbackDisabled} open={() => select(item.id)} />)}</div>
     {feed.hasNextPage && <button className="load-more" disabled={feed.isFetchingNextPage} onClick={() => void feed.fetchNextPage()}>{feed.isFetchingNextPage ? '正在加载…' : '加载更多 ↓'}</button>}
-    {selected && <Detail id={selected} close={() => select()} />}
+    {selected && <Detail id={selected} persona={feedbackPersona} feedbackDisabled={feedbackDisabled} close={() => select()} />}
   </>
 }

@@ -17,6 +17,7 @@ from tentacles.api.privacy import LogSafeAPI
 from tentacles.api.security import authorization
 from tentacles.api.routes import router
 from tentacles.api.management import router as management_router
+from tentacles.api.personas import router as persona_router
 from tentacles.config import AppConfig
 from tentacles.service import TentaclesService
 from tentacles.server_runtime import poll_scheduler
@@ -64,6 +65,7 @@ def create_app(config: AppConfig, *, transport: httpx.AsyncBaseTransport | None 
     api = APIRouter(prefix='/api', dependencies=[Depends(authorize)])
     api.include_router(router)
     api.include_router(management_router)
+    api.include_router(persona_router)
     app.include_router(api)
     app.add_middleware(CORSMiddleware, allow_origins=config.server.cors_origins,
                        allow_methods=['GET', 'POST', 'PUT', 'PATCH', 'DELETE'],
