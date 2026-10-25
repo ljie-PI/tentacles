@@ -312,3 +312,53 @@ def test_tick_contract_includes_pipeline_kinds_and_scheduler_pending_counts(cli,
     other_path = write_config(other, name='other.yaml')
     human = cli('tick', config=other_path, json_mode=False)
     assert human.exit_code == 0 and 'other' in human.stdout and 'filter' in human.stdout
+
+
+def test_feedback_evolve_preview_apply_pipe_contract(write_config, web, tmp_path):
+    from test_models import CHAT_URL, chat_reply, model_config
+    from test_pipelines import pipeline_config
+    from test_persona_evolution import evolved_content
+    config = {**pipeline_config(), **model_config()}
+    path = write_config(config)
+    runner = CliRunner()
+
+    def run(*args, input=None, json_mode=True):
+        return runner.invoke(app, ['-c', str(path), *(['--json'] if json_mode else []), *args],
+                             obj={'transport': web.transport()}, input=input, env={})
+
+    web.serve(FEED, rss_feed({'guid': 'one', 'title': 'AI research'}))
+    web.serve(CHAT_URL, json.dumps(chat_reply(json.dumps(evolved_content()))),
+              headers={'content-type': 'application/json'})
+    assert run('sources', 'fetch').exit_code == 0
+    item_id = payload(run('items', 'list'))['items'][0]['id']
+    result = run('feedback', item_id, '--dislike', '--note', 'Less hype')
+    assert result.exit_code == 0 and payload(result)['rating'] == -1
+    assert payload(result)['persona'] == 'default'
+    for flags in [[], ['--like', '--dislike']]:
+        result = run('feedback', item_id, *flags)
+        assert result.exit_code == 2 and payload(result)['error']['code'] == 'invalid'
+    missing = run('feedback', 'missing', '--like')
+    assert missing.exit_code == 3 and payload(missing)['error']['code'] == 'not_found'
+    preview = run('persona', 'evolve', 'default', '--instruction', 'More robotics', '--dry-run')
+    assert preview.exit_code == 0
+    assert payload(preview)['base_version'] == 1 and payload(preview)['feedback_count'] == 1
+    applied = run('persona', 'apply', '--proposal', '-', input=preview.stdout)
+    assert applied.exit_code == 0 and payload(applied)['source'] == 'llm'
+    stale = run('persona', 'apply', '--proposal', '-', input=preview.stdout)
+    assert stale.exit_code == 4 and payload(stale)['error']['code'] == 'conflict'
+    invalid = run('persona', 'apply', '--proposal', '-', input='not json')
+    assert invalid.exit_code == 2 and payload(invalid)['error']['code'] == 'invalid'
+    invalid = run('persona', 'apply', '--proposal', str(tmp_path / 'missing.json'))
+    assert invalid.exit_code == 2 and payload(invalid)['error']['code'] == 'invalid'
+    updated = run('persona', 'evolve', '--instruction', 'More robotics')
+    assert updated.exit_code == 0 and payload(updated)['source'] == 'llm'
+    # UTF-8 proposal files and human rendering also work.
+    preview = run('persona', 'evolve', '--instruction', 'More robotics', '--dry-run')
+    proposal_file = tmp_path / 'proposal.json'
+    proposal_file.write_text(preview.stdout, encoding='utf-8')
+    applied = run('persona', 'apply', '--proposal', str(proposal_file))
+    assert applied.exit_code == 0 and payload(applied)['version'] == 4
+    human = run('persona', 'evolve', '--instruction', 'More robotics', '--dry-run', json_mode=False)
+    assert human.exit_code == 0 and 'Strengthen robotics' in human.stdout
+    reevaluated = run('pipelines', 'filter', 'daily', '--reevaluate', '--since', '24h')
+    assert reevaluated.exit_code == 0 and payload(reevaluated)['stats']['evaluated'] == 1

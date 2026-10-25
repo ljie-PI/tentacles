@@ -17,7 +17,7 @@ from typing import Any, Callable
 from tentacles.dedup import split_similar
 from tentacles.models import Item, item_id
 from tentacles.errors import Conflict
-from tentacles.personas.models import PersonaEdit, PersonaView, edit_keywords, keywords
+from tentacles.personas.models import FeedbackView, PersonaEdit, PersonaView, edit_keywords, keywords
 from tentacles.timeutil import from_iso, to_iso, to_utc
 from tentacles.tasks import Claim, Task, TaskState
 from tentacles.pipelines.models import Evaluation, PipelineQuery, ReportView
@@ -195,7 +195,16 @@ def _migrate_v7(conn: sqlite3.Connection) -> None:
     )""")
 
 
-MIGRATIONS: list[Callable[[sqlite3.Connection], None]] = [_migrate_v1, _migrate_v2, _migrate_v3, _migrate_v4, _migrate_v5, _migrate_v6, _migrate_v7]
+def _migrate_v8(conn: sqlite3.Connection) -> None:
+    conn.execute("""CREATE TABLE feedback (
+        id INTEGER PRIMARY KEY, item_id TEXT NOT NULL, persona TEXT NOT NULL,
+        rating INTEGER NOT NULL CHECK (rating IN (-1, 1)), note TEXT NOT NULL,
+        created_at TEXT NOT NULL
+    )""")
+    conn.execute('CREATE INDEX feedback_persona_time ON feedback (persona, created_at, id)')
+
+
+MIGRATIONS: list[Callable[[sqlite3.Connection], None]] = [_migrate_v1, _migrate_v2, _migrate_v3, _migrate_v4, _migrate_v5, _migrate_v6, _migrate_v7, _migrate_v8]
 
 _ITEM_COLUMNS = ("id, source_id, kind, external_id, url, title, author, summary, content,"
                  " published, fetched_at, fingerprint, meta")
@@ -433,6 +442,28 @@ class Store:
                 ' WHERE newer.pipeline_id = e.pipeline_id AND newer.item_id = e.item_id)'
                 ' ORDER BY e.pipeline_id', args).fetchall()
         return [_row_to_evaluation(row) for row in rows]
+
+    def submit_feedback(self, item_id: str, persona: str, rating: int, note: str,
+                        now: datetime) -> FeedbackView:
+        with self._lock, self._conn:
+            cursor = self._conn.execute(
+                'INSERT INTO feedback (item_id, persona, rating, note, created_at) VALUES (?, ?, ?, ?, ?)',
+                (item_id, persona, rating, note, to_iso(now)))
+            return FeedbackView.model_validate(dict(id=cursor.lastrowid, item_id=item_id, persona=persona,
+                                                    rating=rating, note=note, created_at=to_utc(now)))
+
+    def eligible_feedback(self, persona: str, since: datetime, until: datetime, limit: int) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT f.id, f.item_id, f.rating, substr(f.note, 1, 2000) AS note, f.created_at,"
+                " substr(i.title, 1, 500) AS title, substr(i.summary, 1, 2000) AS summary"
+                " FROM feedback f JOIN items i ON i.id = f.item_id"
+                " WHERE f.persona = ? AND f.created_at >= ? AND f.created_at <= ?"
+                " AND f.created_at > COALESCE((SELECT created_at FROM persona_versions"
+                " WHERE name = ? AND source = 'llm' ORDER BY version DESC LIMIT 1), '')"
+                " ORDER BY f.created_at DESC, f.id DESC LIMIT ?",
+                (persona, to_iso(since), to_iso(until), persona, limit)).fetchall()
+        return [dict(row) for row in rows]
 
     # ---- versioned personas ------------------------------------------------
 

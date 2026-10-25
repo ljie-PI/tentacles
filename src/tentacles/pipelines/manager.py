@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from typing import Any, Awaitable, Callable
 from uuid import uuid4
@@ -149,14 +149,18 @@ class PipelineManager:
         return operation.outcome
 
     async def filter(self, pipeline_id: str, *, persona: PersonaView | None = None, reevaluate: bool = False,
-                     due_only: bool = False, on_finished: Callable[[PipelineOutcome], None] | None = None) -> PipelineOutcome | None:
+                     due_only: bool = False, on_finished: Callable[[PipelineOutcome], None] | None = None,
+                     since: datetime | None = None) -> PipelineOutcome | None:
         spec = self.spec(pipeline_id)
 
         async def work(op: _Operation) -> None:
             current = persona or await run_store_call(self._store.get_persona, spec.persona)
             assert current is not None
+            query = self._query(spec, current, op.started_at, spec.max_items)
+            if since is not None:
+                query = replace(query, since=to_utc(since))
             candidates = await run_store_call(self._store.filter_candidates,
-                self._query(spec, current, op.started_at, spec.max_items),
+                query,
                 reevaluate=reevaluate, run_id=op.outcome.run_id)
             batch = FilterBatch([], [])
             try:

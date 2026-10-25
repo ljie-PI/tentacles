@@ -46,8 +46,14 @@ defaults:
     extract: fast
     filter: fast
     decision: decision
-    persona: smart
+    persona: max
     process: smart
+
+# 演化使用 defaults.models.persona；只由显式 persona evolve 调用（可能产生费用）。
+persona_update:
+  feedback_window: 30d
+  max_feedback: 100
+  max_profile_chars: 12000
 
 # 只在数据库不存在同名 persona 时导入；之后修改这里不会覆盖已存版本。
 # profile 与 profile_file 二选一；文件路径相对本 YAML 所在目录。

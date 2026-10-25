@@ -24,7 +24,7 @@ from tentacles.sources.runner import fetch_source
 from tentacles.asyncutil import run_store_call, gather_draining
 from tentacles.store import ItemQuery, Store
 from tentacles.personas.manager import PersonaManager
-from tentacles.personas.models import PersonaView
+from tentacles.personas.models import FeedbackView, PersonaProposal, PersonaView
 from tentacles.pipelines.manager import PipelineManager
 from tentacles.pipelines.models import PipelineOutcome, ReportView, PipelineView
 from tentacles.timeutil import parse_since, utcnow, to_utc
@@ -45,7 +45,7 @@ class TentaclesService:
         self._clock = clock
         self._model_http = HttpPool(transport)
         self.models = ModelRegistry(config.models, config.defaults, self._model_http, clock=clock)
-        self.personas = PersonaManager(store, self.models, clock)
+        self.personas = PersonaManager(store, self.models, clock, config.persona_update)
         self._tasks = {s.id: Task('fetch', s.id, s.schedule, config.app.timezone, s.enabled)
                        for s in config.sources}
         try:
@@ -82,8 +82,12 @@ class TentaclesService:
     def list_pipelines(self) -> list[PipelineView]:
         return self.pipelines.list_pipelines()
 
-    async def filter_pipeline(self, pipeline_id: str, *, reevaluate: bool = False) -> PipelineOutcome:
-        result = await self.pipelines.filter(pipeline_id, reevaluate=reevaluate)
+    async def filter_pipeline(self, pipeline_id: str, *, reevaluate: bool = False,
+                              since: str | datetime | None = None) -> PipelineOutcome:
+        start = self._time(since)
+        if start is not None and (not reevaluate or to_utc(start) > to_utc(self._clock())):
+            raise ConfigError('since requires reevaluate and must not be in the future')
+        result = await self.pipelines.filter(pipeline_id, reevaluate=reevaluate, since=start)
         assert result is not None  # manual operations bypass the due check
         return result
 
@@ -123,6 +127,12 @@ class TentaclesService:
 
     def export_persona(self, name: str, version: int | None = None) -> str:
         return self.personas.export(name, version)
+
+    async def evolve_persona(self, name: str, *, instruction: str = '', dry_run: bool = False) -> PersonaProposal | PersonaView:
+        return await self.personas.evolve(name, instruction=instruction, dry_run=dry_run)
+
+    async def apply_persona(self, proposal: PersonaProposal | dict[str, Any]) -> PersonaView:
+        return await self.personas.apply(proposal)
 
     async def rollback_persona(self, name: str, version: int, *, note: str | None = None) -> PersonaView:
         return await self.personas.rollback(name, version, note)
@@ -311,6 +321,17 @@ class TentaclesService:
         if item is None:
             raise NotFound(f"unknown item {item_id!r}")
         return ItemDetail.model_validate({**item.model_dump(), "evaluations": self.store.item_evaluations(item_id)})
+
+    def submit_feedback(self, item_id: str, *, rating: int, persona: str | None = None,
+                        note: str = '') -> FeedbackView:
+        if type(rating) is not int or rating not in (-1, 1):
+            raise ConfigError('feedback rating must be +1 or -1')
+        self.get_item(item_id)
+        if persona is None:
+            personas = self.list_personas()
+            persona = personas[0].name if len(personas) == 1 else 'default'
+        current = self.get_persona(persona)
+        return self.store.submit_feedback(item_id, current.name, rating, note, self._clock())
 
     # ---- runs ---------------------------------------------------------------
 
