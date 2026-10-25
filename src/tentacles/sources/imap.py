@@ -107,6 +107,9 @@ def _uid(value: Any) -> int:
     return number
 
 
+_MAX_REPLY_HEADER_CHARS = 1000
+
+
 _REPLY_BOUNDARY = re.compile(
     r'^(?:On .+\bwrote:|[在于].+写道[：:]|[-_]{2,}\s*(?:Original Message|原始邮件|Forwarded message|转发邮件)'
     r'\s*[-_]{2,}|Begin forwarded message:)\s*$', re.I)
@@ -156,14 +159,33 @@ def _attribution_name(value: str, *, capitalized: bool) -> bool:
 
 
 def _attribution_writer(value: str, *, allow_name: bool) -> bool:
-    address = re.fullmatch(r'(?P<name>.*?)\s*(?:<[^@\s<>]+@[^@\s<>]+>|[^@\s<>]+@[^@\s<>]+)', value)
-    if address:
-        return not address['name'].strip() or _attribution_name(address['name'].strip(), capitalized=False)
-    return allow_name and _attribution_name(value, capitalized=True)
+    if '@' not in value:
+        return allow_name and _attribution_name(value, capitalized=True)
+    try:
+        addresses = getaddresses([value])
+    except (ValueError, IndexError):
+        return False
+    if len(addresses) != 1:
+        return False
+    name, address = addresses[0]
+    local, separator, domain = address.rpartition('@')
+    if not separator or not local or not domain or _has_controls(address):
+        return False
+    # Verify the complete mailbox was consumed; don't accept address fragments
+    # recovered from ordinary prose. No ambiguous repeated-scanning regex.
+    if value.endswith('>'):
+        opening = value.rfind('<')
+        if opening < 0 or value[opening + 1:-1].strip() != address:
+            return False
+        raw_name = value[:opening].strip()
+        if raw_name.startswith('"') and raw_name.endswith('"'):
+            return not _has_controls(name)
+        return not name or _attribution_name(name.replace(',', ' '), capitalized=False)
+    return value == address
 
 
 def _reply_attribution(header: str) -> bool:
-    if not _REPLY_BOUNDARY.fullmatch(header):
+    if len(header) > _MAX_REPLY_HEADER_CHARS or not _REPLY_BOUNDARY.fullmatch(header):
         return False
     if not re.match(r'^(?:On\s|[在于])', header, re.I):
         return True  # explicit "Original Message" / forwarding separators
@@ -193,6 +215,8 @@ def _sentence_end(line: str, *, in_attribution: bool = False) -> bool:
 
 
 def _reply_header(lines: list[str], start: int) -> bool:
+    if len(lines[start]) > _MAX_REPLY_HEADER_CHARS:
+        return False
     header = lines[start].strip()
     if _reply_attribution(header):
         return True
@@ -207,7 +231,7 @@ def _reply_header(lines: list[str], start: int) -> bool:
                 or _REPLY_BOUNDARY.fullmatch(continuation)):
             break
         header += ' ' + continuation
-        if len(header) > 1000:
+        if len(header) > _MAX_REPLY_HEADER_CHARS:
             break
         if _reply_attribution(header):
             return True

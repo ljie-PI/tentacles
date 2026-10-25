@@ -618,3 +618,62 @@ def test_reply_cleanup_does_not_borrow_attribution_across_new_content(write_conf
             await service.aclose()
 
     asyncio.run(scenario())
+
+
+def test_quoted_rfc_display_name_in_folded_reply_is_cleaned(write_config):
+    from email.utils import formataddr
+    writer = formataddr(('Doe, Alice', 'alice@example.test'))
+    fake = FakeIMAP({'"INBOX"': Mailbox(messages={1: mail(
+        body=f'Fresh update\n\nOn Sun, 25 Oct 2026 at 10:00,\n{writer} wrote:\nOld quoted reply body')})})
+    path = write_config(imap_config())
+
+    async def scenario():
+        service = TentaclesService.open(path, env={'MAIL_PASSWORD': 'secret-app-password'},
+                                        imap_factory=fake.factory, clock=lambda: NOW)
+        try:
+            assert (await service.fetch_sources())[0].new == 1
+            item = service.get_item(service.list_items().items[0].id)
+            assert item.content == item.summary == 'Fresh update'
+        finally:
+            await service.aclose()
+
+    asyncio.run(scenario())
+
+
+def test_oversized_reply_like_line_preserves_body_without_blocking_rss_or_heartbeat(write_config, web):
+    from time import monotonic
+    from conftest import rss_feed
+    body = 'Fresh update\n\nOn 2026-10-25 ' + 'A' * 48000 + ' wrote:'
+    fake = FakeIMAP({'"INBOX"': Mailbox(messages={1: mail(body=body)})})
+    config = imap_config()
+    config['sources'].append({'id': 'news', 'type': 'rss', 'url': 'https://news.test/rss', 'schedule': '30m'})
+    web.serve('https://news.test/rss', rss_feed({'title': 'News item', 'guid': 'news'}))
+    path = write_config(config)
+
+    async def scenario():
+        service = TentaclesService.open(path, env={'MAIL_PASSWORD': 'secret-app-password'},
+                                        imap_factory=fake.factory, transport=web.transport(), clock=lambda: NOW)
+        stopped, gaps = [False], []
+
+        async def heartbeat():
+            while not stopped[0]:
+                before = monotonic()
+                await asyncio.sleep(0.01)
+                gaps.append(monotonic() - before)
+
+        beat = asyncio.create_task(heartbeat())
+        try:
+            started = monotonic()
+            result = {row.source_id: row for row in await service.fetch_sources()}
+            elapsed = monotonic() - started
+            assert result['inbox'].new == result['news'].new == 1
+            assert elapsed < 2, 'a bounded reply candidate must not trigger multi-second backtracking'
+            [email] = service.list_items(kinds=['email']).items
+            assert service.get_item(email.id).content.startswith('Fresh update\n\nOn 2026-10-25 ')
+        finally:
+            stopped[0] = True
+            await beat
+            await service.aclose()
+        assert max(gaps, default=0) < 1, 'blocking mail work must not stall the event loop'
+
+    asyncio.run(scenario())
