@@ -477,6 +477,13 @@ class Store:
             return FeedbackView.model_validate(dict(id=cursor.lastrowid, item_id=item_id, persona=persona,
                                                     rating=rating, note=note, created_at=to_utc(now)))
 
+    def get_feedback(self, item_id: str, persona: str) -> FeedbackView | None:
+        with self._lock:
+            row = self._conn.execute(
+                'SELECT * FROM feedback WHERE item_id = ? AND persona = ? ORDER BY id DESC LIMIT 1',
+                (item_id, persona)).fetchone()
+        return FeedbackView.model_validate(dict(row)) if row is not None else None
+
     def eligible_feedback(self, persona: str, since: datetime, until: datetime, limit: int) -> list[dict[str, Any]]:
         with self._lock:
             rows = self._conn.execute(

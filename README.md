@@ -2,7 +2,7 @@
 
 个人信息与新闻管理系统：从多种信息源抓取内容，按个人 persona 过滤，再用 LLM 加工成日报、深度报道或邮件简报。整体设计见 [#18](https://github.com/ljie-PI/tentacles/issues/18)，实施进度见它的子 issue。
 
-> 已支持配置驱动的 RSS、IMAP 和网页抓取、去重入库、持久化调度、命名模型、版本化 Persona 与反馈演化，以及 keyword/decision/llm 级联过滤和 digest/deep/summarize/none 处理器。Web 端正在按子 issue 继续实施。
+> 已支持配置驱动的 RSS、IMAP 和网页抓取、去重入库、持久化调度、命名模型、版本化 Persona 与反馈演化，以及 keyword/decision/llm 级联过滤和 digest/deep/summarize/none 处理器。Web 端已提供 Feed、Sources、Pipelines、Reports、Runs、Settings 和 Persona 管理；实现与验证范围见 [规格核对](docs/spec-18-audit.md)。
 
 ## 网页与 REST API
 
@@ -18,7 +18,7 @@ pnpm build
 
 已提供 Feed（来源／时间／关键词／pipeline 与通过判定筛选、加载更多、正文抽屉）、Sources（状态、立即抓取）、
 Pipelines（过滤／运行）、Reports（Markdown 表格与引用条目）、Runs（自动刷新与成本）和 Settings（token、模型测试、调度状态）。
-支持暗色模式和移动端；Persona 编辑与反馈页面在后续 issue 加入。
+支持暗色模式和移动端；Persona 页面可编辑画像与关键词、预览演化差异后应用、查看历史并回滚；Feed 支持按画像点赞／点踩。
 开发模式运行 `pnpm dev`，通过 Vite 代理访问后端。要求 Node >=22.12、pnpm 10.33；
 `pnpm generate:api` 重新生成提交的后端类型，`pnpm check:api` 检查一致性。
 

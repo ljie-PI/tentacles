@@ -57,3 +57,14 @@ and remote images become explicit no-referrer links (no automatic tracking-image
 Runs/scheduler refresh every 5 seconds, preserving unknown costs. Model tests are manual and may
 incur fees. Token save intentionally reloads Settings so mounted queries/local test results cannot
 retain data from old credentials. Narrow navigation wraps rather than overflowing the page.
+
+Persona editing uses explicit version snapshots and API compare-and-swap. Tags are read-only; keyword
+textareas contain one keyword per line. Evolution previews use jsdiff for profile line changes, show
+tag additions/removals, summary, feedback count and proposed keywords before applying. Changing
+instructions or feedback choice discards a stale preview. History views are immutable; rollback
+creates a new version. A concurrent change yields a refresh prompt without silently erasing drafts.
+
+Feed feedback is scoped to the selected pipeline's persona, or an explicit feedback persona. Ratings
+load independently and share card/drawer caches. Optimistic writes store display rating only (not
+fabricated server IDs/times), keep their original cache key in mutation context and roll back on error.
+Repeated same-thumb clicks are no-ops; the underlying event history remains append-only.

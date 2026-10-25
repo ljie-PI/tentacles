@@ -71,9 +71,9 @@ async def fetch_source(spec: SourceSpec, *, store: Store, http: HttpPool,
 
         await run_store_call(record_success)
     except BaseException as exc:  # noqa: BLE001 — one broken source must not stop the others
-        error = exc.message if isinstance(exc, TentaclesError) else f"{type(exc).__name__}: {exc}"
+        error = exc.message if isinstance(exc, TentaclesError) else f"fetch failed ({type(exc).__name__})"
         if not completed:
-            log.warning("fetch %s failed: %s", spec.id, error)
+            log.warning("fetch %s failed (%s)", spec.id, type(exc).__name__)
             await run_store_call(_record_failure, store, spec.id, run_id, error, ctx.now, clock,
                                  _model_stats(ctx), ctx.metrics.cost)
         if not isinstance(exc, Exception):  # 取消 / 中断：记录后继续向上抛
@@ -97,5 +97,5 @@ def _record_failure(store: Store, source_id: str, run_id: int | None, error: str
     try:
         store.save_fetch_failure(source_id, run_id, started_at=now, finished_at=clock(), error=error,
                                  stats=stats or None, cost=cost)
-    except Exception:  # noqa: BLE001
-        log.exception("could not record failure of fetch run %s", run_id)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("could not record failure of fetch run %s (%s)", run_id, type(exc).__name__)

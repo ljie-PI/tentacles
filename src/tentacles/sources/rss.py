@@ -90,11 +90,11 @@ class RssSource(Source):
         try:
             resp = await ctx.http.client(opts.proxy).get(opts.url, headers=headers, timeout=opts.timeout)
         except httpx.HTTPError as exc:
-            raise UpstreamError(f"GET {opts.url} failed: {exc}") from exc
+            raise UpstreamError(f"RSS request failed ({type(exc).__name__})") from None
         if resp.status_code == 304:
             return FetchResult([], cursor, {"not_modified": True})
         if not resp.is_success:
-            raise UpstreamError(f"GET {opts.url} returned HTTP {resp.status_code}")
+            raise UpstreamError(f"RSS request returned HTTP {resp.status_code}")
 
         # content-location 让相对链接按 feed 地址补全；content-type 让只在 HTTP 头里声明的字符集（如 gbk）生效
         response_headers = {"content-location": str(resp.url)}
@@ -103,8 +103,9 @@ class RssSource(Source):
         parsed = feedparser.parse(resp.content, response_headers=response_headers)
         # bozo 也会因内容类型不规范等无害原因置位；只有根本没识别出 feed 才算失败
         if not parsed.get("version") and not parsed.entries:
-            reason = parsed.get("bozo_exception", "not a feed")
-            raise UpstreamError(f"cannot parse feed {opts.url}: {reason}")
+            reason = parsed.get("bozo_exception")
+            category = type(reason).__name__ if reason is not None else "unrecognized format"
+            raise UpstreamError(f"cannot parse feed ({category})")
 
         cutoff = None if opts.max_age_days is None else ctx.now - timedelta(days=opts.max_age_days)
         items, too_old = [], 0

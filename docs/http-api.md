@@ -40,6 +40,15 @@ Generate types offline with `python -m tentacles.api_schema`, without user confi
 | `POST /api/sources/{source_id}/fetch` | `FetchOutcome`; unknown ID 404, busy 409, failed fetch 502 |
 | `GET /api/items` | `Page[ItemView]`; `sources` and `kinds` may repeat; `since`, `until`, `search`, `pipeline`, `passed`, `limit`, `offset` |
 | `GET /api/items/{item_id}` | `ItemDetail`, including body and evaluations |
+| `GET /api/personas` | 当前 `PersonaView[]` |
+| `GET /api/personas/current` | `name` 必填，`version` 可选（正 int64）；自然名称含 `/` 也作为查询值传递 |
+| `PATCH /api/personas` | `name`、`expected_version` 必填；0 表示创建；profile、skip_tags、关键词 add/remove、note 同 Service |
+| `GET /api/personas/history` | `name` 必填，返回版本快照列表 |
+| `POST /api/personas/evolve` | `name`、`expected_version`、可选 instruction/use_feedback；始终只预览，返回 `PersonaProposal` |
+| `POST /api/personas/apply` | 原样提交提案，校验 base_version 后返回新 `PersonaView` |
+| `POST /api/personas/rollback` | `name`、`version`、`expected_version`，可选 note；创建新版本而不是删除历史 |
+| `GET /api/items/{item_id}/feedback` | 可选 persona，返回最新 `FeedbackView` 或 null |
+| `POST /api/items/{item_id}/feedback` | rating 严格整数 +1/-1，可选 persona/note，返回 `FeedbackView` |
 | `GET /api/pipelines` | `PipelineView[]`：persona、来源、处理方式、计划、待报告数和最近状态 |
 | `POST /api/pipelines/{pipeline_id}/filter` | `PipelineOutcome`；可选 `{ "reevaluate": true, "since": "7d" }`，since 仅配合重新评估 |
 | `POST /api/pipelines/{pipeline_id}/run` | `PipelineOutcome`；ok/no_new 为 200，busy 409，处理失败 502 |
@@ -99,3 +108,44 @@ explicit no-referrer links rather than auto-fetching remote content. Referenced 
 in Feed. Visible Runs and scheduler views refresh every five seconds; background tabs pause polling by default, and refresh on return when stale; null cost is displayed as unknown.
 Saving a browser token reloads Settings after clearing caches, resetting active observers and prior
 probe results so a credential change cannot leave stale protected data visible.
+
+
+## Persona and feedback
+
+Persona names are query/body values to preserve existing Unicode, slash and space names without
+reserved-path ambiguity. API edits and rollback require an explicit expected_version; a concurrent
+change returns 409. The same version remains fenced after paid tag extraction. Existing CLI defaults
+remain unchanged when no expected version is supplied. Stale previews are rejected before model work;
+apply also checks the proposal base version atomically.
+
+Evolution's use_feedback defaults true; false sends only the saved persona and instruction, with a
+zero feedback count. Empty instruction without eligible/enabled feedback is invalid. Previews do not
+write persona versions or runs; model calls may still incur cost. Applying a preview is a separate
+explicit action. Profile changes may call the tag model; extraction failure still saves the profile,
+retains previous tags and reports tag_status=error. Tags are read-only in the manual editor.
+
+Feedback remains append-only for existing evolution semantics. GET returns the latest insertion for
+the selected persona/item, even if the wall clock moves backward. No vote-delete operation is added;
+re-clicking an already selected thumb is a UI no-op, the opposite thumb records a new event. Votes are
+optimistic display state only: failed requests restore previous state and show an error, then refetch.
+Mutations retain their original item/persona key across selection changes; card/drawer share a cache.
+
+The editor holds an explicit draft/base snapshot rather than replacing it on query refresh. Conflict
+refresh is explicitly labeled as abandoning the draft. Switching named personas asks before discarding
+work; new-persona creation is an exclusive form. Changed evolution instruction/feedback choice clears
+an old preview. Profile diffs use jsdiff line changes, with bounded work and a full-text fallback for
+very large differences; no model-provided HTML is rendered.
+
+The corresponding agent CLI exposes optional `--expected-version` on set/evolve/rollback,
+`--no-feedback` on evolution, and `items feedback` for latest-vote reads. Existing defaults are unchanged.
+Unsaved evolution instructions and feedback-choice changes are included in the editor's work guard;
+manual profile saves retain these inputs, while apply/confirmed rollback/explicit discard clears them.
+
+When Feed has a selected pipeline, feedback stays disabled until that pipeline's persona metadata is
+successfully resolved. Missing or failed metadata never silently falls back to default, even when an
+old cache entry exists. Clear the pipeline filter to choose an explicit standalone feedback persona.
+
+Source diagnostics retain safe error categories and HTTP status rather than source URLs, raw network/
+parser messages, arbitrary exception text or tracebacks. This applies to logs, fetch outcomes, source
+state and run records, including failure-recording/lease cleanup. CLI unexpected failures likewise
+report a category only; structured expected domain errors retain their normal safe diagnostics.

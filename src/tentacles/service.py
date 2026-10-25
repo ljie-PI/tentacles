@@ -133,22 +133,24 @@ class TentaclesService:
     def export_persona(self, name: str, version: int | None = None) -> str:
         return self.personas.export(name, version)
 
-    async def evolve_persona(self, name: str, *, instruction: str = '', dry_run: bool = False) -> PersonaProposal | PersonaView:
-        return await self.personas.evolve(name, instruction=instruction, dry_run=dry_run)
+    async def evolve_persona(self, name: str, *, instruction: str = '', dry_run: bool = False,
+                             expected_version: int | None = None, use_feedback: bool = True) -> PersonaProposal | PersonaView:
+        return await self.personas.evolve(name, instruction=instruction, dry_run=dry_run, expected_version=expected_version, use_feedback=use_feedback)
 
     async def apply_persona(self, proposal: PersonaProposal | dict[str, Any]) -> PersonaView:
         return await self.personas.apply(proposal)
 
-    async def rollback_persona(self, name: str, version: int, *, note: str | None = None) -> PersonaView:
-        return await self.personas.rollback(name, version, note)
+    async def rollback_persona(self, name: str, version: int, *, note: str | None = None,
+                               expected_version: int | None = None) -> PersonaView:
+        return await self.personas.rollback(name, version, note, expected_version=expected_version)
 
     async def set_persona(self, name: str, *, profile: str | None = None, skip_tags: bool = False,
                           include_add: list[str] | None = None, include_remove: list[str] | None = None,
                           exclude_add: list[str] | None = None, exclude_remove: list[str] | None = None,
-                          note: str | None = None) -> PersonaView:
+                          note: str | None = None, expected_version: int | None = None) -> PersonaView:
         return await self.personas.set(name, profile=profile, skip_tags=skip_tags,
                                        include_add=include_add, include_remove=include_remove,
-                                       exclude_add=exclude_add, exclude_remove=exclude_remove, note=note)
+                                       exclude_add=exclude_add, exclude_remove=exclude_remove, note=note, expected_version=expected_version)
 
     # ---- models -------------------------------------------------------------
 
@@ -276,10 +278,10 @@ class TentaclesService:
                     # The token is known even if cancellation arrived after acquisition committed.
                     await run_store_call(self.store.finish_task, task, token, to_utc(self._clock()))
                 except Exception as exc:
-                    log.warning('could not finish task %s: %s', spec.id, exc)
+                    log.warning('could not finish task %s (%s)', spec.id, type(exc).__name__)
                     failure = failure or exc
         if failure is not None:
-            error = f'{type(failure).__name__}: {failure}'
+            error = f'fetch task failed ({type(failure).__name__})'
             log.warning('fetch %s failed: %s', spec.id, error)
             return FetchOutcome(source_id=spec.id, run_id=run_id, status='error',
                                 new=outcome.new if outcome else 0, dup=outcome.dup if outcome else 0,
@@ -333,11 +335,18 @@ class TentaclesService:
         if type(rating) is not int or rating not in (-1, 1):
             raise ConfigError('feedback rating must be +1 or -1')
         self.get_item(item_id)
-        if persona is None:
+        name = self._feedback_persona(persona)
+        return self.store.submit_feedback(item_id, name, rating, note, self._clock())
+
+    def _feedback_persona(self, name: str | None) -> str:
+        if name is None:
             personas = self.list_personas()
-            persona = personas[0].name if len(personas) == 1 else 'default'
-        current = self.get_persona(persona)
-        return self.store.submit_feedback(item_id, current.name, rating, note, self._clock())
+            name = personas[0].name if len(personas) == 1 else 'default'
+        return self.get_persona(name).name
+
+    def get_feedback(self, item_id: str, *, persona: str | None = None) -> FeedbackView | None:
+        self.get_item(item_id)
+        return self.store.get_feedback(item_id, self._feedback_persona(persona))
 
     # ---- runs ---------------------------------------------------------------
 

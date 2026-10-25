@@ -52,3 +52,7 @@ export type ModelTest = components['schemas']['ModelTest']
 export type Task = components['schemas']['TaskView']
 export type SchedulerLoop = components['schemas']['SchedulerLoopView']
 export type TickOutcome = components['schemas']['TickOutcome']
+
+export type Persona = components['schemas']['PersonaView']
+export type PersonaProposal = components['schemas']['PersonaProposal']
+export type Feedback = components['schemas']['FeedbackView']
