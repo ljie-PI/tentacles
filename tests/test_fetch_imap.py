@@ -539,6 +539,9 @@ def test_imap_arguments_consistently_reject_delete_controls(write_config, field)
     'On this project we used @decorators',
     'On this project we planned 2026-10-25 milestones',
     'On 2026-10-25 we completed 2 phases.',
+    'On this project I wrote:',
+    'On 2026-10-25 I wrote:',
+    'On Tuesday, I wrote:',
 ])
 def test_reply_cleanup_preserves_normal_paragraph_containing_wrote(write_config, prose):
     body = f'Fresh update\n\n{prose}\nThis is what I wrote:\nNew technical findings'

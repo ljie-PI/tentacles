@@ -122,6 +122,8 @@ _ATTRIBUTION_DATE = re.compile(
 _ATTRIBUTION_SENDER = re.compile(
     r'(?:<[^@\s<>]+@[^@\s<>]+>|(?<!\S)[^@\s<>]+@[^@\s<>]+)\s+(?:wrote:|写道[：:])$', re.I)
 
+_SHORT_ATTRIBUTION = re.compile(rf'^On\s+{_WEEKDAY},\s+(?P<name>.+?)\s+wrote:$', re.I)
+
 
 def _body_parts(msg: MIMEPart) -> list[tuple[str, str]]:
     if msg.get_content_disposition() == 'attachment' or msg.get_filename() or msg.get_content_maintype() == 'message':
@@ -141,9 +143,28 @@ def _body_parts(msg: MIMEPart) -> list[tuple[str, str]]:
     return [(kind, text)]
 
 
+def _reply_attribution(header: str) -> bool:
+    if not _REPLY_BOUNDARY.fullmatch(header):
+        return False
+    if not re.match(r'^(?:On\s|[在于])', header, re.I):
+        return True  # explicit "Original Message" / forwarding separators
+    if _ATTRIBUTION_SENDER.search(header):
+        return True
+    if re.search(r'\b(?:I|we|you|they)\s+wrote:$|(?:我|我们|你|你们|他们|她们)写道[：:]$', header, re.I):
+        return False
+    if _ATTRIBUTION_DATE.match(header):
+        return True
+    short = _SHORT_ATTRIBUTION.fullmatch(header)
+    if short is None:
+        return False
+    name = short['name'].split()
+    return (1 <= len(name) <= 3 and name[0].casefold() not in {'this', 'that', 'here', 'what'}
+            and all(word.replace('-', '').replace("'", '').isalpha() and not word[0].islower() for word in name))
+
+
 def _reply_header(lines: list[str], start: int) -> bool:
     header = lines[start].strip()
-    if _REPLY_BOUNDARY.fullmatch(header):
+    if _reply_attribution(header):
         return True
     if not re.match(r'^(?:On\s|[在于])', header, re.I) or header.endswith(('.', '!', '?', '。', '！', '？')):
         return False
@@ -156,8 +177,7 @@ def _reply_header(lines: list[str], start: int) -> bool:
         header += ' ' + line.strip()
         if len(header) > 1000:
             break
-        if _REPLY_BOUNDARY.fullmatch(header) and (
-                _ATTRIBUTION_DATE.match(header) or _ATTRIBUTION_SENDER.search(header)):
+        if _reply_attribution(header):
             return True
     return False
 
