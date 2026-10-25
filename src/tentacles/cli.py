@@ -321,8 +321,8 @@ def _render_evolution(result, out: Console, when: TimeFmt) -> None:
     out.print(Text(f"{result.name} · base v{result.base_version} · {result.feedback_count} feedback", style="bold"))
     out.print(Text(result.summary))
     diff = Text()
-    for line in result.diff.splitlines(keepends=True):
-        style = ('bold cyan' if line.startswith(('---', '+++', '@@')) else
+    for index, line in enumerate(result.diff.splitlines(keepends=True)):
+        style = ('bold cyan' if index < 2 or line.startswith('@@ ') else
                  'green' if line.startswith('+') else 'red' if line.startswith('-') else '')
         diff.append(line, style=style)
     out.print(diff)

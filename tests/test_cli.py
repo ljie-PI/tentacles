@@ -402,19 +402,23 @@ def test_evolution_dry_run_never_persists_service_initialization(write_config, w
         asyncio.run(service.aclose())
 
 
-def test_evolution_human_diff_is_colored_while_json_stays_plain(write_config, web):
+@pytest.mark.parametrize(('profile', 'proposed', 'removed', 'added'), [
+    ('Original profile', 'AI and robotics first', '-Original profile', '+AI and robotics first'),
+    ('-- old rule', '++ new rule', '--- old rule', '+++ new rule'),
+])
+def test_evolution_human_diff_is_colored_while_json_stays_plain(write_config, web, profile, proposed, removed, added):
     from test_models import CHAT_URL, chat_reply, model_config
     from test_persona_evolution import evolved_content
-    path = write_config({**model_config(), 'personas': {'default': {'profile': 'Original profile'}}})
-    web.serve(CHAT_URL, json.dumps(chat_reply(json.dumps(evolved_content()))),
+    path = write_config({**model_config(), 'personas': {'default': {'profile': profile}}})
+    web.serve(CHAT_URL, json.dumps(chat_reply(json.dumps(evolved_content(profile=proposed)))),
               headers={'content-type': 'application/json'})
     runner = CliRunner()
     args = ['-c', str(path), 'persona', 'evolve', '--instruction', 'More robotics', '--dry-run']
     result = runner.invoke(app, args, obj={'transport': web.transport()}, color=True,
                            env={'FORCE_COLOR': '1', 'TERM': 'xterm-256color', 'NO_COLOR': None})
     assert result.exit_code == 0
-    assert '\x1b[31m-Original profile' in result.stdout
-    assert '\x1b[32m+AI and robotics first' in result.stdout
+    assert '\x1b[31m' + removed in result.stdout
+    assert '\x1b[32m' + added in result.stdout
     no_color = runner.invoke(app, args, obj={'transport': web.transport()}, color=True,
                               env={'FORCE_COLOR': '1', 'NO_COLOR': '1'})
     assert no_color.exit_code == 0 and '\x1b[31m' not in no_color.stdout and '\x1b[32m' not in no_color.stdout
