@@ -400,3 +400,22 @@ def test_evolution_dry_run_never_persists_service_initialization(write_config, w
         assert len(service.persona_history('default')) == (2 if existing else 1)
     finally:
         asyncio.run(service.aclose())
+
+
+def test_evolution_human_diff_is_colored_while_json_stays_plain(write_config, web):
+    from test_models import CHAT_URL, chat_reply, model_config
+    from test_persona_evolution import evolved_content
+    path = write_config({**model_config(), 'personas': {'default': {'profile': 'Original profile'}}})
+    web.serve(CHAT_URL, json.dumps(chat_reply(json.dumps(evolved_content()))),
+              headers={'content-type': 'application/json'})
+    runner = CliRunner()
+    args = ['-c', str(path), 'persona', 'evolve', '--instruction', 'More robotics', '--dry-run']
+    result = runner.invoke(app, args, obj={'transport': web.transport()}, color=True,
+                           env={'FORCE_COLOR': '1', 'TERM': 'xterm-256color'})
+    assert result.exit_code == 0
+    assert '\x1b[31m-Original profile' in result.stdout
+    assert '\x1b[32m+AI and robotics first' in result.stdout
+    result = runner.invoke(app, ['--json', *args], obj={'transport': web.transport()}, color=True,
+                           env={'FORCE_COLOR': '1', 'TERM': 'xterm-256color'})
+    assert result.exit_code == 0 and '\x1b[' not in result.stdout
+    assert payload(result)['base_version'] == 1

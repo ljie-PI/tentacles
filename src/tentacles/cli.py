@@ -320,7 +320,12 @@ def _render_evolution(result, out: Console, when: TimeFmt) -> None:
         return
     out.print(Text(f"{result.name} · base v{result.base_version} · {result.feedback_count} feedback", style="bold"))
     out.print(Text(result.summary))
-    out.print(Text(result.diff))
+    diff = Text()
+    for line in result.diff.splitlines(keepends=True):
+        style = ('bold cyan' if line.startswith(('---', '+++', '@@')) else
+                 'green' if line.startswith('+') else 'red' if line.startswith('-') else '')
+        diff.append(line, style=style)
+    out.print(diff)
     out.print(Text(f"include: {', '.join(result.include)}\nexclude: {', '.join(result.exclude)}"))
     out.print(_table("Proposed tags", ["tag", "description"],
                      [[tag.tag, tag.description] for tag in result.tags]))

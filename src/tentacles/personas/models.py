@@ -129,6 +129,10 @@ class EvolutionContent(BaseModel):
     exclude: list[str] = Field(max_length=100)
     summary: str = Field(min_length=1, max_length=2000)
 
+    def check_profile_length(self, limit: int) -> None:
+        if len(self.profile) > limit:
+            raise ValueError('evolved profile exceeds the configured length limit')
+
     @field_validator('profile', 'summary')
     @classmethod
     def _nonblank(cls, value: str) -> str:

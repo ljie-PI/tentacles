@@ -24,8 +24,7 @@ def evolution_messages(current: PersonaView, instruction: str, feedback: list[di
 
 def make_proposal(current: PersonaView, data: Any, feedback_count: int, limit: int) -> PersonaProposal:
     content = EvolutionContent.model_validate(data)
-    if len(content.profile) > limit:
-        raise ValueError('evolved profile exceeds the configured length limit')
+    content.check_profile_length(limit)
     old_names = {tag.tag.casefold(): tag.tag for tag in current.tags}
     for tag in content.tags:
         tag.tag = old_names.get(tag.tag.casefold(), tag.tag)

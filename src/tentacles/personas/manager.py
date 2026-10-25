@@ -128,8 +128,7 @@ class PersonaManager:
         try:
             # Validate even model instances: callers may have mutated them after construction.
             proposal = PersonaProposal.model_validate(value.model_dump() if isinstance(value, PersonaProposal) else value)
-            if len(proposal.profile) > self._update.max_profile_chars:
-                raise ValueError('profile is too long')
+            proposal.check_profile_length(self._update.max_profile_chars)
         except ValueError:
             raise ConfigError('invalid persona proposal') from None
         self.get(proposal.name)
