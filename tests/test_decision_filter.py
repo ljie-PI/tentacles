@@ -603,7 +603,7 @@ def test_negative_retry_after_cannot_make_a_permanent_402_transient(write_config
 
 
 @pytest.mark.parametrize('cancel_again', [False, True])
-def test_owner_cancellation_never_interrupts_a_workers_async_http_cleanup(write_config, web, cancel_again):
+def test_owner_cancellation_never_interrupts_a_workers_async_http_cleanup(write_config, web, cancel_again, caplog):
     web.serve(FEED, three_entries())
     path = write_config(decision_config(concurrency=2))
 
@@ -646,6 +646,8 @@ def test_owner_cancellation_never_interrupts_a_workers_async_http_cleanup(write_
             with pytest.raises(asyncio.CancelledError):
                 await task
             assert active == 0
+            await asyncio.sleep(0)
+            assert not any('CancelledError exception in shielded future' in r.getMessage() for r in caplog.records)
             await worker.aclose()
         finally:
             release_cleanup.set()
