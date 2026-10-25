@@ -6,10 +6,12 @@ has a schema error. Only a completely valid document becomes a runtime AppConfig
 from __future__ import annotations
 
 import re
+import shutil
 import sqlite3
 from collections.abc import Collection, Mapping, Sequence
 from contextlib import closing
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Any
 
 from pydantic import BaseModel, TypeAdapter, ValidationError
@@ -52,20 +54,58 @@ def _schema_errors(exc: ValidationError, prefix: Sequence[str | int] = ()) -> li
 def read_persona_names(db_path: Path) -> set[str]:
     """Read just names, including live WAL data, without Store or migrations.
 
+    Even mode=ro may create WAL/SHM or write shared-memory read marks. Copy the
+    database and journals into a private, disposable directory instead; SQLite
+    recovers that copy, never the source. Do not copy SHM: SQLite rebuilds it
+    from the committed WAL frames. Immutable reads would silently miss those.
+
+    Reject/retry copies changed by writers or checkpoints rather than accepting
+    a torn snapshot. Three attempts bound contention; continuous churn fails
+    explicitly instead of silently treating existing Personas as absent.
     A pre-persona schema is legitimate. Other read failures must not be mistaken
     for an empty database, nor expose SQLite error text or filesystem details.
     """
     try:
-        if not db_path.exists():
-            return set()
-        with closing(sqlite3.connect(db_path.resolve().as_uri() + '?mode=ro', uri=True)) as conn:
-            if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='persona_versions'").fetchone() is None:
+        db_path = db_path.resolve()
+        paths = [db_path, Path(str(db_path) + '-wal'), Path(str(db_path) + '-journal')]
+        for _ in range(3):
+            before = _file_states(paths)
+            if before[0] is None:
                 return set()
-            return {row[0] for row in conn.execute("SELECT DISTINCT name FROM persona_versions")}
+            with TemporaryDirectory(prefix='tentacles-config-') as directory:
+                snapshot = Path(directory) / db_path.name
+                try:
+                    for source, state in zip(paths, before):
+                        if state is not None:
+                            shutil.copyfile(source, Path(directory) / source.name)
+                except FileNotFoundError:
+                    continue  # A checkpoint or journal cleanup raced the copy.
+                if before != _file_states(paths):
+                    continue
+                with closing(sqlite3.connect(snapshot)) as conn:
+                    conn.execute('PRAGMA query_only = ON')
+                    if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='persona_versions'").fetchone() is None:
+                        return set()
+                    return {row[0] for row in conn.execute("SELECT DISTINCT name FROM persona_versions")}
     except (OSError, sqlite3.Error):
         raise ConfigValidationError([
             ConfigIssue('app.data_dir', 'cannot read existing Persona names from database')
         ]) from None
+    raise ConfigValidationError([
+        ConfigIssue('app.data_dir', 'database changed while reading Persona names; retry config check')
+    ])
+
+
+def _file_states(paths: list[Path]) -> list[tuple[int, ...] | None]:
+    states: list[tuple[int, ...] | None] = []
+    for path in paths:
+        try:
+            stat = path.stat()
+        except FileNotFoundError:
+            states.append(None)
+        else:
+            states.append((stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns))
+    return states
 
 
 def _path(value: Any, config_path: Path) -> Path | None:
@@ -99,11 +139,21 @@ def _source_options(data: Mapping[str, Any], where: str) -> tuple[BaseModel | No
     if cls is None:
         return None, [ConfigIssue(f'{where}.type', 'unknown source type')]
     options = {key: value for key, value in data.items() if key not in SourceSpec.model_fields}
+    errors: list[ConfigIssue] = []
+    # Independent cross-field rules must still run when another option (or
+    # another semantic rule) fails. Keep field parsing in the Source schemas.
+    if source_type == 'web':
+        mode = options.get('mode', 'list')
+        if mode == 'list' and options.get('selectors') is None:
+            errors.append(ConfigIssue(f'{where}.selectors', 'list mode requires selectors'))
+        if mode in ('list', 'page') and options.get('model') is not None:
+            errors.append(ConfigIssue(f'{where}.model', 'model override is only supported in llm mode'))
     try:
-        return cls.Options.model_validate(options), []
+        return cls.Options.model_validate(options), errors
     except ValidationError as exc:
-        return None, [ConfigIssue(f'{where}.{error.path}', error.message)
-                      for error in _schema_errors(exc)]
+        errors.extend(ConfigIssue(f'{where}.{error.path}', error.message)
+                      for error in _schema_errors(exc))
+        return None, errors
 
 
 def validate_source(spec: SourceSpec, where: str, config: AppConfig | None = None) -> BaseModel:

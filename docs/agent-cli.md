@@ -42,6 +42,9 @@
 Pipeline Stage/Processor 模型种类、prompt 文件和 Persona 引用的所有错误。
 已有数据库只读查询 Persona 名（含 `persona set` 创建的名称）；不存在的数据库或尚无
 Persona 表的旧 schema 视为空。不创建数据目录、数据库，不迁移、seed 或注册/同步任务。
+为避免 SQLite 只读连接仍创建 WAL/SHM，已有数据库及其 WAL/journal 会复制到私有临时目录，
+仅对副本执行 SQLite 恢复和查询，完成后删除。不修改原库或其 sidecar；包含尚未 checkpoint 的
+已提交 WAL 数据。复制期间数据库若变化，最多重试三次，仍变化则以配置错误退出并提示重试。
 
 ```json
 {"ok": true, "path": "/abs/config/tentacles.yaml", "sources": 11}

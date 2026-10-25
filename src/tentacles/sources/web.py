@@ -18,7 +18,7 @@ from dateparser.search import search_dates
 import httpx
 import soupsieve
 from bs4 import BeautifulSoup, Tag
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, field_validator
 
 from tentacles.asyncutil import gather_draining, run_blocking, run_store_call
 from tentacles.errors import UpstreamError
@@ -139,14 +139,6 @@ class WebOptions(BaseModel):
         if value is not None and Selector.parse(value).attribute is not None:
             raise ValueError('page selector must select nodes, not an attribute')
         return value
-
-    @model_validator(mode='after')
-    def _mode_options(self):
-        if self.mode == 'list' and self.selectors is None:
-            raise ValueError('list mode requires selectors')
-        if self.model is not None and self.mode != 'llm':
-            raise ValueError('model override is only supported in llm mode')
-        return self
 
 
 def _link(base: str, value: str) -> str | None:

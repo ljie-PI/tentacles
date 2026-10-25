@@ -12,10 +12,11 @@ import json
 import logging
 import os
 import sys
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Optional
+from typing import Any, Awaitable, Callable, Iterator, Optional
 from zoneinfo import ZoneInfo
 
 import typer
@@ -130,6 +131,22 @@ def _jsonable(value: Any) -> Any:
 TimeFmt = Callable[[Optional[datetime]], str]
 
 
+@contextmanager
+def _command_errors(state: State) -> Iterator[None]:
+    """Shared adapter mapping for operations with or without a Service."""
+    try:
+        yield
+    except ConfigValidationError as exc:
+        _fail(state, exc.code, exc.message, errors=exc.errors)
+    except TentaclesError as exc:
+        _fail(state, exc.code, exc.message)
+    except KeyboardInterrupt:
+        _fail(state, "aborted", "interrupted")
+    except Exception as exc:  # noqa: BLE001 — no raw unexpected exception text
+        logging.getLogger(__name__).error("unexpected operation failure (%s)", type(exc).__name__)
+        _fail(state, "error", f"operation failed ({type(exc).__name__})")
+
+
 def _run(ctx: typer.Context, op: Callable[[TentaclesService], Awaitable[Any] | Any],
          render: Callable[[Any, Console, TimeFmt], None], *, snapshot: bool = False) -> None:
     """Open the service, run one operation, print its result, map errors to exit codes."""
@@ -148,17 +165,8 @@ def _run(ctx: typer.Context, op: Callable[[TentaclesService], Awaitable[Any] | A
             await svc.aclose()
 
     out = Console(soft_wrap=True)
-    try:
+    with _command_errors(state):
         result = asyncio.run(go())
-    except ConfigValidationError as exc:
-        _fail(state, exc.code, exc.message, errors=exc.errors)
-    except TentaclesError as exc:
-        _fail(state, exc.code, exc.message)
-    except KeyboardInterrupt:
-        _fail(state, "aborted", "interrupted")
-    except Exception as exc:  # noqa: BLE001 — unexpected bugs still yield a structured error
-        logging.getLogger(__name__).error("unexpected operation failure (%s)", type(exc).__name__)
-        _fail(state, "error", f"operation failed ({type(exc).__name__})")
     if state.json:
         typer.echo(json.dumps(_jsonable(result), ensure_ascii=False))
     else:
@@ -198,18 +206,9 @@ def config_check(ctx: typer.Context) -> None:
     from tentacles.schemas import ConfigCheck
 
     state: State = ctx.obj
-    try:
+    with _command_errors(state):
         config = load_config(state.config)
         result = ConfigCheck(ok=True, path=str(config.path), sources=len(config.sources))
-    except ConfigValidationError as exc:
-        _fail(state, exc.code, exc.message, errors=exc.errors)
-    except TentaclesError as exc:
-        _fail(state, exc.code, exc.message)
-    except KeyboardInterrupt:
-        _fail(state, 'aborted', 'interrupted')
-    except Exception as exc:
-        logging.getLogger(__name__).error("unexpected config check failure (%s)", type(exc).__name__)
-        _fail(state, 'error', f'operation failed ({type(exc).__name__})')
     if state.json:
         typer.echo(result.model_dump_json())
     else:
