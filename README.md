@@ -71,10 +71,10 @@ tentacles items list --since 24h  # 查看最近 24 小时的条目
 
 所有命令都支持 `--json`：stdout 只输出一个 JSON 值，日志写到 stderr，退出码按错误类型区分。给 agent 用的完整说明见 [docs/agent-cli.md](docs/agent-cli.md)。
 
-## RSS / Atom 原位更新（可选）
+## RSS / Atom 与 Web list 原位更新（可选）
 
 每个源默认 `update_existing: false`，省略时保持原有去重、网络请求和模型调用行为。
-仅 RSS / Atom 目前支持开启；Web（包括 list / llm / page）及 IMAP 设为 true 会明确报配置错误。
+目前支持 RSS / Atom 和 Web `mode: list`；Web llm / page 及 IMAP 设为 true 会明确报配置错误。
 
 ```yaml
 sources:
@@ -85,10 +85,26 @@ sources:
     update_existing: true
 ```
 
-开启后，仅 Feed 本轮再次提供、未被 `max_age_days` 排除、且同源稳定外部 ID 相同的条目可原位覆盖。
+RSS 开启后，仅 Feed 本轮再次提供、未被 `max_age_days` 排除的条目可原位覆盖：
+先按同源稳定外部 ID（含已确认别名）定位标准 Item；未命中时，仅按本轮实际观察到的规范化 URL
+回退到同源唯一标准 Item。追踪参数和 fragment 不参与 URL 身份，不按指纹或近似标题寻找更新对象。
 缺失字段保留旧值，明确空值可清空；比较完整正文及下游实际字段，而非只比较截断摘要。
-外部 ID 改变时不按 URL 寻找更新对象，跨源去重赢家不会被覆盖。只保留最新状态，不保存正文快照。
+外部 ID A → B → A 保留原 Item ID、原 external_id、首次抓取时间及反馈/消费关系，
+新稳定 ID 作为同源别名保存；仅身份变化仍计重复，不续窗口、不失效评分。
+同批每个目标只采用首条有效观察（包括无内容变化的观察和新插入的目标），未知无标题观察不占位。
+跨源 URL/指纹/近似标题仍仅用于新增去重，不会覆盖赢家；已抑制或只有观察记录的身份不会复活。
+外部 ID 与 URL 指向不同 Item、同源 URL 命中多个标准 Item，或目标 URL 被另一标准 Item 占用，
+均明确报 Conflict 并回滚整个源批次（包括别名、内容、评估、计数和游标），不自动合并或迁移来源。
+只保留最新状态，不保存正文快照。关闭更新时沿用原有去重，IMAP/page 不参与此身份回退。
 条件 GET、304 和发布时间上限不变，不额外请求详情、评论或主动重访历史条目。
+
+Web list 同样在源级设置 `update_existing: true`，只刷新**本轮列表再次发现**的本源标准 Item，
+不遍历历史、不新增独立监控任务，也不清空已见缓存。被抑制、仅有观察身份而没有本源 Item、
+或其他源已保存的文章继续跳过，包括详情请求；页面版本身份不参与普通文章 URL 判重。
+`fetch_content: true` 每轮会为再次发现的可更新条目**额外请求详情**，即使列表文本不变，
+也比较完整正文（包括摘要截断之后的变化）。`fetch_content: false` 仅更新实际提供的列表字段：
+缺少摘要/日期保留旧值，不以列表摘录覆盖旧全文。任一详情失败则整轮不写条目或游标，可稳定重试。
+开启/关闭方法、空值规则与详情并发/凭据隔离见 [Web 信息源协议](docs/web-sources.md)。
 
 内容变化后，条目保留 ID、首次 `fetched_at` 和消费关系，设置 `updated_at` 并使旧评分失效。
 pipeline 的过滤、手动重评、待报告计数和排序按 `updated_at`（否则 `fetched_at`）进入窗口；
@@ -100,7 +116,8 @@ Feed 保持发布时间优先的排序和时间筛选，列表/详情显示更�
 
 改回 `update_existing: false` 或删除该配置即可关闭；不会回滚已保存的新内容。
 旧报告 Markdown、反馈及消费记录不变，但关联 Item 显示最新原文，无法恢复生成旧报告时的原文。
-数据库自动迁移到 schema 12：旧 Item 的 `updated_at` 为 null，内容/评估输入修订初始为 1；
+数据库自动迁移到 schema 13：在 schema 12 内容修订之上增加同源身份别名映射，不改写已有外部身份；
+旧 Item 的 `updated_at` 为 null，内容/评估输入修订初始为 1；
 Persona、报告、反馈、消费、游标和身份记录保持不变。迁移前请做一致的 SQLite 备份（含 WAL 已提交数据）。
 不提供降级迁移；要回退旧程序需恢复迁移前备份，否则旧版按列数写入 evaluations 会失败。
 数据库事务失败会回滚本批内容/评分/游标，报告新文件尽力清理；文件系统和 SQLite 仍非崩溃原子。
@@ -146,7 +163,7 @@ UIDVALIDITY 和最后处理 UID；首次、UIDVALIDITY 或账户身份变化时�
 
 ## 网页 list / page / llm 信息源
 
-没有 RSS 的站点可以配置 `type: web`：list 用 CSS 选择器提取文章，可选并发抓新详情；page 保存内容版本，
+没有 RSS 的站点可以配置 `type: web`：list 用 CSS 选择器提取文章，可选并发抓详情和原位更新；page 保存内容版本，
 内容变化时生成带增删行差异的条目。同 URL 的页面版本可独立入库，不会被普通文章判重吞掉。
 示例 `web-list` / `web-page` 默认关闭，不会因升级新增网络请求。
 

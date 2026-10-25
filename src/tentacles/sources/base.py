@@ -11,7 +11,7 @@ from typing import Any, Callable, ClassVar, Type, TYPE_CHECKING
 from pydantic import BaseModel
 
 from tentacles.config import AppConfig, SourceSpec
-from tentacles.models import Item, ItemObservation
+from tentacles.models import Item, ItemObservation, LinkDisposition
 from tentacles.net import HttpPool
 from tentacles.sources.imap_client import ImapFactory, connect_imap
 from tentacles.llm.types import UsageTotals
@@ -29,6 +29,7 @@ class FetchContext:
     seen_links: Callable[[list[str]], set[str]] | None = None
     models: ModelRegistry | None = None
     metrics: UsageTotals = field(default_factory=UsageTotals)
+    classify_links: Callable[[list[str]], dict[str, LinkDisposition]] | None = None
 
 
 @dataclass

@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any, Callable, Literal
 
 from tentacles.dedup import split_similar
-from tentacles.models import Item, ItemObservation, item_id
+from tentacles.models import Item, ItemObservation, LinkDisposition, item_id, normalize_url
 from tentacles.errors import Conflict
 from tentacles.personas.models import FeedbackView, PersonaEdit, PersonaView, edit_keywords, keywords
 from tentacles.timeutil import from_iso, to_iso, to_utc
@@ -244,7 +244,16 @@ def _migrate_v12(conn: sqlite3.Connection) -> None:
     conn.execute('CREATE INDEX idx_items_source_activity ON items (source_id, COALESCE(updated_at, fetched_at))')
 
 
-MIGRATIONS: list[Callable[[sqlite3.Connection], None]] = [_migrate_v1, _migrate_v2, _migrate_v3, _migrate_v4, _migrate_v5, _migrate_v6, _migrate_v7, _migrate_v8, _migrate_v9, _migrate_v10, _migrate_v11, _migrate_v12]
+def _migrate_v13(conn: sqlite3.Connection) -> None:
+    # Alternative source identities point at the original Item, never replace
+    # its external_id or retain historical content.
+    conn.execute("""CREATE TABLE source_item_aliases (
+        source_id TEXT NOT NULL, external_id TEXT NOT NULL, item_id TEXT NOT NULL REFERENCES items(id),
+        PRIMARY KEY (source_id, external_id)
+    )""")
+
+
+MIGRATIONS: list[Callable[[sqlite3.Connection], None]] = [_migrate_v1, _migrate_v2, _migrate_v3, _migrate_v4, _migrate_v5, _migrate_v6, _migrate_v7, _migrate_v8, _migrate_v9, _migrate_v10, _migrate_v11, _migrate_v12, _migrate_v13]
 
 _ITEM_COLUMNS = ("id, source_id, kind, external_id, url, title, author, summary, content,"
                  " published, fetched_at, fingerprint, meta, identity_policy, updated_at, content_revision")
@@ -631,6 +640,32 @@ class Store:
                 known.update(row[0] for row in rows)
         return known
 
+    def classify_links(self, source_id: str, urls: list[str]) -> dict[str, LinkDisposition]:
+        """Classify current Web links before downloading details.
+
+        Observations alone never authorize a refresh. Only this source's stored
+        standard identity does; suppression wins even if an Item still exists.
+        This is a read hint, not write authorization: upsert resolves identity
+        and article dedup again inside the fenced publication transaction.
+        """
+        with self._lock:
+            known = self.seen_links(source_id, urls)
+            refreshable: set[str] = set()
+            suppressed: set[str] = set()
+            for offset in range(0, len(urls), 500):
+                chunk = urls[offset:offset + 500]
+                placeholders = ','.join('?' for _ in chunk)
+                rows = self._conn.execute(
+                    "SELECT external_id FROM items WHERE source_id = ? AND identity_policy = 'standard'"
+                    f" AND external_id IN ({placeholders})", [source_id, *chunk]).fetchall()
+                refreshable.update(row[0] for row in rows)
+                rows = self._conn.execute(
+                    f"SELECT external_id FROM suppressed_items WHERE source_id = ?"
+                    f" AND external_id IN ({placeholders})", [source_id, *chunk]).fetchall()
+                suppressed.update(row[0] for row in rows)
+        return {url: 'refresh' if url in refreshable and url not in suppressed
+                else 'skip' if url in known else 'new' for url in urls}
+
     def upsert_items(self, items: list[Item], *, source_id: str,
                      title_since: datetime | None, run_id: int | None = None,
                      observations: dict[str, ItemObservation] | list[ItemObservation] | None = None,
@@ -650,57 +685,17 @@ class Store:
             raise Conflict('source batch identity mismatch')
         if isinstance(observations, list) and observations and len(observations) != len(items):
             raise Conflict('source observation batch length mismatch')
-        fetched, updated = len(items), 0
+        if observations:
+            return self._upsert_observed_items(items, source_id=source_id, title_since=title_since,
+                                               observations=observations, now=now)
+        fetched = len(items)
         new: list[str] = []
         self._conn.executemany('INSERT OR IGNORE INTO source_seen_ids VALUES (?, ?)',
             [(source_id, it.external_id) for it in items if it.kind == 'web' and it.identity_policy == 'standard'])
         candidates: list[Item] = []
-        seen: set[str] = set()
-        for index, it in enumerate(items):
-            if observations and it.external_id in seen:
-                continue  # first valid observation wins, including unchanged updates
-            observation = (observations[index] if isinstance(observations, list)
-                           else observations.get(it.id)) if observations else None
-            row = None
-            if observation is not None and observation.stable_external_id and it.identity_policy == 'standard':
-                row = self._conn.execute(f"SELECT {_ITEM_COLUMNS} FROM items"
-                    " WHERE source_id = ? AND external_id = ? AND identity_policy = 'standard'",
-                    (source_id, it.external_id)).fetchone()
-            if row is not None:
-                seen.add(it.external_id)
-                assert observation is not None
-                old = _row_to_item(row)
-                latest = observation.apply(old)
-                if latest.url and latest.url != old.url and self._conn.execute(
-                        "SELECT 1 FROM items WHERE url = ? AND id != ? AND identity_policy = 'standard'",
-                        (latest.url, old.id)).fetchone():
-                    raise Conflict('updated item URL conflicts with an existing item')
-                changed = (any(getattr(old, key) != getattr(latest, key) for key in _CONTENT_FIELDS)
-                           or any(str(old.meta.get(key, '')) != str(latest.meta.get(key, ''))
-                                  for key in ('to', 'cc')))
-                if changed:
-                    if now is None:
-                        raise ValueError('content updates require an observation time')
-                    self._conn.execute(
-                        'UPDATE items SET title = ?, summary = ?, content = ?, author = ?, url = ?, published = ?,'
-                        ' fingerprint = ?, meta = ?, updated_at = ?, content_revision = content_revision + 1 WHERE id = ?',
-                        (latest.title, latest.summary, latest.content, latest.author, latest.url, to_iso(latest.published),
-                         latest.fingerprint, json.dumps(latest.meta, ensure_ascii=False), to_iso(now), old.id))
-                    self._conn.execute('DELETE FROM evaluations WHERE item_id = ?', (old.id,))
-                    updated += 1
-                elif latest.meta != old.meta:
-                    self._conn.execute('UPDATE items SET meta = ? WHERE id = ?',
-                                       (json.dumps(latest.meta, ensure_ascii=False), old.id))
-            else:
-                candidate = observation.apply(it) if observation is not None else it
-                if observation is not None and not candidate.title:
-                    # Partial observations can update a known identity, never
-                    # create an untitled Item.
-                    continue
-                if observations:
-                    seen.add(it.external_id)
-                if not self._is_duplicate(candidate):
-                    candidates.append(candidate)
+        for it in items:
+            if not self._is_duplicate(it):
+                candidates.append(it)
         suppressed: list[Item] = []
         if candidates and title_since is not None:
             kept, suppressed = split_similar(
@@ -711,11 +706,7 @@ class Store:
         for it in candidates:
             if self._is_duplicate(it):
                 continue
-            self._conn.execute(
-                f"INSERT INTO items ({_ITEM_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (it.id, it.source_id, it.kind, it.external_id, it.url, it.title, it.author,
-                 it.summary, it.content, to_iso(it.published), to_iso(it.fetched_at),
-                 it.fingerprint, json.dumps(it.meta, ensure_ascii=False), it.identity_policy, None, 1))
+            self._insert_item(it)
             new.append(it.id)
         self._conn.execute(
             "INSERT INTO source_state (source_id, total_items) VALUES (?, ?)"
@@ -723,7 +714,127 @@ class Store:
             (source_id, len(new)))
         self._conn.executemany("INSERT OR IGNORE INTO suppressed_items VALUES (?, ?)",
                               [(it.source_id, it.external_id) for it in suppressed])
-        return ItemWriteResult(new, updated, fetched - len(new) - updated)
+        return ItemWriteResult(new, 0, fetched - len(new))
+
+    def _observation_target(self, it: Item, observation: ItemObservation) -> Item | Literal['suppressed'] | None:
+        """Classify an opted-in observation under the caller's write fence.
+
+        Only standard, non-email Items participate. An observation-only or
+        suppressed identity is not an alias and must never acquire a winner.
+        URL identity uses an actually observed URL, not an adapter's fallback.
+        """
+        if it.identity_policy != 'standard' or it.kind == 'email':
+            return None
+        rows = self._conn.execute(
+            f"SELECT {_ITEM_COLUMNS} FROM items WHERE source_id = ? AND identity_policy = 'standard'"
+            " AND kind != 'email' AND external_id = ? UNION "
+            f"SELECT {_ITEM_COLUMNS} FROM items WHERE source_id = ? AND identity_policy = 'standard'"
+            " AND kind != 'email' AND id = (SELECT item_id FROM source_item_aliases"
+            " WHERE source_id = ? AND external_id = ?)",
+            (it.source_id, it.external_id, it.source_id, it.source_id, it.external_id)).fetchall()
+        identity = None
+        if observation.stable_external_id:
+            if len(rows) > 1:
+                raise Conflict('source external identity resolves to multiple items')
+            identity = _row_to_item(rows[0]) if rows else None
+        # An unstable ID is not update identity, but a canonical row still
+        # distinguishes an owned observation from a dedup loser's seen record.
+        if not rows and any(self._conn.execute(
+                f'SELECT 1 FROM {table} WHERE source_id = ? AND external_id = ?',
+                (it.source_id, it.external_id)).fetchone()
+                for table in ('suppressed_items', 'source_seen_ids')):
+            return 'suppressed'
+        url = normalize_url(observation.url) if observation.url else ''
+        matches = self._conn.execute(
+            f"SELECT {_ITEM_COLUMNS} FROM items WHERE source_id = ? AND url = ?"
+            " AND url != '' AND identity_policy = 'standard' AND kind != 'email'",
+            (it.source_id, url)).fetchall() if url else []
+        if len(matches) > 1:
+            raise Conflict('source URL resolves to multiple items')
+        by_url = _row_to_item(matches[0]) if matches else None
+        if identity is not None and by_url is not None and identity.id != by_url.id:
+            raise Conflict('source external identity and URL resolve to different items')
+        target = identity or by_url
+        if target is not None and url and self._conn.execute(
+                "SELECT 1 FROM items WHERE url = ? AND id != ? AND identity_policy = 'standard'",
+                (url, target.id)).fetchone():
+            raise Conflict('updated item URL conflicts with an existing item')
+        return target
+
+    def _upsert_observed_items(self, items: list[Item], *, source_id: str, title_since: datetime | None,
+                               observations: dict[str, ItemObservation] | list[ItemObservation],
+                               now: datetime | None) -> ItemWriteResult:
+        new: list[str] = []
+        updated = 0
+        seen_targets: set[str] = set()
+        titles = self._recent_titles(exclude_source=source_id, since=title_since) if title_since is not None else []
+        for index, it in enumerate(items):
+            observation = observations[index] if isinstance(observations, list) else observations.get(it.id)
+            target = self._observation_target(it, observation) if observation is not None else None
+            if target == 'suppressed':
+                continue
+            if isinstance(target, Item):
+                # Bind even an unchanged/second alias, but adopt mutable fields
+                # only once per canonical target, including newly inserted Items.
+                if observation is not None and observation.stable_external_id and it.external_id != target.external_id:
+                    self._conn.execute('INSERT OR IGNORE INTO source_item_aliases VALUES (?, ?, ?)',
+                                       (source_id, it.external_id, target.id))
+                if target.id in seen_targets:
+                    continue
+                seen_targets.add(target.id)
+                assert observation is not None
+                latest = observation.apply(target)
+                changed = (any(getattr(target, key) != getattr(latest, key) for key in _CONTENT_FIELDS)
+                           or any(str(target.meta.get(key, '')) != str(latest.meta.get(key, ''))
+                                  for key in ('to', 'cc')))
+                if changed:
+                    if now is None:
+                        raise ValueError('content updates require an observation time')
+                    self._conn.execute(
+                        'UPDATE items SET title = ?, summary = ?, content = ?, author = ?, url = ?, published = ?,'
+                        ' fingerprint = ?, meta = ?, updated_at = ?, content_revision = content_revision + 1 WHERE id = ?',
+                        (latest.title, latest.summary, latest.content, latest.author, latest.url, to_iso(latest.published),
+                         latest.fingerprint, json.dumps(latest.meta, ensure_ascii=False), to_iso(now), target.id))
+                    self._conn.execute('DELETE FROM evaluations WHERE item_id = ?', (target.id,))
+                    updated += 1
+                elif latest.meta != target.meta:
+                    self._conn.execute('UPDATE items SET meta = ? WHERE id = ?',
+                                       (json.dumps(latest.meta, ensure_ascii=False), target.id))
+                continue
+            candidate = observation.apply(it) if observation is not None else it
+            if observation is not None and not candidate.title:
+                continue  # unknown partial identities do not reserve a later valid candidate
+            duplicate = self._is_duplicate(candidate)
+            if not duplicate and title_since is not None and candidate.identity_policy == 'standard':
+                kept, _ = split_similar([candidate], titles)
+                duplicate = not kept
+            if duplicate:
+                if candidate.identity_policy == 'standard' and candidate.kind != 'email':
+                    self._conn.execute('INSERT OR IGNORE INTO suppressed_items VALUES (?, ?)',
+                                       (source_id, candidate.external_id))
+                continue
+            self._insert_item(candidate)
+            new.append(candidate.id)
+            seen_targets.add(candidate.id)
+            if candidate.identity_policy == 'standard':
+                titles.append(candidate.title)
+        # Record Web observations only after resolution; recording them before
+        # classification would mistake this batch's fresh identities for old
+        # observation-only entries. No fetch behaviour is changed here.
+        self._conn.executemany('INSERT OR IGNORE INTO source_seen_ids VALUES (?, ?)',
+            [(source_id, it.external_id) for it in items if it.kind == 'web' and it.identity_policy == 'standard'])
+        self._conn.execute(
+            "INSERT INTO source_state (source_id, total_items) VALUES (?, ?)"
+            " ON CONFLICT (source_id) DO UPDATE SET total_items = total_items + excluded.total_items",
+            (source_id, len(new)))
+        return ItemWriteResult(new, updated, len(items) - len(new) - updated)
+
+    def _insert_item(self, it: Item) -> None:
+        self._conn.execute(
+            f"INSERT INTO items ({_ITEM_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (it.id, it.source_id, it.kind, it.external_id, it.url, it.title, it.author,
+             it.summary, it.content, to_iso(it.published), to_iso(it.fetched_at),
+             it.fingerprint, json.dumps(it.meta, ensure_ascii=False), it.identity_policy, None, 1))
 
     # 三条规则各走自己的索引；合成一个 OR 查询会退化为全表扫描
     _SUPPRESSED = "SELECT 1 FROM suppressed_items WHERE source_id = ? AND external_id = ?"

@@ -30,7 +30,8 @@ async def fetch_source(spec: SourceSpec, operation: RunOperation, *, store: Stor
     """
     ctx = FetchContext(http=http, now=operation.started_at, imap_factory=imap_factory, timezone=timezone,
                        seen_links=lambda urls: store.seen_links(spec.id, urls), models=models,
-                       metrics=operation.metrics)
+                       metrics=operation.metrics,
+                       classify_links=lambda urls: store.classify_links(spec.id, urls))
     state = await run_store_call(store.get_source_state, spec.id)
     source = build_source(spec)
     result = await source.fetch(state.cursor, ctx)

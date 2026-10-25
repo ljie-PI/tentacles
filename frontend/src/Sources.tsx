@@ -10,7 +10,7 @@ export default function Sources() {
   const fetch = useMutation({
     mutationFn: (id: string) => api('/api/sources/{source_id}/fetch', 'post', { path: { source_id: id } }),
     onSettled: async () => {
-      await Promise.all(['sources', 'items', 'runs', 'scheduler'].map(key => client.invalidateQueries({ queryKey: [key] })))
+      await Promise.all(['sources', 'items', 'item', 'pipelines', 'runs', 'scheduler'].map(key => client.invalidateQueries({ queryKey: [key] })))
     },
   })
   return <>

@@ -37,7 +37,7 @@ publication is not crash-atomic.
 Source adapters may return typed `ItemObservation` values alongside Items.
 Only fields explicitly set on an observation may overwrite stored fields;
 explicit null clears, unset preserves. Stable external identity is declared,
-not inferred from a fallback URL/fingerprint. Only opted-in RSS currently emits
+not inferred from a fallback URL/fingerprint. Opted-in RSS and Web list emit
 these observations. Store owns target resolution, full downstream-field
 comparison, content revision and evaluation invalidation in its write transaction.
 Feed format determines body provenance: Atom summaries never replace missing
@@ -48,16 +48,41 @@ without `href`, as produced by RSS `<link/>`, is an explicitly empty URL.
 Stable-ID entries without a title may update known Items (missing title
 preserves; explicit empty/null clears), but cannot insert untitled Items.
 FetchResult carries observations in entry order, not collapsed by identity.
-Store reserves an identity only after resolving a valid update or insertion
+Store first resolves a same-source stable external identity (including persisted
+aliases), then a unique same-source standard Item by an actually observed,
+normalized URL. Fingerprints and similar titles remain insertion deduplication,
+never update identity. Suppressed and observation-only identities cannot acquire
+an update target; new dedup losers remain suppressed. Identity/URL disagreement,
+ambiguous same-source URLs and a target URL occupied by another standard Item
+raise Conflict inside the batch transaction. Alias mappings retain the original
+Item's external identity; they are not historical snapshots.
+Store reserves a canonical target only after resolving a valid update or insertion
 candidate, so an unknown untitled entry cannot suppress a later valid entry or
-lend it the wrong fields. Target resolution, first-valid selection and the
-insertion check share Store's fence. Standalone Store callers may still supply
+lend it the wrong fields. Every target takes only its first valid observation,
+even when multiple aliases arrive or the first observation is unchanged.
+Target resolution, alias persistence, first-valid selection and insertion checks
+share Store's fence. Standard non-email Items alone participate in updates;
+revision/page and email identities retain their insertion policy.
+Standalone Store callers may still supply
 the identity-keyed observation map for batches without distinct same-ID fields.
 `RunWriter.upsert_items` shares that implementation so batch writes, source cursor,
 counts and Run completion commit together. Counts-only metadata is not content;
 the `to`/`cc` fields used by summarize do participate in content comparison.
 
-Schema 12 preserves existing rows with revision 1 and null content-update time.
+Web list and llm share `WebSource._classify_links` and `_details`. The opt-in
+classification callback uses `Store.classify_links`: `refresh` requires this
+source's stored standard external identity; suppression wins, observations alone
+and other sources' article URLs are `skip`, otherwise `new`. Refresh outranks the
+bounded seen cache, but a cache entry alone never authorizes refresh. These reads
+only avoid unnecessary HTTP requests; Store still resolves writes under its
+fence. Web llm's update flag remains rejected pending its descriptor-cache slice.
+Selectors preserve node/attribute presence in `ItemObservation`; list excerpts
+are never body observations. Only a successful detail parse supplies full
+`content`, and all details finish before publication. No descriptor or full-body
+cache is added here, and no historical URLs are revisited.
+
+Schema 13 adds source-scoped alias mappings without changing existing identities;
+schema 12 preserves existing rows with revision 1 and null content-update time.
 Pipeline activity is `COALESCE(updated_at, fetched_at)` with expression indexes;
 the Feed deliberately retains `COALESCE(published, fetched_at)`. Filter captures
 the input revision before scoring, and evaluation/report publication validates it
