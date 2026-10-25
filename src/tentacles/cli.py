@@ -33,6 +33,7 @@ from typer.core import TyperGroup
 
 from tentacles.errors import ConfigError, TentaclesError, exit_code
 from tentacles.service import TentaclesService
+from tentacles.personas.models import PersonaProposal
 
 # 与 click 布尔参数的环境变量取值保持一致
 _TRUTHY = {"1", "true", "t", "yes", "y", "on"}
@@ -127,14 +128,14 @@ TimeFmt = Callable[[Optional[datetime]], str]
 
 
 def _run(ctx: typer.Context, op: Callable[[TentaclesService], Awaitable[Any] | Any],
-         render: Callable[[Any, Console, TimeFmt], None]) -> None:
+         render: Callable[[Any, Console, TimeFmt], None], *, snapshot: bool = False) -> None:
     """Open the service, run one operation, print its result, map errors to exit codes."""
     state: State = ctx.obj
 
     tz: list[ZoneInfo] = []
 
     async def go() -> Any:
-        svc = TentaclesService.open(state.config, transport=state.transport)
+        svc = TentaclesService.open(state.config, transport=state.transport, snapshot=snapshot)
         tz.append(ZoneInfo(svc.config.app.timezone))  # 人类可读输出按配置的时区展示时间
         try:
             result = op(svc)
@@ -207,9 +208,10 @@ def _render_pipeline(result, out: Console, when: TimeFmt) -> None:
 
 @pipelines_app.command("filter")
 def pipelines_filter(ctx: typer.Context, pipeline_id: str = typer.Argument(...),
-                     reevaluate: bool = typer.Option(False, help="删除窗口内当前版本的评估，再重新过滤")) -> None:
+                     reevaluate: bool = typer.Option(False, help="删除窗口内当前版本的评估，再重新过滤"),
+                     since: Optional[str] = typer.Option(None, help="覆盖 pipeline 窗口起点；时长或 ISO 时间，须配合 --reevaluate")) -> None:
     """只过滤，不调用报告处理器。"""
-    _run(ctx, lambda s: s.filter_pipeline(pipeline_id, reevaluate=reevaluate), _render_pipeline)
+    _run(ctx, lambda s: s.filter_pipeline(pipeline_id, reevaluate=reevaluate, since=since), _render_pipeline)
 
 
 @pipelines_app.command("run")
@@ -309,6 +311,46 @@ def persona_set(
         return service.set_persona(name, profile=profile, include_add=include, include_remove=remove_include,
                                    exclude_add=exclude, exclude_remove=remove_exclude,
                                    note=note, skip_tags=skip_tags)
+    _run(ctx, apply, _render_persona)
+
+
+def _render_evolution(result, out: Console, when: TimeFmt) -> None:
+    if not isinstance(result, PersonaProposal):
+        _render_persona(result, out, when)
+        return
+    out.print(Text(f"{result.name} · base v{result.base_version} · {result.feedback_count} feedback", style="bold"))
+    out.print(Text(result.summary))
+    diff = Text()
+    for index, line in enumerate(result.diff.splitlines(keepends=True)):
+        style = ('bold cyan' if index < 2 or line.startswith('@@ ') else
+                 'green' if line.startswith('+') else 'red' if line.startswith('-') else '')
+        diff.append(line, style=style)
+    out.print(diff)
+    out.print(Text(f"include: {', '.join(result.include)}\nexclude: {', '.join(result.exclude)}"))
+    out.print(_table("Proposed tags", ["tag", "description"],
+                     [[tag.tag, tag.description] for tag in result.tags]))
+
+
+@persona_app.command("evolve")
+def persona_evolve(ctx: typer.Context, name: str = typer.Argument('default'),
+                   instruction: str = typer.Option('', help="一句话指令；也可只使用近期反馈"),
+                   dry_run: bool = typer.Option(False, help="只返回提案，不写库；模型调用可能产生费用")) -> None:
+    """根据指令和/或反馈改写 persona；默认直接应用，--dry-run 仅预览。"""
+    _run(ctx, lambda s: s.evolve_persona(name, instruction=instruction, dry_run=dry_run),
+         _render_evolution, snapshot=dry_run)
+
+
+@persona_app.command("apply")
+def persona_apply(ctx: typer.Context,
+                  proposal: Path = typer.Option(..., help="UTF-8 JSON 提案文件；- 从标准输入读取")) -> None:
+    """应用提案；基准版本过期返回 conflict，不会覆盖其他修改。"""
+    def apply(service: TentaclesService):
+        try:
+            text = sys.stdin.read() if proposal == Path('-') else proposal.read_text(encoding='utf-8')
+            value = json.loads(text)
+        except (OSError, UnicodeError, ValueError):
+            raise ConfigError('cannot read a valid UTF-8 JSON proposal') from None
+        return service.apply_persona(value)
     _run(ctx, apply, _render_persona)
 
 
@@ -424,6 +466,20 @@ def items_show(ctx: typer.Context, item_id: str = typer.Argument(..., help="条�
         out.print(f"{d.source_id} · {when(d.published or d.fetched_at)} · {d.url}\n", markup=False)
         out.print(d.content or d.summary, markup=False)
     _run(ctx, lambda s: s.get_item(item_id), render)
+
+
+@app.command("feedback")
+def feedback(ctx: typer.Context, item_id: str = typer.Argument(...),
+             like: bool = typer.Option(False, "--like"), dislike: bool = typer.Option(False, "--dislike"),
+             persona: Optional[str] = typer.Option(None), note: str = typer.Option('')) -> None:
+    """对条目点赞或点踩，并可附备注。"""
+    def submit(service: TentaclesService):
+        if like == dislike:
+            raise ConfigError('choose exactly one of --like or --dislike')
+        return service.submit_feedback(item_id, rating=1 if like else -1, persona=persona, note=note)
+    _run(ctx, submit, lambda result, out, when: out.print(_table(
+        "Feedback", ["item", "persona", "rating", "note"],
+        [[result.item_id, result.persona, result.rating, result.note]])))
 
 
 # ---- runs -------------------------------------------------------------------

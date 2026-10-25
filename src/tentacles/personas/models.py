@@ -9,6 +9,8 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from tentacles.errors import ConfigError
+from tentacles.timeutil import parse_duration
+from tentacles.llm.types import UsageRecord
 
 PersonaSource = Literal['seed', 'manual', 'llm', 'rollback']
 TagStatus = Literal['ok', 'error', 'skipped', 'unchanged']
@@ -102,3 +104,77 @@ class PersonaEdit:
     expected_version: int | None = None
     run_stats: dict[str, Any] = field(default_factory=dict)
     cost: float | None = None
+
+    def record_completion(self, result: UsageRecord) -> None:
+        self.run_stats['usage'] = result.usage.model_dump()
+        self.run_stats['actual_model'] = result.model
+        self.cost = result.cost
+
+
+class FeedbackView(BaseModel):
+    id: int
+    item_id: str
+    persona: str
+    rating: Literal[-1, 1]
+    note: str = ''
+    created_at: datetime
+
+
+class EvolutionContent(BaseModel):
+    """Validated model output, also used at the untrusted proposal-file boundary."""
+    model_config = ConfigDict(extra='forbid')
+    profile: str = Field(min_length=1, max_length=50000)
+    tags: list[InterestTag] = Field(min_length=5, max_length=20)
+    include: list[str] = Field(max_length=100)
+    exclude: list[str] = Field(max_length=100)
+    summary: str = Field(min_length=1, max_length=2000)
+
+    def check_profile_length(self, limit: int) -> None:
+        if len(self.profile) > limit:
+            raise ValueError('evolved profile exceeds the configured length limit')
+
+    @field_validator('profile', 'summary')
+    @classmethod
+    def _nonblank(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError('evolved profile and summary must not be blank')
+        return value
+
+    @field_validator('tags')
+    @classmethod
+    def _unique_tags(cls, values: list[InterestTag]) -> list[InterestTag]:
+        names = [tag.tag.casefold() for tag in values]
+        if len(names) != len(set(names)):
+            raise ValueError('duplicate interest tags')
+        if any(len(tag.tag) > 128 or len(tag.description) > 2000 for tag in values):
+            raise ValueError('interest tags are too long')
+        return values
+
+    @field_validator('include', 'exclude')
+    @classmethod
+    def _bounded_keywords(cls, values: list[str]) -> list[str]:
+        values = keywords(values)
+        if any(len(value) > 256 for value in values):
+            raise ValueError('keywords are too long')
+        return values
+
+
+class PersonaProposal(EvolutionContent):
+    name: str
+    base_version: int = Field(ge=1, strict=True)
+    diff: str
+    feedback_count: int = Field(ge=0, strict=True)
+
+
+class PersonaUpdate(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    feedback_window: str = '30d'
+    max_feedback: int = Field(default=100, ge=1, le=1000, strict=True)
+    max_profile_chars: int = Field(default=12000, ge=1, le=50000, strict=True)
+
+    @field_validator('feedback_window')
+    @classmethod
+    def _window(cls, value: str) -> str:
+        if parse_duration(value).total_seconds() <= 0:
+            raise ValueError('feedback window must be positive')
+        return value.strip()

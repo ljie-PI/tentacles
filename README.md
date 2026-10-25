@@ -33,6 +33,9 @@ tentacles items list --since 24h  # 查看最近 24 小时的条目
 | `tentacles models test NAME` | 实际调用模型，返回可用性、延迟、样例和用量 |
 | `tentacles persona list/show/history/export` | 查看 Persona、版本历史或导出完整 YAML 快照 |
 | `tentacles persona set NAME` | 从文本/文件/stdin 修改 profile 和关键词，可跳过标签抽取 |
+| `tentacles persona evolve [NAME] --instruction TEXT [--dry-run]` | 用指令和/或反馈演化 Persona，预览模式不写库 |
+| `tentacles persona apply --proposal FILE\|-` | 应用 JSON 提案，过期时返回 conflict |
+| `tentacles feedback ITEM_ID --like/--dislike` | 点赞/点踩，可指定 `--persona` 和 `--note` |
 | `tentacles persona rollback NAME VERSION` | 复制旧内容为新版本，不删除历史 |
 | `tentacles sources list` | 列出信息源及其抓取状态 |
 | `tentacles sources fetch [ID...]` | 立即抓取信息源，不写 ID 时抓取全部启用的源 |
@@ -85,6 +88,38 @@ tentacles persona export default > default-snapshot.yaml
 关键词去重/删除不区分大小写（Unicode casefold），保留最早的拼写和顺序。
 每次编辑写成新版本；回滚同样追加版本。并发的纯关键词编辑会合并。提供 profile 且未跳过标签时，
 若提交前 persona 已被修改（包括内容相同的快捷路径），旧请求返回 `conflict`，请刷新后重试。导出的是完整版本快照，不是只有 profile 的文本，也不会直接覆盖任何文件。
+
+## 点踩 → 提案 → 应用
+
+```sh
+tentacles feedback ITEM_ID --dislike --note "减少无依据的炒作"
+tentacles --json persona evolve default --instruction "多关注机器人" --dry-run > proposal.json
+cat proposal.json                            # 检查 summary、diff、标签与关键词
+tentacles --json persona apply --proposal proposal.json
+# 已确认可以直接应用时，也可以通过 JSON 管道：
+tentacles --json persona evolve default --instruction "多关注机器人" --dry-run | tentacles --json persona apply --proposal -
+tentacles pipelines filter daily-tech --reevaluate --since 7d
+```
+
+`feedback` 未指定 persona 时，只有一个就使用它，否则使用 `default`；未知条目或 persona 返回 `not_found`。
+`evolve` 的名称默认 `default`，至少需要非空指令或有效反馈之一；不加 `--dry-run` **直接应用**。
+模型使用 `defaults.models.persona`（示例设为 `max`），尊重已有配置，不会擅自升级模型。
+预览仍会调用模型并可能产生费用，但不创建版本、运行记录或任何数据库写入。
+CLI 预览在内存中的数据库快照运行，迁移、种子导入和调度初始化的改动仅保存在内存，
+不更新原库的 schema 或数据。读取既有 WAL 数据库时，SQLite 可能创建或更新 `-wal` / `-shm`
+协调文件；这些文件可能正被其他进程使用，预览不会主动删除它们。没有原库时不会创建数据目录。
+应用不再次调用模型；基准版本已被其他修改替换时返回 `conflict`，请刷新并重新生成提案。
+成功应用追加 `source=llm` 的新版本，备注是变更摘要；无效模型输出不会修改 persona。
+
+`persona_update` 可配置 `feedback_window`（默认 `30d`）、`max_feedback`（默认 100，范围 1–1000）
+和 `max_profile_chars`（默认 12000，上限 50000）。仅选窗口内、不在未来、严格晚于最近 LLM
+版本创建时间的反馈，按时间与 id 倒序取上限条数；手动编辑或回滚不会重置这个界线。
+反馈条目标题、摘要与备注作为有界的证据传入，不视为指令。演化保留结构、优先级与旧标签名，
+严格执行指令，不因单条反馈过度泛化；返回的新 profile、5–20 个标签、关键词和摘要均会校验。
+
+`--since` 只可用于 `--reevaluate`，接受时长或 ISO 时间，覆盖 pipeline 的默认窗口起点
+（按条目**抓取时间**选取，截止当前时间）。仅清除该 pipeline 当前 persona 版本在窗口内的评估；
+不会清除旧版本评估或消费账本，因此重新打分或 persona 改版也不会重复报告已消费的条目。
 
 ## Keyword 过滤与 digest 日报
 

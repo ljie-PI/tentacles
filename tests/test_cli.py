@@ -312,3 +312,117 @@ def test_tick_contract_includes_pipeline_kinds_and_scheduler_pending_counts(cli,
     other_path = write_config(other, name='other.yaml')
     human = cli('tick', config=other_path, json_mode=False)
     assert human.exit_code == 0 and 'other' in human.stdout and 'filter' in human.stdout
+
+
+def test_feedback_evolve_preview_apply_pipe_contract(write_config, web, tmp_path):
+    from test_models import CHAT_URL, chat_reply, model_config
+    from test_pipelines import pipeline_config
+    from test_persona_evolution import evolved_content
+    config = {**pipeline_config(), **model_config()}
+    path = write_config(config)
+    runner = CliRunner()
+
+    def run(*args, input=None, json_mode=True):
+        return runner.invoke(app, ['-c', str(path), *(['--json'] if json_mode else []), *args],
+                             obj={'transport': web.transport()}, input=input, env={})
+
+    web.serve(FEED, rss_feed({'guid': 'one', 'title': 'AI research'}))
+    web.serve(CHAT_URL, json.dumps(chat_reply(json.dumps(evolved_content()))),
+              headers={'content-type': 'application/json'})
+    assert run('sources', 'fetch').exit_code == 0
+    item_id = payload(run('items', 'list'))['items'][0]['id']
+    result = run('feedback', item_id, '--dislike', '--note', 'Less hype')
+    assert result.exit_code == 0 and payload(result)['rating'] == -1
+    assert payload(result)['persona'] == 'default'
+    for flags in [[], ['--like', '--dislike']]:
+        result = run('feedback', item_id, *flags)
+        assert result.exit_code == 2 and payload(result)['error']['code'] == 'invalid'
+    missing = run('feedback', 'missing', '--like')
+    assert missing.exit_code == 3 and payload(missing)['error']['code'] == 'not_found'
+    preview = run('persona', 'evolve', 'default', '--instruction', 'More robotics', '--dry-run')
+    assert preview.exit_code == 0
+    assert payload(preview)['base_version'] == 1 and payload(preview)['feedback_count'] == 1
+    applied = run('persona', 'apply', '--proposal', '-', input=preview.stdout)
+    assert applied.exit_code == 0 and payload(applied)['source'] == 'llm'
+    stale = run('persona', 'apply', '--proposal', '-', input=preview.stdout)
+    assert stale.exit_code == 4 and payload(stale)['error']['code'] == 'conflict'
+    invalid = run('persona', 'apply', '--proposal', '-', input='not json')
+    assert invalid.exit_code == 2 and payload(invalid)['error']['code'] == 'invalid'
+    invalid = run('persona', 'apply', '--proposal', str(tmp_path / 'missing.json'))
+    assert invalid.exit_code == 2 and payload(invalid)['error']['code'] == 'invalid'
+    updated = run('persona', 'evolve', '--instruction', 'More robotics')
+    assert updated.exit_code == 0 and payload(updated)['source'] == 'llm'
+    # UTF-8 proposal files and human rendering also work.
+    preview = run('persona', 'evolve', '--instruction', 'More robotics', '--dry-run')
+    proposal_file = tmp_path / 'proposal.json'
+    proposal_file.write_text(preview.stdout, encoding='utf-8')
+    applied = run('persona', 'apply', '--proposal', str(proposal_file))
+    assert applied.exit_code == 0 and payload(applied)['version'] == 4
+    human = run('persona', 'evolve', '--instruction', 'More robotics', '--dry-run', json_mode=False)
+    assert human.exit_code == 0 and 'Strengthen robotics' in human.stdout
+    reevaluated = run('pipelines', 'filter', 'daily', '--reevaluate', '--since', '24h')
+    assert reevaluated.exit_code == 0 and payload(reevaluated)['stats']['evaluated'] == 1
+
+
+@pytest.mark.parametrize('existing', [False, True])
+@pytest.mark.parametrize('instruction', ['Update', ''])
+def test_evolution_dry_run_never_persists_service_initialization(write_config, web, tmp_path, existing, instruction):
+    import asyncio
+    from test_models import CHAT_URL, chat_reply, model_config
+    from test_persona_evolution import evolved_content
+    from tentacles.service import TentaclesService
+
+    original = {**model_config(), 'personas': {'default': {'profile': 'Original'}}}
+    path = write_config(original)
+    if existing:
+        service = TentaclesService.open(path, env={})
+        asyncio.run(service.set_persona('default', profile='Stored version', skip_tags=True))
+        asyncio.run(service.aclose())
+    changed = {**original, 'personas': {**original['personas'], 'new-persona': {'profile': 'New seed'}}}
+    write_config(changed)
+    web.serve(CHAT_URL, json.dumps(chat_reply(json.dumps(evolved_content()))),
+              headers={'content-type': 'application/json'})
+    result = CliRunner().invoke(app, ['-c', str(path), '--json', 'persona', 'evolve', 'default',
+                                      '--instruction', instruction, '--dry-run'],
+                                obj={'transport': web.transport()}, env={})
+    assert result.exit_code == (0 if instruction else 2)
+    if instruction:
+        assert payload(result)['base_version'] == (2 if existing else 1)
+    else:
+        assert payload(result)['error']['code'] == 'invalid'
+    if not existing:
+        assert not (tmp_path / 'data').exists()
+    write_config(original)
+    service = TentaclesService.open(path, env={})
+    try:
+        assert [p.name for p in service.list_personas()] == ['default']
+        assert service.get_persona('default').profile == ('Stored version' if existing else 'Original')
+        assert len(service.persona_history('default')) == (2 if existing else 1)
+    finally:
+        asyncio.run(service.aclose())
+
+
+@pytest.mark.parametrize(('profile', 'proposed', 'removed', 'added'), [
+    ('Original profile', 'AI and robotics first', '-Original profile', '+AI and robotics first'),
+    ('-- old rule', '++ new rule', '--- old rule', '+++ new rule'),
+])
+def test_evolution_human_diff_is_colored_while_json_stays_plain(write_config, web, profile, proposed, removed, added):
+    from test_models import CHAT_URL, chat_reply, model_config
+    from test_persona_evolution import evolved_content
+    path = write_config({**model_config(), 'personas': {'default': {'profile': profile}}})
+    web.serve(CHAT_URL, json.dumps(chat_reply(json.dumps(evolved_content(profile=proposed)))),
+              headers={'content-type': 'application/json'})
+    runner = CliRunner()
+    args = ['-c', str(path), 'persona', 'evolve', '--instruction', 'More robotics', '--dry-run']
+    result = runner.invoke(app, args, obj={'transport': web.transport()}, color=True,
+                           env={'FORCE_COLOR': '1', 'TERM': 'xterm-256color', 'NO_COLOR': None})
+    assert result.exit_code == 0
+    assert '\x1b[31m' + removed in result.stdout
+    assert '\x1b[32m' + added in result.stdout
+    no_color = runner.invoke(app, args, obj={'transport': web.transport()}, color=True,
+                              env={'FORCE_COLOR': '1', 'NO_COLOR': '1'})
+    assert no_color.exit_code == 0 and '\x1b[31m' not in no_color.stdout and '\x1b[32m' not in no_color.stdout
+    result = runner.invoke(app, ['--json', *args], obj={'transport': web.transport()}, color=True,
+                           env={'FORCE_COLOR': '1', 'TERM': 'xterm-256color', 'NO_COLOR': None})
+    assert result.exit_code == 0 and '\x1b[' not in result.stdout
+    assert payload(result)['base_version'] == 1

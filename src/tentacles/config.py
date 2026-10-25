@@ -21,7 +21,7 @@ from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, ValidationError,
 from tentacles.errors import ConfigError, NotFound
 from tentacles.schedule import Schedule
 from tentacles.llm.config import Defaults, ModelSpec, STAGES
-from tentacles.personas.models import PersonaSeed, persona_name
+from tentacles.personas.models import PersonaSeed, PersonaUpdate, persona_name
 from tentacles.pipelines.config import PipelineSpec
 
 DEFAULT_CONFIG = Path("config") / "tentacles.yaml"
@@ -77,6 +77,7 @@ class AppConfig(BaseModel):
     defaults: Defaults = Field(default_factory=Defaults)
     personas: dict[str, PersonaSeed] = Field(default_factory=dict)
     pipelines: list[PipelineSpec] = Field(default_factory=list)
+    persona_update: PersonaUpdate = Field(default_factory=PersonaUpdate)
 
     _path: Path = PrivateAttr(default=Path(DEFAULT_CONFIG))
 
