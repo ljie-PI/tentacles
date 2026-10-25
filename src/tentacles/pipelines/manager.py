@@ -15,7 +15,7 @@ from tentacles.pipelines.filtering import filter_items, filter_stats
 from tentacles.pipelines.models import PipelineOutcome, PipelineQuery, FilterBatch
 from tentacles.pipelines.registry import PROCESSORS
 from tentacles.runs import RunLifecycle, RunOperation, RunResult
-from tentacles.store import Store
+from tentacles.store import RunWriter, Store
 from tentacles.tasks import Task
 from tentacles.timeutil import parse_duration, to_utc
 
@@ -97,15 +97,21 @@ class PipelineManager:
             op.stats['processor_candidates'] = len(selected)
             if not selected:
                 op.stats['no_new'] = True
-                await op.commit(lambda writer: writer.save_reports([], []))
+                await op.commit(lambda writer: None)
                 return
             evaluations = [evaluation for _, evaluation in selected]
             op.stats['consumed'] = 0
-            reports = await PROCESSORS[spec.processor.type].process(
+            drafts = await PROCESSORS[spec.processor.type].process(
                 self._config, spec, persona, selected, self._models, self._clock, op.metrics.record)
 
-            await op.commit(lambda writer: writer.save_reports(reports, evaluations),
-                            stats={'consumed': len(selected), 'report_ids': [r.id for r in reports]})
+            # Failed SQL/commit must not leak allocated IDs into failure stats.
+            publication_stats = {'consumed': len(selected), 'report_ids': []}
+
+            def publish(writer: RunWriter) -> None:
+                reports = writer.save_reports(drafts, evaluations, reports_dir=self._config.reports_dir)
+                publication_stats['report_ids'] = [report.id for report in reports]
+
+            await op.commit(publish, stats=publication_stats)
         result = await self._runs.execute(self._task('pipeline', spec.id), work, due_only=due_only,
                                          failure_message='pipeline operation failed')
         return self._outcome(spec, result)

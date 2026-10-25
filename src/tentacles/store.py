@@ -21,7 +21,8 @@ from tentacles.errors import Conflict
 from tentacles.personas.models import FeedbackView, PersonaEdit, PersonaView, edit_keywords, keywords
 from tentacles.timeutil import from_iso, to_iso, to_utc
 from tentacles.tasks import Claim, Task, TaskState
-from tentacles.pipelines.models import Evaluation, PipelineQuery, ReportView
+from tentacles.pipelines.models import Evaluation, PipelineQuery, ReportDraft, ReportView
+from tentacles.pipelines.report_path import new_report_location
 
 log = logging.getLogger(__name__)
 
@@ -898,11 +899,19 @@ class RunWriter:
                  json.dumps([s.model_dump() for s in evaluation.stage_scores], ensure_ascii=False),
                  to_iso(evaluation.evaluated_at), evaluation.pipeline_id, evaluation.item_id))
 
-    def save_reports(self, reports: list[ReportView], evaluations: list[Evaluation]) -> None:
-        """An empty report batch still consumes all selected evaluations."""
+    def save_reports(self, drafts: list[ReportDraft], evaluations: list[Evaluation], *,
+                     reports_dir: Path) -> list[ReportView]:
+        """Allocate and publish a complete draft batch in the fenced transaction.
+
+        An empty batch still consumes all selected evaluations. The returned
+        views are final only if the enclosing commit succeeds.
+        """
         self._store._check_pending(evaluations)
-        for report in reports:
-            path = Path(report.path)
+        reports = []
+        for draft in drafts:
+            report_id, path = new_report_location(
+                reports_dir, draft.pipeline_id, draft.kind, draft.title, draft.created_at)
+            report = ReportView(id=report_id, path=str(path), **draft.model_dump())
             path.parent.mkdir(parents=True, exist_ok=True)
             with open(path, 'x', encoding='utf-8',
                       opener=lambda target, flags: os.open(target, flags, 0o600)) as handle:
@@ -914,7 +923,9 @@ class RunWriter:
                 (report.id, report.pipeline_id, report.persona_version, report.kind, report.title,
                  report.markdown, json.dumps(report.item_ids), report.model,
                  report.usage.model_dump_json(), report.cost, report.path, to_iso(report.created_at)))
+            reports.append(report)
         self._store._consume(evaluations, self._now, reports)
+        return reports
 
 
 def _row_to_item(r: sqlite3.Row) -> Item:

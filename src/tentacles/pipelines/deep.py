@@ -14,8 +14,7 @@ from tentacles.personas.models import PersonaView
 from tentacles.personas.render import render_persona
 from tentacles.pipelines.adapters import ModelRequirement
 from tentacles.pipelines.config import PipelineSpec
-from tentacles.pipelines.models import Evaluation, ReportView
-from tentacles.pipelines.report_path import new_report_location
+from tentacles.pipelines.models import Evaluation, ReportDraft
 from tentacles.pipelines.report_writing import complete_report, require_citations
 from tentacles.prompts import load_prompt
 from tentacles.schemas import Completion
@@ -32,7 +31,7 @@ _SYSTEM = '''你是一名 investigative 风格的深度报道记者。你会拿�
 
 async def make_deep(config: AppConfig, spec: PipelineSpec, persona: PersonaView,
                     selected: list[tuple[Item, Evaluation]], models: ModelRegistry,
-                    clock: Callable[[], datetime], on_completion: Callable[[Completion], None]) -> list[ReportView]:
+                    clock: Callable[[], datetime], on_completion: Callable[[Completion], None]) -> list[ReportDraft]:
     events = [event for event in cluster_articles([item for item, _ in selected])
               if event.size >= spec.processor.min_cluster_size][:spec.processor.max_reports]
     if not events:
@@ -65,10 +64,9 @@ async def make_deep(config: AppConfig, spec: PipelineSpec, persona: PersonaView,
         appendix = '\n'.join(f'[来源{item["number"]}] {item["source"]}: {item["title"]} {item["url"]}' for item in items)
         markdown = models.redact(f'# {title}\n\n> 基于来自 {len(event.sources)} 个来源的 {event.size} 篇文章。\n\n'
                                  f'---\n\n{content}\n\n## Sources\n\n{appendix}\n')
-        report_id, path = new_report_location(config, spec.id, 'deep', title, now)
-        reports.append(ReportView(id=report_id, pipeline_id=spec.id, persona_version=persona.version, kind='deep',
+        reports.append(ReportDraft(pipeline_id=spec.id, persona_version=persona.version, kind='deep',
             title=title, markdown=markdown, item_ids=[item.id for item in event.members], model=result.model,
-            usage=result.usage, cost=result.cost, path=str(path), created_at=now))
+            usage=result.usage, cost=result.cost, created_at=now))
     return reports
 
 
