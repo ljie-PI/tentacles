@@ -12,7 +12,7 @@ import httpx
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from tentacles.errors import UpstreamError
-from tentacles.models import Item
+from tentacles.models import Item, ItemObservation
 from tentacles.sources.base import FetchContext, FetchResult, Source, register
 from tentacles.text import html_to_text, truncate
 
@@ -53,10 +53,13 @@ def _entry_published(entry) -> datetime | None:
     return None
 
 
-def entry_to_item(entry, source_id: str) -> Item | None:
+def entry_to_item(entry, source_id: str, *, allow_partial: bool = False) -> Item | None:
     link = (entry.get("link") or "").strip()
     title = (entry.get("title") or "").strip()
-    if not title or not (link or entry.get("id")):
+    # Opted-in stable identities may carry updates without a usable new-item
+    # title. Store resolves them under its write lock and rejects unknown ones.
+    partial = allow_partial and bool((entry.get("id") or "").strip())
+    if (not title and not partial) or not (link or entry.get("id")):
         return None
     content = entry.content[0].value if entry.get("content") else ""
     summary = entry.get("summary") or entry.get("description") or content
@@ -73,10 +76,47 @@ def entry_to_item(entry, source_id: str) -> Item | None:
     )
 
 
+def entry_observation(entry, item: Item, *, feed_version: str = "") -> ItemObservation:
+    """Presence comes from the parsed entry, never Item's default empty strings."""
+    fields: dict[str, Any] = {"stable_external_id": bool((entry.get("id") or "").strip())}
+    for name, key in (("title", "title"), ("author", "author")):
+        if key in entry:
+            fields[name] = getattr(item, name) if entry[key] is not None else None
+    # feedparser can synthesize entry.link from Atom id / RSS guid. Only
+    # actual alternate links are URL observations (including explicit empty).
+    alternates = [link for link in entry.get("links", []) or []
+                  if link.get("rel", "alternate") == "alternate"]
+    if alternates:
+        alternate = next((link for link in alternates if link.get("href", "") == entry.get("link")), alternates[0])
+        # RSS <link/> has an alternate record but no href. No alternate record
+        # means missing; a record with no href is an explicitly empty URL.
+        fields["url"] = alternate.get("href", "")
+    # Atom summaries are excerpts, whereas RSS descriptions supply the full
+    # description-backed body when no explicit content field was delivered.
+    summary_key = next((key for key in ("summary", "description") if key in entry), None)
+    if isinstance(entry, feedparser.FeedParserDict) and "summary_detail" not in entry:
+        summary_key = None  # feedparser also synthesizes summary from content
+    if summary_key is not None:
+        summary = entry[summary_key]
+        fields["summary"] = None if summary is None else truncate(html_to_text(summary), 2000)
+        if feed_version.startswith("rss") and "content" not in entry:
+            fields["content"] = None if summary is None else html_to_text(summary)
+    if "content" in entry:
+        body = entry["content"]
+        value = body[0].get("value") if body else None
+        fields["content"] = None if value is None else html_to_text(value)
+    if any(key in entry for key in ("published", "updated", "published_parsed", "updated_parsed")):
+        # Malformed nonempty dates are not successful observations.
+        if item.published is not None or not (entry.get("published") or entry.get("updated")):
+            fields["published"] = item.published
+    return ItemObservation(**fields)
+
+
 @register
 class RssSource(Source):
     type: ClassVar[str] = "rss"
     Options: ClassVar[Type[BaseModel]] = RssOptions
+    supports_updates: ClassVar[bool] = True
 
     async def fetch(self, cursor: dict[str, Any], ctx: FetchContext) -> FetchResult:
         opts = cast(RssOptions, self.options)
@@ -109,15 +149,18 @@ class RssSource(Source):
 
         cutoff = None if opts.max_age_days is None else ctx.now - timedelta(days=opts.max_age_days)
         items, too_old = [], 0
+        observations: list[ItemObservation] = []
         for entry in parsed.entries:
-            item = entry_to_item(entry, self.spec.id)
+            item = entry_to_item(entry, self.spec.id, allow_partial=self.spec.update_existing)
             if item is None:
                 continue
             if cutoff and item.published and item.published < cutoff:
                 too_old += 1
                 continue
             items.append(item)
+            if self.spec.update_existing:
+                observations.append(entry_observation(entry, item, feed_version=parsed.get("version", "")))
 
         new_cursor = {"url": opts.url, **{k: v for k, v in (
             ("etag", resp.headers.get("etag")), ("last_modified", resp.headers.get("last-modified"))) if v}}
-        return FetchResult(items, new_cursor, {"entries": len(parsed.entries), "too_old": too_old})
+        return FetchResult(items, new_cursor, {"entries": len(parsed.entries), "too_old": too_old}, observations)

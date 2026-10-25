@@ -458,6 +458,11 @@ export interface components {
              * Format: date-time
              */
             evaluated_at: string;
+            /**
+             * Input Revision
+             * @default 1
+             */
+            input_revision: number;
             /** Item Id */
             item_id: string;
             /** Passed */
@@ -527,6 +532,11 @@ export interface components {
              * @enum {string}
              */
             status: "ok" | "error" | "busy";
+            /**
+             * Updated
+             * @default 0
+             */
+            updated: number;
         };
         /** HTTPValidationError */
         HTTPValidationError: {
@@ -570,6 +580,8 @@ export interface components {
             fingerprint: string;
             /** Id */
             id: string;
+            /** Is Updated */
+            readonly is_updated: boolean;
             /**
              * Kind
              * @enum {string}
@@ -603,6 +615,8 @@ export interface components {
             tags?: string[];
             /** Title */
             title: string;
+            /** Updated At */
+            updated_at?: string | null;
             /** Url */
             url: string;
         };
@@ -632,6 +646,8 @@ export interface components {
             fetched_at: string;
             /** Id */
             id: string;
+            /** Is Updated */
+            readonly is_updated: boolean;
             /**
              * Kind
              * @enum {string}
@@ -661,6 +677,8 @@ export interface components {
             tags?: string[];
             /** Title */
             title: string;
+            /** Updated At */
+            updated_at?: string | null;
             /** Url */
             url: string;
         };
@@ -1110,6 +1128,11 @@ export interface components {
             status: "ok" | "error" | "busy" | "no_new";
             /** Target */
             target: string;
+            /**
+             * Updated
+             * @default 0
+             */
+            updated: number;
         };
         /** TokenUsage */
         TokenUsage: {

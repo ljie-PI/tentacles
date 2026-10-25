@@ -8,7 +8,7 @@ from datetime import datetime
 from typing import Any, Literal
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
-from pydantic import BaseModel, Field, ValidationInfo, field_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator
 
 from tentacles.timeutil import to_utc, utcnow
 
@@ -59,6 +59,8 @@ class Item(BaseModel):
     content: str = ""
     published: datetime | None = None
     fetched_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime | None = None
+    content_revision: int = Field(default=1, ge=1)
     fingerprint: str = ""
     meta: dict[str, Any] = Field(default_factory=dict)
 
@@ -69,7 +71,7 @@ class Item(BaseModel):
             return v.strip()
         return re.sub(r"\s+", " ", v).strip()
 
-    @field_validator("published", "fetched_at")
+    @field_validator("published", "fetched_at", "updated_at")
     @classmethod
     def _utc(cls, v: datetime | None) -> datetime | None:
         return None if v is None else to_utc(v)
@@ -83,3 +85,34 @@ class Item(BaseModel):
             self.external_id = self.url or self.fingerprint
         if not self.id:
             self.id = item_id(self.source_id, self.external_id)
+
+
+class ItemObservation(BaseModel):
+    """Successfully observed mutable fields, not a replacement Item.
+
+    Unset fields preserve stored values; explicit None clears them (empty text
+    for non-nullable Item strings). Identity is never inferred from these fields.
+    Metadata is merged by key and does not itself revise downstream content.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    stable_external_id: bool = False
+    title: str | None = None
+    url: str | None = None
+    author: str | None = None
+    summary: str | None = None
+    content: str | None = None
+    published: datetime | None = None
+    meta: dict[str, Any] | None = None
+
+    def apply(self, item: Item) -> Item:
+        data = item.model_dump()
+        changes = self.model_dump(exclude_unset=True, exclude={"stable_external_id"})
+        for name, value in changes.items():
+            if name == "meta":
+                data[name] = {} if value is None else {**item.meta, **value}
+            else:
+                data[name] = value if name == "published" else value or ""
+        data["fingerprint"] = ""
+        return Item.model_validate(data)

@@ -34,6 +34,37 @@ change the response shape. Store retains exception rollback and best-effort
 cleanup of only this transaction's newly created files; filesystem and SQLite
 publication is not crash-atomic.
 
+Source adapters may return typed `ItemObservation` values alongside Items.
+Only fields explicitly set on an observation may overwrite stored fields;
+explicit null clears, unset preserves. Stable external identity is declared,
+not inferred from a fallback URL/fingerprint. Only opted-in RSS currently emits
+these observations. Store owns target resolution, full downstream-field
+comparison, content revision and evaluation invalidation in its write transaction.
+Feed format determines body provenance: Atom summaries never replace missing
+content, while an RSS description supplies the complete description-backed body
+when explicit content is absent (only its summary is truncated). Feedparser's
+ID-derived `link` is not an observed alternate URL; an actual alternate record
+without `href`, as produced by RSS `<link/>`, is an explicitly empty URL.
+Stable-ID entries without a title may update known Items (missing title
+preserves; explicit empty/null clears), but cannot insert untitled Items.
+FetchResult carries observations in entry order, not collapsed by identity.
+Store reserves an identity only after resolving a valid update or insertion
+candidate, so an unknown untitled entry cannot suppress a later valid entry or
+lend it the wrong fields. Target resolution, first-valid selection and the
+insertion check share Store's fence. Standalone Store callers may still supply
+the identity-keyed observation map for batches without distinct same-ID fields.
+`RunWriter.upsert_items` shares that implementation so batch writes, source cursor,
+counts and Run completion commit together. Counts-only metadata is not content;
+the `to`/`cc` fields used by summarize do participate in content comparison.
+
+Schema 12 preserves existing rows with revision 1 and null content-update time.
+Pipeline activity is `COALESCE(updated_at, fetched_at)` with expression indexes;
+the Feed deliberately retains `COALESCE(published, fetched_at)`. Filter captures
+the input revision before scoring, and evaluation/report publication validates it
+under the same write lock as updates. Updates delete obsolete evaluations, not
+consumption, feedback or reports. Fresh evaluations inherit the pipeline's
+existing consumption marker even when they reject or accept the latest content.
+
 A temporary no-model Stage can replace an entry in `registry.STAGES` to exercise
 item-error forwarding, rejection/acceptance and batch aborts through the same
 `filter_items` interface; restore the entry after the check. No model client,

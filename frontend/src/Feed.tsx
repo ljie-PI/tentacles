@@ -9,6 +9,7 @@ import { useDisplayTime, type TimeFormatter } from './display-time'
 function ItemCard({ item, open, formatTime, persona, feedbackDisabled }: { item: Item; open: () => void; formatTime: TimeFormatter; persona: string; feedbackDisabled: boolean }) {
   return <article className="item-card">
     <div className="item-meta"><span className="source-dot" />{item.source_id}<span>·</span>{formatTime(item.published || item.fetched_at)}<span className="kind">{item.kind}</span></div>
+    {item.updated_at && <p className="muted small"><span className="tag">已更新</span> {formatTime(item.updated_at)}</p>}
     <h2><button className="text-button item-title" onClick={open}>{item.title}</button></h2>
     <p className="summary">{item.summary || '暂无摘要，打开详情阅读正文。'}</p>
     <footer className="card-footer"><div className="tags">{item.score != null && <ScoreBadge score={item.score} />}{(item.tags || []).map(tag => <span className="tag" key={tag}>{tag}</span>)}{item.stage && <span className="tag">阶段：{item.stage}</span>}{item.passed != null && <span className="tag">{item.passed ? '通过' : '未通过'}</span>}</div><button className="text-button read-link" onClick={open}>阅读详情 <span aria-hidden="true">↗</span></button></footer>
@@ -26,6 +27,7 @@ function Detail({ id, close, persona, feedbackDisabled }: { id: string; close: (
     {query.error && <Notice error>{query.error.message}</Notice>}
     {item && <>
       <p className="muted">{item.source_id} · {formatTime(item.published || item.fetched_at)}</p>
+      <p className="muted small">首次抓取：{formatTime(item.fetched_at)}{item.updated_at && <> · <span className="tag">已更新</span> {formatTime(item.updated_at)}</>}</p>
       {safeUrl(item.url) && <a className="external-link" href={safeUrl(item.url)} target="_blank" rel="noopener noreferrer">在原站阅读 ↗</a>}
       <FeedbackButtons itemId={item.id} persona={persona} disabled={feedbackDisabled} />
       <div className="item-content">{item.content || item.summary || '此条目没有正文。'}</div>

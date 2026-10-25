@@ -6,7 +6,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Generic, Literal, TypeVar
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, computed_field
 
 from tentacles.models import Item, ItemKind
 from tentacles.pipelines.models import Evaluation, StageScore, PipelineOutcome
@@ -48,6 +48,7 @@ class FetchOutcome(BaseModel):
     status: Literal["ok", "error", "busy"]
     new: int
     dup: int
+    updated: int = 0
     error: str | None = None
     stats: dict[str, Any] = {}
 
@@ -60,6 +61,7 @@ class TickOutcome(BaseModel):
     source_id: str | None = None
     pipeline_id: str | None = None
     new: int = 0
+    updated: int = 0
     dup: int = 0
     report_id: str | None = None
     stats: dict[str, Any] = Field(default_factory=dict)
@@ -97,6 +99,7 @@ class ItemView(BaseModel):
     summary: str
     published: datetime | None
     fetched_at: datetime
+    updated_at: datetime | None = None
 
     pipeline_id: str | None = None
     persona_version: int | None = None
@@ -106,6 +109,10 @@ class ItemView(BaseModel):
     reason: str | None = None
     stage: str | None = None
     stage_scores: list[StageScore] = Field(default_factory=list)
+
+    @computed_field
+    def is_updated(self) -> bool:
+        return self.updated_at is not None
 
     @classmethod
     def of(cls, item: Item) -> "ItemView":

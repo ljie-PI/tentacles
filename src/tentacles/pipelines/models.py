@@ -24,6 +24,7 @@ class Evaluation(BaseModel):
     pipeline_id: str
     item_id: str
     persona_version: int
+    input_revision: int = Field(default=1, ge=1)
     passed: bool
     score: float
     tags: list[str] = Field(default_factory=list)

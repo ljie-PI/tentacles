@@ -9,7 +9,7 @@ export function formatDuration(started: string, finished: string | null | undefi
 }
 
 export function formatStats(stats: Record<string, unknown>): string {
-  const fields = [['new', '新增'], ['dup', '重复'], ['evaluated', '已评估'], ['passed', '通过'], ['rejected', '未通过'], ['consumed', '已消费']] as const
+  const fields = [['new', '新增'], ['updated', '更新'], ['dup', '重复'], ['evaluated', '已评估'], ['passed', '通过'], ['rejected', '未通过'], ['consumed', '已消费']] as const
   const values = fields.flatMap(([key, label]) => typeof stats[key] === 'number' ? [`${label} ${stats[key]}`] : [])
   if (stats.no_new === true) values.push('无新内容')
   return values.slice(0, 4).join(' · ') || '无摘要字段'

@@ -143,7 +143,7 @@ class Scheduler:
         stats = result.stats if result.metrics.models else {
             key: value for key, value in result.stats.items() if key not in {'usage', 'cost', 'models'}}
         return FetchOutcome(source_id=spec.id, run_id=result.run_id, status=result.status,
-                            new=stats.get('new', 0), dup=stats.get('dup', 0),
+                            new=stats.get('new', 0), updated=stats.get('updated', 0), dup=stats.get('dup', 0),
                             error=result.error, stats=stats)
 
     async def _fetch_batch(self, specs: list[SourceSpec], *, due_only: bool) -> list[FetchOutcome]:
