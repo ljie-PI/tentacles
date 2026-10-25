@@ -6,6 +6,11 @@ from conftest import rss_feed
 from tentacles.config import load_config
 from tentacles.server import create_app
 
+def local_client(application, **options):
+    options.setdefault('base_url', 'http://localhost')
+    return TestClient(application, **options)
+
+
 FEED = 'https://news.test/rss'
 
 
@@ -13,7 +18,7 @@ def test_health_sources_items_runs_and_scheduler_contracts(write_config, web):
     web.serve(FEED, rss_feed({'title': 'API bulletin', 'guid': 'one', 'description': 'Readable body'}))
     path = write_config({'sources': [{'id': 'news', 'type': 'rss', 'url': FEED, 'schedule': '1h'}],
                          'server': {'scheduler': False}})
-    with TestClient(create_app(load_config(path, env={}), transport=web.transport())) as client:
+    with local_client(create_app(load_config(path, env={}), transport=web.transport())) as client:
         assert client.get('/api/health').json() == {'ok': True}
         response = client.get('/api/sources')
         assert response.status_code == 200 and response.json()[0]['id'] == 'news'
@@ -30,7 +35,7 @@ def test_health_sources_items_runs_and_scheduler_contracts(write_config, web):
 
 def test_bearer_auth_health_exception_and_openapi_security(write_config):
     path = write_config({'server': {'scheduler': False, 'token': 'local-test-token'}})
-    with TestClient(create_app(load_config(path, env={}))) as client:
+    with local_client(create_app(load_config(path, env={}))) as client:
         assert client.get('/api/health').status_code == 200
         for route in ['/api/sources', '/api/items', '/api/runs', '/api/scheduler', '/api/openapi.json']:
             denied = client.get(route)
@@ -46,7 +51,7 @@ def test_bearer_auth_health_exception_and_openapi_security(write_config):
 
 def test_errors_are_uniform_and_cors_is_allowlisted(write_config):
     path = write_config({'server': {'scheduler': False, 'cors_origins': ['http://trusted.test']}})
-    with TestClient(create_app(load_config(path, env={})), raise_server_exceptions=False) as client:
+    with local_client(create_app(load_config(path, env={})), raise_server_exceptions=False) as client:
         for route, code, status in [('/api/items/no-such-id', 'not_found', 404),
                                     ('/api/items?limit=0', 'invalid', 400),
                                     ('/api/items?limit=nope', 'invalid', 400),
@@ -76,7 +81,7 @@ def test_scheduler_recovers_from_round_exception_and_can_be_disabled(write_confi
         return datetime(2030, 1, 1, tzinfo=timezone.utc)
 
     path = write_config({'server': {'poll_interval': 0.01}})
-    with TestClient(create_app(load_config(path, env={}), clock=clock)) as client:
+    with local_client(create_app(load_config(path, env={}), clock=clock)) as client:
         flag[0] = True
         deadline = time.monotonic() + 3
         while time.monotonic() < deadline:
@@ -87,7 +92,7 @@ def test_scheduler_recovers_from_round_exception_and_can_be_disabled(write_confi
         assert status['running'] and status['failed_cycles'] >= 1 and status['cycles'] >= 3
         assert status['last_error'] is None
     path = write_config({'server': {'scheduler': False}})
-    with TestClient(create_app(load_config(path, env={}))) as client:
+    with local_client(create_app(load_config(path, env={}))) as client:
         status = client.get('/api/scheduler/loop').json()
         assert not status['enabled'] and not status['running'] and status['cycles'] == 0
 
@@ -101,7 +106,7 @@ def test_static_site_fallback_never_catches_api_or_reads_outside_dist(write_conf
     secret.write_text('private outside root')
     (root / 'escape.txt').symlink_to(secret)
     path = write_config({'server': {'scheduler': False, 'static_dir': str(root)}})
-    with TestClient(create_app(load_config(path, env={}))) as client:
+    with local_client(create_app(load_config(path, env={}))) as client:
         for route in ['/', '/feed', '/sources', '/settings', '/unknown-non-api-path']:
             assert 'Tentacles application' in client.get(route).text
         assert 'console.log' in client.get('/app.js').text
@@ -123,7 +128,7 @@ def test_single_source_failure_maps_upstream_and_unexpected_clock_error_is_sanit
     path = write_config({'sources': [{'id': 'news', 'type': 'rss', 'url': FEED, 'schedule': '1h'}],
                          'server': {'scheduler': False}})
     web.serve(FEED, 'private upstream body', status=500)
-    with TestClient(create_app(load_config(path, env={}), transport=web.transport(), clock=clock),
+    with local_client(create_app(load_config(path, env={}), transport=web.transport(), clock=clock),
                     raise_server_exceptions=False) as client:
         response = client.post('/api/sources/news/fetch')
         assert response.status_code == 502 and response.json()['error']['code'] == 'upstream'
@@ -145,7 +150,7 @@ def test_shutdown_drains_scheduler_before_closing_service(write_config):
         return httpx.Response(200, text=rss_feed({'title': 'Drained bulletin', 'guid': 'one'}))
 
     path = write_config({'sources': [{'id': 'news', 'type': 'rss', 'url': FEED, 'schedule': '1h'}]})
-    client = TestClient(create_app(load_config(path, env={}), transport=httpx.MockTransport(respond)))
+    client = local_client(create_app(load_config(path, env={}), transport=httpx.MockTransport(respond)))
     thread = None
     try:
         client.__enter__()
@@ -166,7 +171,7 @@ def test_shutdown_drains_scheduler_before_closing_service(write_config):
     data = {'sources': [{'id': 'news', 'type': 'rss', 'url': FEED, 'schedule': '1h'}],
             'server': {'scheduler': False}}
     path = write_config(data)
-    with TestClient(create_app(load_config(path, env={}))) as reopened:
+    with local_client(create_app(load_config(path, env={}))) as reopened:
         runs = reopened.get('/api/runs?kind=fetch').json()
         assert runs[0]['status'] == 'ok'
         assert reopened.get('/api/items').json()['total'] == 1
@@ -184,7 +189,7 @@ def test_single_source_busy_maps_to_409_with_real_shared_lease(write_config):
 
     path = write_config({'sources': [{'id': 'news', 'type': 'rss', 'url': FEED, 'schedule': '1h'}],
                          'server': {'scheduler': False}})
-    with TestClient(create_app(load_config(path, env={}), transport=httpx.MockTransport(respond))) as client:
+    with local_client(create_app(load_config(path, env={}), transport=httpx.MockTransport(respond))) as client:
         thread = threading.Thread(target=lambda: client.post('/api/sources/news/fetch'))
         try:
             thread.start()
@@ -198,7 +203,7 @@ def test_single_source_busy_maps_to_409_with_real_shared_lease(write_config):
 
 def test_mutation_body_typos_are_invalid_not_broad_fetches(write_config):
     path = write_config({'server': {'scheduler': False}})
-    with TestClient(create_app(load_config(path, env={}))) as client:
+    with local_client(create_app(load_config(path, env={}))) as client:
         response = client.post('/api/sources/fetch', json={'id_typo': ['secret-input']})
         assert response.status_code == 400 and response.json()['error']['code'] == 'invalid'
         assert 'secret-input' not in response.text
@@ -214,7 +219,7 @@ def test_unexpected_error_keeps_cors_headers_for_allowed_origin(write_config):
         return datetime(2030, 1, 1, tzinfo=timezone.utc)
 
     path = write_config({'server': {'scheduler': False, 'cors_origins': ['http://trusted.test']}})
-    with TestClient(create_app(load_config(path, env={}), clock=clock), raise_server_exceptions=False) as client:
+    with local_client(create_app(load_config(path, env={}), clock=clock), raise_server_exceptions=False) as client:
         fail[0] = True
         response = client.get('/api/items?since=1d', headers={'Origin': 'http://trusted.test'})
         assert response.status_code == 500 and response.headers['access-control-allow-origin'] == 'http://trusted.test'
@@ -230,6 +235,40 @@ def test_bearer_token_is_not_forwarded_to_source_http(write_config, web):
         return httpx.Response(200, text=rss_feed())
 
     web.handle(FEED, respond)
-    with TestClient(create_app(load_config(path, env={}), transport=web.transport())) as client:
+    with local_client(create_app(load_config(path, env={}), transport=web.transport())) as client:
         response = client.post('/api/sources/news/fetch', headers={'Authorization': 'Bearer browser-only-token'})
         assert response.status_code == 200
+
+
+def test_untrusted_simple_post_and_rebinding_host_cannot_mutate_without_token(write_config, web):
+    path = write_config({'sources': [{'id': 'news', 'type': 'rss', 'url': FEED, 'schedule': '1h'}],
+                         'server': {'scheduler': False, 'cors_origins': ['http://trusted.test']}})
+    web.serve(FEED, rss_feed({'title': 'Trusted fetch only', 'guid': 'one'}))
+    with local_client(create_app(load_config(path, env={}), transport=web.transport()), base_url='http://localhost') as client:
+        for headers in [{'Origin': 'http://untrusted.test'},
+                        {'Origin': 'http://evil.test', 'Host': 'evil.test'},
+                        {'Sec-Fetch-Site': 'cross-site'}]:
+            response = client.post('/api/sources/news/fetch', headers=headers)
+            assert response.status_code == 403 and response.json()['error']['code'] == 'forbidden'
+        assert client.get('/api/items', headers={'Host': 'evil.test'}).status_code == 403
+        assert client.get('/api/runs').json() == []
+        assert client.post('/api/sources/news/fetch', headers={'Origin': 'http://localhost'}).status_code == 200
+        assert client.post('/api/sources/news/fetch', headers={'Origin': 'http://trusted.test'}).status_code == 200
+
+
+def test_numeric_and_date_overflow_are_invalid_parameters(write_config):
+    path = write_config({'server': {'scheduler': False}})
+    with local_client(create_app(load_config(path, env={})), raise_server_exceptions=False) as client:
+        for query in [{'offset': '9223372036854775808'}, {'since': '999999999d'},
+                      {'since': '0001-01-01T00:00:00+14:00'}]:
+            response = client.get('/api/items', params=query)
+            assert response.status_code == 400 and response.json()['error']['code'] == 'invalid'
+
+
+def test_display_settings_exposes_only_configured_timezone_with_auth(write_config):
+    path = write_config({'app': {'timezone': 'America/New_York'},
+                         'server': {'scheduler': False, 'token': 'private-browser-token'}})
+    with local_client(create_app(load_config(path, env={}))) as client:
+        assert client.get('/api/settings').status_code == 401
+        response = client.get('/api/settings', headers={'Authorization': 'Bearer private-browser-token'})
+        assert response.status_code == 200 and response.json() == {'timezone': 'America/New_York'}

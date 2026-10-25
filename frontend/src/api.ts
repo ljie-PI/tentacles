@@ -21,7 +21,7 @@ export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
   if (init.body) headers.set('Content-Type', 'application/json')
   const response = await fetch(`/api${path}`, { ...init, headers })
   if (response.status === 401) {
-    if (window.location.pathname !== '/settings') window.location.assign('/settings?auth=required')
+    if (getToken() === token && window.location.pathname !== '/settings') window.location.assign('/settings?auth=required')
     throw new ApiError(401, '访问令牌无效或未设置，请在设置页更新。')
   }
   if (!response.ok) {
@@ -40,10 +40,4 @@ export function safeUrl(value: string): string | undefined {
     const url = new URL(value)
     return ['https:', 'http:'].includes(url.protocol) ? url.href : undefined
   } catch { return undefined }
-}
-
-export function formatTime(value: string | null | undefined): string {
-  if (!value) return '—'
-  const date = new Date(value)
-  return Number.isNaN(date.valueOf()) ? '—' : date.toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })
 }

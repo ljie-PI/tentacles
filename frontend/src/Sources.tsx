@@ -1,8 +1,10 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { api, formatTime, type FetchOutcome, type Source } from './api'
+import { api, type FetchOutcome, type Source } from './api'
 import { Notice } from './shared'
+import { useDisplayTime } from './display-time'
 
 export default function Sources() {
+  const { formatTime, error: displayError } = useDisplayTime()
   const client = useQueryClient()
   const query = useQuery({ queryKey: ['sources'], queryFn: () => api<Source[]>('/sources'), refetchInterval: 30000 })
   const fetch = useMutation({
@@ -14,6 +16,7 @@ export default function Sources() {
   return <>
     <header className="page-heading"><div><p className="eyebrow">CONNECTED TO YOUR WORLD</p><h1>信息源<span className="accent">.</span></h1><p className="muted">每一条信息，都有迹可循。</p></div><div className="total"><strong>{query.data?.length ?? '—'}</strong><span>个已配置来源</span></div></header>
     <p className="section-note">配置由 YAML 管理。手动抓取也可运行停用的信息源；网页 LLM 源可能产生费用。</p>
+    {displayError && <Notice error>{displayError.message}</Notice>}
     {query.error && <Notice error>{query.error.message} <button onClick={() => void query.refetch()}>重试</button></Notice>}
     {query.isPending && <Notice>正在读取信息源…</Notice>}
     {fetch.error && <Notice error>{fetch.error.message}</Notice>}

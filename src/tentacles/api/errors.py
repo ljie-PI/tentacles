@@ -15,7 +15,7 @@ from tentacles.errors import TentaclesError
 
 log = logging.getLogger(__name__)
 STATUS_CODES = {'invalid': 400, 'not_found': 404, 'conflict': 409, 'busy': 409, 'upstream': 502}
-ERROR_RESPONSES: dict[int | str, dict[str, Any]] = {status: {'model': ErrorResponse} for status in (400, 401, 404, 409, 500, 502)}
+ERROR_RESPONSES: dict[int | str, dict[str, Any]] = {status: {'model': ErrorResponse} for status in (400, 401, 403, 404, 409, 500, 502)}
 
 
 def install_error_handlers(app: FastAPI, config: AppConfig) -> None:
@@ -39,7 +39,7 @@ def install_error_handlers(app: FastAPI, config: AppConfig) -> None:
 
     @app.exception_handler(HTTPException)
     async def http_error(request: Request, exc: HTTPException):
-        code = {401: 'unauthorized', 404: 'not_found', 405: 'invalid'}.get(exc.status_code, 'error')
+        code = {401: 'unauthorized', 403: 'forbidden', 404: 'not_found', 405: 'invalid'}.get(exc.status_code, 'error')
         return response(code, str(exc.detail), 400 if exc.status_code == 405 else exc.status_code, exc.headers)
 
     @app.exception_handler(Exception)

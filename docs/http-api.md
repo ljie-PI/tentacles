@@ -15,7 +15,16 @@ reverse proxy for remote access; do not expose an unauthenticated instance.
 Static pages/assets remain public so the browser can reach Settings to enter the token.
 CORS allows only explicitly configured `server.cors_origins`; list origins without trailing `/`,
 paths or wildcards. CORS preflights are handled before API authentication.
-Access logging is disabled to keep request URLs/content out of logs and stdout.
+Disallowed browser origins are rejected before API operations, including bodyless/simple POSTs
+that do not cause a CORS preflight. A no-token server also rejects unknown Host names to prevent
+DNS rebinding from manufacturing a trusted same-origin request; loopback aliases, the configured
+host and hosts in explicit CORS origins are trusted. A wildcard bind also accepts literal IP hosts.
+For a reverse-proxy hostname with no token, explicitly list its public origin in `cors_origins`.
+Non-browser clients without Origin remain supported on trusted hosts. Cross-site requests without
+an Origin are rejected when the browser supplies cross-site fetch metadata.
+Access logging is disabled to keep request URLs/content out of logs and stdout. An outer ASGI
+privacy boundary also sanitizes lifespan failure messages and prevents raw framework exception
+rethrows from reaching Uvicorn logs. Interrupted responses preserve only a fixed safe error.
 
 ## Routes
 
@@ -25,6 +34,7 @@ Generate types offline with `python -m tentacles.api_schema`, without user confi
 | Method / path | Response / behavior |
 | --- | --- |
 | `GET /api/health` | `{ "ok": true }`, no token required |
+| `GET /api/settings` | non-sensitive display metadata: `{ "timezone": "Asia/Shanghai" }`; no credentials or paths |
 | `GET /api/sources` | `SourceView[]` |
 | `POST /api/sources/fetch` | optional `{ "ids": ["id"] }`, returns `FetchOutcome[]`; omitted/empty IDs fetch enabled sources |
 | `POST /api/sources/{source_id}/fetch` | `FetchOutcome`; unknown ID 404, busy 409, failed fetch 502 |
@@ -36,7 +46,7 @@ Generate types offline with `python -m tentacles.api_schema`, without user confi
 | `POST /api/scheduler/tick` | `TickOutcome[]`, manual due-task execution even if the polling loop is disabled |
 
 `since` / `until` accept the same duration/ISO/local-date formats as CLI. Page limits are 1–500,
-offset >=0. API filters reject unknown item kinds. Batch fetch and tick return each target's status,
+offset between 0 and SQLite’s signed 64-bit maximum. Out-of-range numbers/dates are invalid (400). API filters reject unknown item kinds. Batch fetch and tick return each target's status,
 including mixed failures, rather than turning a partially successful batch into a single HTTP error.
 A failed individual fetch's detailed sanitized status is available in run/source records.
 
@@ -48,7 +58,7 @@ A failed individual fetch's detailed sanitized status is available in run/source
 
 Domain errors: `invalid` 400, `not_found` 404, `conflict` and `busy` 409, `upstream` 502,
 unexpected exceptions 500 (`error`, generic message). Missing/wrong token is 401 (`unauthorized`),
-with `WWW-Authenticate: Bearer`. Request validation is 400, not FastAPI's default 422.
+with `WWW-Authenticate: Bearer`. Untrusted browser origins or no-token API hosts are 403 (`forbidden`). Request validation is 400, not FastAPI's default 422.
 Responses never echo validation input, unexpected exception content or configured credentials.
 
 ## Frontend
@@ -57,3 +67,8 @@ See [frontend setup](../frontend/README.md). Build separately with pnpm, then ke
 pointed at the built directory. GETs outside `/api` serve a matching asset or fall back to index.html;
 unknown API routes remain 404 JSON and resolved paths outside the static root are not served.
 If no build exists, API works normally and non-API GETs return a helpful 404.
+
+
+The frontend formats Feed/detail/source timestamps using the authenticated `/api/settings` timezone,
+not the browser timezone. If the browser does not support that IANA timezone, it shows explicitly
+labeled UTC and a warning rather than silently showing local time.

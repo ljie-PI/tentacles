@@ -5,7 +5,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, Query, Request
 
-from tentacles.api.models import SchedulerLoopView, SourceFetch
+from tentacles.api.models import DisplaySettings, SchedulerLoopView, SourceFetch
 from tentacles.models import ItemKind
 from tentacles.errors import Busy, UpstreamError
 from tentacles.schemas import FetchOutcome, ItemDetail, ItemView, Page, RunView, SourceView, TaskView, TickOutcome
@@ -72,3 +72,8 @@ async def tick(svc: Service):
 @router.get('/scheduler/loop', response_model=SchedulerLoopView)
 def scheduler_loop(request: Request):
     return request.app.state.scheduler_loop
+
+
+@router.get('/settings', response_model=DisplaySettings)
+def display_settings(svc: Service):
+    return DisplaySettings(timezone=svc.config.app.timezone)

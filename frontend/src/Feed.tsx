@@ -1,10 +1,11 @@
 import { useState } from 'react'
 import { useInfiniteQuery, useQuery } from '@tanstack/react-query'
 import { useSearchParams } from 'react-router-dom'
-import { api, formatTime, safeUrl, type Item, type ItemDetail, type ItemPage, type Source } from './api'
+import { api, safeUrl, type Item, type ItemDetail, type ItemPage, type Source } from './api'
 import { Drawer, Notice } from './shared'
+import { useDisplayTime, type TimeFormatter } from './display-time'
 
-function ItemCard({ item, open }: { item: Item; open: () => void }) {
+function ItemCard({ item, open, formatTime }: { item: Item; open: () => void; formatTime: TimeFormatter }) {
   return <article className="item-card">
     <div className="item-meta"><span className="source-dot" />{item.source_id}<span>·</span>{formatTime(item.published || item.fetched_at)}<span className="kind">{item.kind}</span></div>
     <h2><button className="text-button item-title" onClick={open}>{item.title}</button></h2>
@@ -15,6 +16,7 @@ function ItemCard({ item, open }: { item: Item; open: () => void }) {
 }
 
 function Detail({ id, close }: { id: string; close: () => void }) {
+  const { formatTime } = useDisplayTime()
   const query = useQuery({ queryKey: ['item', id], queryFn: () => api<ItemDetail>(`/items/${encodeURIComponent(id)}`) })
   const item = query.data
   return <Drawer title={item?.title || '加载条目…'} close={close}>
@@ -47,6 +49,7 @@ function FeedFilters({ filters, sources, apply }: { filters: Filters; sources: S
 }
 
 export default function Feed() {
+  const display = useDisplayTime()
   const [params, setParams] = useSearchParams()
   const source = params.get('source') || '', since = params.get('since') || '', search = params.get('search') || ''
   const selected = params.get('item')
@@ -69,11 +72,12 @@ export default function Feed() {
   return <>
     <header className="page-heading"><div><p className="eyebrow">YOUR SIGNAL, NOT THE NOISE</p><h1>信息流<span className="accent">.</span></h1><p className="muted">把分散的线索，汇聚在一个安静的地方。</p></div><div className="total"><strong>{feed.data?.pages[0]?.total ?? '—'}</strong><span>条匹配内容</span></div></header>
     <FeedFilters key={JSON.stringify([source, since, search])} filters={{ source, since, search }} sources={sources.data} apply={setParams} />
+    {display.error && <Notice error>{display.error.message}</Notice>}
     {feed.error && <Notice error>{feed.error.message} <button onClick={() => void feed.refetch()}>重试</button></Notice>}
     {sources.error && <Notice error>信息源列表加载失败：{sources.error.message}</Notice>}
     {feed.isPending && <Notice>正在汇聚信息…</Notice>}
     {!feed.isPending && !feed.error && items.length === 0 && <div className="empty"><span aria-hidden="true">◎</span><h2>这里还很安静</h2><p>试着调整筛选条件，或前往「信息源」立即抓取。</p></div>}
-    <div className="feed-list">{items.map(item => <ItemCard item={item} key={item.id} open={() => select(item.id)} />)}</div>
+    <div className="feed-list">{items.map(item => <ItemCard item={item} key={item.id} formatTime={display.formatTime} open={() => select(item.id)} />)}</div>
     {feed.hasNextPage && <button className="load-more" disabled={feed.isFetchingNextPage} onClick={() => void feed.fetchNextPage()}>{feed.isFetchingNextPage ? '正在加载…' : '加载更多 ↓'}</button>}
     {selected && <Detail id={selected} close={() => select()} />}
   </>

@@ -28,3 +28,7 @@ class SchedulerLoopView(BaseModel):
     failed_cycles: int = 0
     last_tick_at: str | None = None
     last_error: str | None = None
+
+
+class DisplaySettings(BaseModel):
+    timezone: str

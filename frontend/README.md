@@ -44,3 +44,7 @@ and invalidates source/feed/run/scheduler caches after success or failure. Theme
 Noto Sans SC Variable is self-hosted with the application so Chinese text does not depend on system
 font availability or an external font CDN. Fonts load by Unicode range; the distributed OFL notice is
 in `public/fonts/OFL-NotoSansSC.txt`. Navigation icons are inline SVG, not a system icon font.
+
+Timestamps use the server's non-sensitive `/api/settings` timezone metadata. No browser-local
+fallback is used; an unsupported timezone displays labeled UTC with a warning. A late 401 from an
+old token does not redirect after a new token has been saved.

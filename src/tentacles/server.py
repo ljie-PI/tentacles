@@ -5,16 +5,16 @@ import asyncio
 from contextlib import asynccontextmanager
 from datetime import datetime
 from typing import Any, Callable
-from hmac import compare_digest
 
 import httpx
 from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
-from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from tentacles.api.models import Health, SchedulerLoopView
 from tentacles.api.errors import ERROR_RESPONSES, install_error_handlers
+from tentacles.api.privacy import LogSafeAPI
+from tentacles.api.security import authorization
 from tentacles.api.routes import router
 from tentacles.config import AppConfig
 from tentacles.service import TentaclesService
@@ -46,16 +46,10 @@ def create_app(config: AppConfig, *, transport: httpx.AsyncBaseTransport | None 
             finally:
                 await svc.aclose()
 
-    app = FastAPI(title='Tentacles', version='0.2.0', lifespan=lifespan,
+    app = LogSafeAPI(title='Tentacles', version='0.2.0', lifespan=lifespan,
                   openapi_url=None, docs_url=None, redoc_url=None, responses=ERROR_RESPONSES)
     install_error_handlers(app, config)
-    token = config.server.token.get_secret_value().encode('utf-8')
-    bearer = HTTPBearer(auto_error=False)
-
-    def authorize(credentials: HTTPAuthorizationCredentials | None = Depends(bearer)) -> None:
-        supplied = credentials.credentials.encode('utf-8') if credentials is not None else b''
-        if token and not compare_digest(supplied, token):
-            raise HTTPException(401, 'invalid or missing bearer token', headers={'WWW-Authenticate': 'Bearer'})
+    authorize = authorization(config)
 
     @app.get('/api/openapi.json', response_model=dict[str, Any], include_in_schema=False,
              dependencies=[Depends(authorize)])
