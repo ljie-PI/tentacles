@@ -31,3 +31,9 @@ const iconPaths = {
 export function Icon({ name }: { name: keyof typeof iconPaths }) {
   return <svg className="icon" aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">{iconPaths[name]}</svg>
 }
+
+
+export function ScoreBadge({ score }: { score: number }) {
+  const tone = score >= 0.8 ? 'high' : score >= 0.5 ? 'mid' : 'low'
+  return <span className={`badge score-${tone}`} aria-label={`相关度 ${Math.round(score * 100)} 分`}>{Math.round(score * 100)} 分</span>
+}

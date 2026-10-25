@@ -102,8 +102,8 @@ class TentaclesService:
         return result
 
     def list_reports(self, *, pipeline: str | None = None, limit: int = 50, offset: int = 0) -> Page[ReportView]:
-        if not 1 <= limit <= 500 or offset < 0:
-            raise ConfigError('reports limit must be 1–500 and offset nonnegative')
+        if not 1 <= limit <= 500 or not 0 <= offset <= 2**63 - 1:
+            raise ConfigError('reports limit must be 1–500 and offset between 0 and 9223372036854775807')
         if pipeline is not None:
             self._known_pipeline(pipeline)
         reports, total = self.store.list_reports(pipeline, limit, offset)

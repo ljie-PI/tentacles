@@ -41,3 +41,14 @@ export function safeUrl(value: string): string | undefined {
     return ['https:', 'http:'].includes(url.protocol) ? url.href : undefined
   } catch { return undefined }
 }
+
+export type Pipeline = components['schemas']['PipelineView']
+export type PipelineOutcome = components['schemas']['PipelineOutcome']
+export type Report = components['schemas']['ReportView']
+export type ReportPage = components['schemas']['Page_ReportView_']
+export type Run = components['schemas']['RunView']
+export type Model = components['schemas']['ModelView']
+export type ModelTest = components['schemas']['ModelTest']
+export type Task = components['schemas']['TaskView']
+export type SchedulerLoop = components['schemas']['SchedulerLoopView']
+export type TickOutcome = components['schemas']['TickOutcome']

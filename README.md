@@ -16,8 +16,9 @@ pnpm build
 # 浏览 http://127.0.0.1:8000
 ```
 
-已提供 Feed（来源／时间／关键词筛选、加载更多、正文抽屉）与 Sources（状态、立即抓取）页面，
-支持暗色模式和移动端。Settings 可保存当前浏览器的访问 token；其他管理页将在后续 issue 加入。
+已提供 Feed（来源／时间／关键词／pipeline 与通过判定筛选、加载更多、正文抽屉）、Sources（状态、立即抓取）、
+Pipelines（过滤／运行）、Reports（Markdown 表格与引用条目）、Runs（自动刷新与成本）和 Settings（token、模型测试、调度状态）。
+支持暗色模式和移动端；Persona 编辑与反馈页面在后续 issue 加入。
 开发模式运行 `pnpm dev`，通过 Vite 代理访问后端。要求 Node >=22.12、pnpm 10.33；
 `pnpm generate:api` 重新生成提交的后端类型，`pnpm check:api` 检查一致性。
 

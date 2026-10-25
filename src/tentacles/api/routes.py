@@ -3,20 +3,15 @@ from __future__ import annotations
 
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Query, Request
+from fastapi import APIRouter, Query, Request
 
 from tentacles.api.models import DisplaySettings, SchedulerLoopView, SourceFetch
 from tentacles.models import ItemKind
 from tentacles.errors import Busy, UpstreamError
 from tentacles.schemas import FetchOutcome, ItemDetail, ItemView, Page, RunView, SourceView, TaskView, TickOutcome
-from tentacles.service import TentaclesService
+from tentacles.api.dependencies import Service
 
 
-def service(request: Request) -> TentaclesService:
-    return request.app.state.service
-
-
-Service = Annotated[TentaclesService, Depends(service)]
 router = APIRouter()
 
 
