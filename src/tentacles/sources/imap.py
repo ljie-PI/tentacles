@@ -119,8 +119,6 @@ _MAIL_DATE = (rf'(?:\d{{1,2}}\s+{_MONTH}\s+\d{{4}}|{_MONTH}\s+\d{{1,2}},?\s+\d{{
 _ATTRIBUTION_DATE = re.compile(
     rf'^(?:On\s+(?:{_WEEKDAY},?\s+)?{_MAIL_DATE}\b|'
     r'[在于]\s*(?:\d{4}年\d{1,2}月\d{1,2}日|\d{4}[-/]\d{1,2}[-/]\d{1,2}))', re.I)
-_ATTRIBUTION_SENDER = re.compile(
-    r'(?:<[^@\s<>]+@[^@\s<>]+>|(?<!\S)[^@\s<>]+@[^@\s<>]+)\s+(?:wrote:|写道[：:])$', re.I)
 
 _SHORT_ATTRIBUTION = re.compile(rf'^On\s+{_WEEKDAY},\s+(?P<name>.+?)\s+wrote:$', re.I)
 
@@ -143,26 +141,54 @@ def _body_parts(msg: MIMEPart) -> list[tuple[str, str]]:
     return [(kind, text)]
 
 
+def _attribution_name(value: str, *, capitalized: bool) -> bool:
+    words = value.split()
+    if not 1 <= len(words) <= 8 or words[0].casefold() in {
+            'i', 'we', 'you', 'they', 'this', 'that', 'here', 'what', '我', '我们', '你', '你们', '他们', '她们'}:
+        return False
+    for word in words:
+        letters = word.replace('-', '').replace("'", '').replace('.', '').replace('&', '')
+        if not letters or not (letters.isalpha() if capitalized else letters.isalnum()):
+            return False
+        if capitalized and word[0].islower():
+            return False
+    return True
+
+
+def _attribution_writer(value: str, *, allow_name: bool) -> bool:
+    address = re.fullmatch(r'(?P<name>.*?)\s*(?:<[^@\s<>]+@[^@\s<>]+>|[^@\s<>]+@[^@\s<>]+)', value)
+    if address:
+        return not address['name'].strip() or _attribution_name(address['name'].strip(), capitalized=False)
+    return allow_name and _attribution_name(value, capitalized=True)
+
+
 def _reply_attribution(header: str) -> bool:
     if not _REPLY_BOUNDARY.fullmatch(header):
         return False
     if not re.match(r'^(?:On\s|[在于])', header, re.I):
         return True  # explicit "Original Message" / forwarding separators
-    if _ATTRIBUTION_SENDER.search(header):
-        return True
-    if re.search(r'\b(?:I|we|you|they)\s+wrote:$|(?:我|我们|你|你们|他们|她们)写道[：:]$', header, re.I):
-        return False
-    if _ATTRIBUTION_DATE.match(header):
-        return True
+    ending = re.compile(r'(?:\bwrote:|写道[：:])\s*$', re.I)
+    date = _ATTRIBUTION_DATE.match(header)
+    if date:
+        # Date evidence is not sufficient: the rest must be an optional clock
+        # followed by a writer, not an arbitrary sentence containing "wrote".
+        writer = ending.sub('', header[date.end():]).strip(' ,，')
+        writer = re.sub(
+            r'^(?:at\s*|T)?\d{1,2}:\d{2}(?::\d{2})?(?:\s*[AP]M)?'
+            r'(?:\s*(?:UTC|GMT)(?:[+-]\d{1,2}(?::?\d{2})?)?)?\s*[,，]?\s*',
+            '', writer, flags=re.I)
+        return _attribution_writer(writer, allow_name=True)
     short = _SHORT_ATTRIBUTION.fullmatch(header)
-    if short is None:
+    if short:
+        return _attribution_writer(short['name'], allow_name=True)
+    # An undated attribution needs an actual mailbox, not just arbitrary words.
+    writer = ending.sub('', re.sub(r'^(?:On\s+|[在于]\s*)', '', header, flags=re.I)).strip()
+    return _attribution_writer(writer, allow_name=False)
+
+
+def _sentence_end(line: str, *, in_attribution: bool = False) -> bool:
+    if in_attribution and re.search(r'\b(?:(?i:Dr|Mr|Mrs|Ms|Prof|Sr|Jr)|[A-Z])\.$', line.strip()):
         return False
-    name = short['name'].split()
-    return (1 <= len(name) <= 3 and name[0].casefold() not in {'this', 'that', 'here', 'what'}
-            and all(word.replace('-', '').replace("'", '').isalpha() and not word[0].islower() for word in name))
-
-
-def _sentence_end(line: str) -> bool:
     return line.rstrip(" \t\"'”’»)]").endswith(('.', '!', '?', '。', '！', '？'))
 
 
@@ -170,15 +196,15 @@ def _reply_header(lines: list[str], start: int) -> bool:
     header = lines[start].strip()
     if _reply_attribution(header):
         return True
-    if (_REPLY_BOUNDARY.fullmatch(header) or _sentence_end(header)
+    date_context = _ATTRIBUTION_DATE.match(header) is not None
+    if (_REPLY_BOUNDARY.fullmatch(header) or _sentence_end(header, in_attribution=date_context)
             or not re.match(r'^(?:On\s|[在于])', header, re.I)):
         return False
-    # Mail clients soft-wrap attribution headers. Join only that bounded,
-    # uninterrupted paragraph, requiring date/sender evidence so ordinary prose
-    # mentioning "wrote" is not mistaken for a reply attribution.
+    # A continuation cannot borrow a later sentence or independent attribution.
     for line in lines[start + 1:start + 5]:
         continuation = line.strip()
-        if not continuation or _sentence_end(continuation) or _REPLY_BOUNDARY.fullmatch(continuation):
+        if (not continuation or _sentence_end(continuation, in_attribution=date_context)
+                or _REPLY_BOUNDARY.fullmatch(continuation)):
             break
         header += ' ' + continuation
         if len(header) > 1000:

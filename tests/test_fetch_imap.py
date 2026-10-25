@@ -501,6 +501,8 @@ def test_failed_logout_falls_back_to_socket_shutdown_without_losing_success(writ
     'On Sun, 25 Oct 2026 at 10:00,\nAlice wrote:',
     'On October 25, 2026 at 10:00,\nAlice wrote:',
     'On 2026-10-25 at 10:00,\nAlice wrote:',
+    'On Sun, 25 Oct 2026 at 10:00, Dr.\nAlice <alice@example.test> wrote:',
+    'On Sun, 25 Oct 2026 at 10:00,\nDr.\nAlice <alice@example.test> wrote:',
 ])
 def test_wrapped_reply_headers_remove_unprefixed_old_body_and_summary(write_config, reply_header):
     fake = FakeIMAP({'"INBOX"': Mailbox(messages={1: mail(
@@ -542,6 +544,11 @@ def test_imap_arguments_consistently_reject_delete_controls(write_config, field)
     'On this project I wrote:',
     'On 2026-10-25 I wrote:',
     'On Tuesday, I wrote:',
+    'On 2026-10-25 I also wrote:',
+    'On 2026-10-25 we both wrote:',
+    'On 2026-10-25\nI also wrote:',
+    'On 2026-10-25 the compiler wrote:',
+    'On 2026-10-25 the compiler\nalso wrote:',
 ])
 def test_reply_cleanup_preserves_normal_paragraph_containing_wrote(write_config, prose):
     body = f'Fresh update\n\n{prose}\nThis is what I wrote:\nNew technical findings'
