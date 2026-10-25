@@ -196,6 +196,26 @@ pipelines:
       instructions: 优先按兴趣画像组织事实，避免标题党和重复表述。
 
 
+  # 每周重大事件深度报道：默认关闭，启用后会调用 max 模型（可能产生费用）。
+  # 手动 pipelines run weekly-deep 同样会调用模型，即使 enabled: false。
+  - id: weekly-deep
+    name: 每周重大事件
+    persona: default
+    sources: [solidot, 36kr, sspai, bbc-zh, jiemian, hacker-news, techcrunch, the-verge, ars-technica, nytimes-world, cnbc-top]
+    enabled: false
+    window: 7d
+    schedule: '@weekly'
+    filters:
+      - type: keyword
+    processor:
+      type: deep
+      model: max
+      language: zh-CN
+      max_items: 100
+      min_cluster_size: 3    # 同一事件至少 3 个条目（不是独立来源数）
+      max_reports: 3         # 仅取规模最大的前 3 个达标事件
+      instructions: 区分已证实的事实与各方说法，明确列出仍需核实的问题。
+
   # 邮件简报：源 inbox 和本 pipeline 均默认关闭，确认隐私与模型费用后再启用。
   # 手动 pipelines run mail-summary 仍会调用 process 模型（即使 enabled: false）。
   - id: mail-summary

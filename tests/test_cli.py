@@ -538,3 +538,24 @@ def test_llm_web_fetch_and_usage_json_contract(write_config, web):
     again = run('sources', 'fetch', 'web-news')
     assert again.exit_code == 0 and payload(again)[0]['stats']['not_modified'] is True
     assert len(web.requests_to(CHAT_URL)) == 1
+
+
+def test_deep_pipeline_returns_all_report_ids_and_report_contracts(cli, web, write_config):
+    import httpx
+    from test_deep import deep_config, event_feed
+    from test_models import CHAT_URL, chat_reply
+    path = write_config(deep_config())
+    web.serve(FEED, event_feed())
+    web.handle(CHAT_URL, lambda r: httpx.Response(200, json=chat_reply('Event facts [来源1].')))
+    assert cli('sources', 'fetch', config=path).exit_code == 0
+    result = cli('pipelines', 'run', 'daily', config=path)
+    assert result.exit_code == 0
+    outcome = payload(result)
+    assert outcome['status'] == 'ok' and outcome['stats']['consumed'] == 7
+    ids = outcome['stats']['report_ids']
+    assert len(ids) == 2 and outcome['report_id'] == ids[0]
+    for report_id in ids:
+        report = payload(cli('reports', 'show', report_id, config=path))
+        assert report['kind'] == 'deep' and len(report['item_ids']) == 3
+        assert report['title'].startswith('深度报道：')
+    assert payload(cli('pipelines', 'run', 'daily', config=path))['status'] == 'no_new'

@@ -2,7 +2,7 @@
 
 个人信息与新闻管理系统：从多种信息源抓取内容，按个人 persona 过滤，再用 LLM 加工成日报、深度报道或邮件简报。整体设计见 [#18](https://github.com/ljie-PI/tentacles/issues/18)，实施进度见它的子 issue。
 
-> 目前已完成骨架：配置驱动的 RSS 抓取、去重入库、条目查询、运行记录、持久化调度、命名模型注册表/连通性测试、版本化 Persona 管理，以及 keyword/decision/llm 级联过滤和 digest 日报。pipeline 自动调度已接入；其他过滤/处理、邮件和网页源、Web 端将陆续加入。
+> 已支持配置驱动的 RSS、IMAP 和网页抓取、去重入库、持久化调度、命名模型、版本化 Persona 与反馈演化，以及 keyword/decision/llm 级联过滤和 digest/deep/summarize/none 处理器。Web 端正在按子 issue 继续实施。
 
 ## 快速开始
 
@@ -208,6 +208,25 @@ tentacles reports show REPORT_ID
 消费账本不会被清除，不会让已报告条目重新进入报告。
 `processor.type: none` 不调用模型、不生成文件，但将选中的条目标记为已消费。
 完整参数和自定义提示词格式见 [agent 命令说明](docs/agent-cli.md)。
+
+## deep 重大事件深度报道
+
+```bash
+tentacles pipelines run weekly-deep
+tentacles --json pipelines run weekly-deep
+tentacles reports list --pipeline weekly-deep
+```
+
+示例 `weekly-deep` 每周运行，窗口 7 天，使用 `max` 模型，默认关闭。
+手动运行仍可能产生费用。`min_cluster_size`（默认 3）是事件条目数阈值，
+`max_reports`（默认 3）限制每次报道数量；均可配置为 1–500。
+沿用既有标题聚类算法，按事件规模、来源数排序，每个达标事件生成一份
+“深度报道：事件标题”，保留背景、各方说法、数据与疑点、影响与后续及待确认问题。
+
+一次运行可能生成多份报告：`report_id` 是第一份，`stats.report_ids` 列出全部 ID。
+通过过滤、按分数选出的前 `max_items` 条全部标记为已消费，包括未达阈值或超出报道上限的事件。
+整个批次成功才发布报告和消费条目；生成或发布失败则整批保留待重试，已知模型费用仍记入运行记录。
+`none` 处理器完全不生成报告，也按同样的条目上限消费。详见 [处理器协议](docs/agent-cli.md#deep-处理器)。
 
 ## summarize 邮件简报与待办
 
