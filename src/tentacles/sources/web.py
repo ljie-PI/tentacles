@@ -22,7 +22,7 @@ from pydantic import BaseModel, ConfigDict, Field, StringConstraints, field_vali
 
 from tentacles.asyncutil import gather_draining, run_blocking, run_store_call
 from tentacles.errors import UpstreamError
-from tentacles.models import Item, normalize_url
+from tentacles.models import Item, ItemObservation, LinkDisposition, normalize_url
 from tentacles.sources.base import FetchContext, FetchResult, Source, register
 from tentacles.text import html_to_text, truncate
 from tentacles.timeutil import to_utc
@@ -67,11 +67,17 @@ class Selector:
         return cls(css, attribute.lower() if attribute is not None else None)
 
     def value(self, root: Tag, *, default_attribute: str | None = None) -> str:
+        return self.observe(root, default_attribute=default_attribute) or ''
+
+    def observe(self, root: Tag, *, default_attribute: str | None = None) -> str | None:
+        """None is absent; a matched empty node/attribute is explicitly empty."""
         node = root if self.css == ':scope' else root.select_one(self.css)
         if node is None:
-            return ''
+            return None
         attribute = self.attribute or default_attribute
         if attribute is not None:
+            if not node.has_attr(attribute):
+                return None
             value = node.get(attribute, '')
             return ' '.join(value) if isinstance(value, list) else str(value or '').strip()
         return html_to_text(str(node))
@@ -279,6 +285,7 @@ _EXTRACT_SYSTEM = '''从给定网页的“文本 + 链接”抽取真实文章�
 class WebSource(Source):
     type: ClassVar[str] = 'web'
     Options: ClassVar[Type[BaseModel]] = WebOptions
+    supports_updates: ClassVar[bool] = True  # validation currently permits list only
 
     async def _get(self, url: str, ctx: FetchContext) -> httpx.Response:
         opts = cast(WebOptions, self.options)
@@ -312,11 +319,14 @@ class WebSource(Source):
                 result = await self._extract(response, cursor, ctx)
             else:
                 result = await run_blocking(self._list, response.content, response.headers.get('content-type', ''), str(response.url), cursor, ctx)
-            seen = set(cursor.get('seen', [])) if cursor.get('url') == opts.url else set()
-            if ctx.seen_links is not None:
-                seen.update(await run_store_call(ctx.seen_links, [item.external_id for item in result.items]))
-            result.items = [item for item in result.items if item.external_id not in seen]
-            result.stats['new_links'] = len(result.items)
+            links = await self._classify_links([item.external_id for item in result.items], cursor, ctx)
+            retained = [index for index, item in enumerate(result.items) if links[item.external_id] != 'skip']
+            result.items = [result.items[index] for index in retained]
+            if result.observations:
+                result.observations = [result.observations[index] for index in retained]
+            result.stats['new_links'] = sum(links[item.external_id] == 'new' for item in result.items)
+            if self.spec.update_existing:
+                result.stats['refresh_links'] = sum(links[item.external_id] == 'refresh' for item in result.items)
             if opts.fetch_content:
                 await self._details(result, ctx)
             return result
@@ -324,6 +334,22 @@ class WebSource(Source):
             raise
         except Exception as exc:
             raise UpstreamError(f'web fetch failed ({type(exc).__name__})') from None
+
+    async def _classify_links(self, urls: list[str], cursor: dict[str, Any],
+                              ctx: FetchContext) -> dict[str, LinkDisposition]:
+        """One rediscovery policy for selector lists and model extraction.
+
+        A stored refreshable identity outranks the bounded cursor cache. A
+        cache entry alone cannot authorize a refresh or resurrect a loser.
+        """
+        opts = cast(WebOptions, self.options)
+        cached = set(cursor.get('seen', [])) if cursor.get('url') == opts.url else set()
+        if self.spec.update_existing and ctx.classify_links is not None:
+            links = await run_store_call(ctx.classify_links, urls)
+            return {url: 'skip' if links[url] == 'new' and url in cached else links[url] for url in urls}
+        if ctx.seen_links is not None:
+            cached.update(await run_store_call(ctx.seen_links, urls))
+        return {url: 'skip' if url in cached else 'new' for url in urls}
 
     async def _extract(self, response: httpx.Response, cursor: dict[str, Any], ctx: FetchContext) -> FetchResult:
         opts = cast(WebOptions, self.options)
@@ -342,10 +368,8 @@ class WebSource(Source):
         skipped_cursor = {'url': opts.url, 'identity': identity, 'input_hash': page.digest, 'seen': cached}
         if not page.links:
             return FetchResult([], skipped_cursor, {'no_links': True, 'seen_cached': len(cached)})
-        known = set(cached)
-        if ctx.seen_links is not None:
-            known.update(await run_store_call(ctx.seen_links, list(page.links)))
-        if page.links.issubset(known):
+        links = await self._classify_links(list(page.links), cursor, ctx)
+        if all(disposition == 'skip' for disposition in links.values()):
             return FetchResult([], skipped_cursor, {'no_new_links': True, 'seen_cached': len(cached)})
         payload = {'text': page.text, 'now': to_utc(ctx.now).isoformat(), 'timezone': ctx.timezone}
         try:
@@ -370,8 +394,18 @@ class WebSource(Source):
             for index, item in iterator:
                 response = await self._get(item.url, ctx)
                 text = await run_blocking(_article_body, response.content, response.headers.get('content-type', ''))
+                summary = item.summary or truncate(text, 2000)
+                if result.observations:
+                    if not text:
+                        raise UpstreamError('web detail returned no usable content')
+                    observation = result.observations[index]
+                    # Missing list summary may be supplied by successful detail
+                    # extraction; explicit empty list summary remains empty.
+                    summary = (observation.summary or '' if 'summary' in observation.model_fields_set
+                               else truncate(text, 2000))
+                    result.observations[index] = observation.model_copy(update={'content': text, 'summary': summary})
                 result.items[index] = Item.model_validate({**item.model_dump(), 'content': text,
-                    'summary': item.summary or truncate(text, 2000), 'fingerprint': ''})
+                    'summary': summary, 'fingerprint': ''})
 
         tasks = [asyncio.create_task(worker()) for _ in range(min(opts.concurrency, len(pending)))]
         if tasks:
@@ -416,15 +450,31 @@ class WebSource(Source):
         soup = _document(html, content_type)
         base = _effective_base(soup, base)
         items, seen = [], set()
+        observations: list[ItemObservation] = []
         for node in soup.select(selectors.item):
             name = title.value(node).strip()
             url = _link(base, link.value(node, default_attribute='href'))
             if not name or url is None or url in seen:
                 continue
             seen.add(url)
-            excerpt = truncate(summary.value(node), 2000) if summary else ''
-            items.append(Item(source_id=self.spec.id, kind='web', external_id=url, url=url,
+            raw_summary = summary.observe(node) if summary else None
+            raw_date = published.observe(node) if published else None
+            excerpt = truncate(raw_summary or '', 2000)
+            date = _published(raw_date, ctx) if raw_date else None
+            item = Item(source_id=self.spec.id, kind='web', external_id=url, url=url,
                 title=name, summary=excerpt, content=excerpt,
-                published=_published(published.value(node), ctx) if published else None, meta={'web_mode': 'list'}))
+                published=date, meta={'web_mode': 'list'})
+            items.append(item)
+            if self.spec.update_existing:
+                fields: dict[str, Any] = {'stable_external_id': True, 'title': item.title, 'url': item.url,
+                                          'meta': item.meta}
+                if raw_summary is not None:
+                    fields['summary'] = item.summary
+                if raw_date is not None and (date is not None or not raw_date.strip()):
+                    fields['published'] = date
+                # List excerpts are not full-body observations, even when
+                # details are disabled. New Items may still use the excerpt.
+                observations.append(ItemObservation(**fields))
         cached = _seen_cache(cursor, opts.url, (item.external_id for item in items))
-        return FetchResult(items, {'url': opts.url, 'seen': cached}, {'entries': len(items), 'seen_cached': len(cached)})
+        return FetchResult(items, {'url': opts.url, 'seen': cached},
+                           {'entries': len(items), 'seen_cached': len(cached)}, observations)

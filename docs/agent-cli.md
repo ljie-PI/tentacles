@@ -446,8 +446,9 @@ show 返回完整报告：id/pipeline_id/persona_version/kind/title/markdown/ite
 
 立即抓取指定的信息源。不写 ID 时抓取全部启用的源；显式写出 ID 时，即使该源已禁用也会抓取。
 
-- 源可设置 `update_existing: true`（默认 false，目前仅 RSS/Atom）。优先同源稳定外部 ID/别名，再按实际观察到的规范化 URL 回退至同源唯一标准 Item；不按指纹/标题定位，不覆盖跨源赢家或复活抑制记录。
-- 外部身份与 URL 不一致、同源 URL 多义或更新 URL 与另一标准 Item 冲突会使整个源批次失败回滚（别名、内容、评估、计数、游标均不部分提交）。同批别名只采用每个目标的首条有效观察；只改身份不触发内容更新。详见 README 的 RSS 原位更新说明。
+- 源可设置 `update_existing: true`（默认 false，目前支持 RSS/Atom 与 Web list）。优先同源稳定外部 ID/别名，再按实际观察到的规范化 URL 回退至同源唯一标准 Item；不按指纹/标题定位，不覆盖跨源赢家或复活抑制记录。
+- 外部身份与 URL 不一致、同源 URL 多义或更新 URL 与另一标准 Item 冲突会使整个源批次失败回滚（别名、内容、评估、计数、游标均不部分提交）。同批别名只采用每个目标的首条有效观察；只改身份不触发内容更新。详见 README 的原位更新说明。
+- Web list 只刷新本轮再发现的本源标准 Item，fetch_content 控制是否重新抓详情，详见 Web 信息源协议。
 - JSON 和文本结果区分 `new`、默认 0 的 `updated`、`dup`；成功交付存储的条目满足 `stats.fetched = new + updated + dup`。更新不再计为重复。
 - 内容变化会清除旧评估，并按内容活动时间重新进入 pipeline 窗口（包括已拒绝/已消费条目）；可能再次支付评分费用，但同 pipeline 不重复消费/报告。Feed 的发布时间筛选不变。
 - `items list/show` 及 HTTP 列表/详情返回可空 `updated_at` 和 `is_updated`，首次 `fetched_at` 不变。只存最新原文，旧报告 Markdown 不变；关闭开关不回滚内容。

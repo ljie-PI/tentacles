@@ -20,6 +20,7 @@ _TRACKING_PARAMS = {
 }
 
 ItemKind = Literal["rss", "email", "web"]
+LinkDisposition = Literal["new", "refresh", "skip"]
 
 
 def normalize_url(url: str) -> str:

@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any, Callable, Literal
 
 from tentacles.dedup import split_similar
-from tentacles.models import Item, ItemObservation, item_id, normalize_url
+from tentacles.models import Item, ItemObservation, LinkDisposition, item_id, normalize_url
 from tentacles.errors import Conflict
 from tentacles.personas.models import FeedbackView, PersonaEdit, PersonaView, edit_keywords, keywords
 from tentacles.timeutil import from_iso, to_iso, to_utc
@@ -639,6 +639,32 @@ class Store:
                     f" AND url != '' AND url IN ({placeholders})", chunk).fetchall()
                 known.update(row[0] for row in rows)
         return known
+
+    def classify_links(self, source_id: str, urls: list[str]) -> dict[str, LinkDisposition]:
+        """Classify current Web links before downloading details.
+
+        Observations alone never authorize a refresh. Only this source's stored
+        standard identity does; suppression wins even if an Item still exists.
+        This is a read hint, not write authorization: upsert resolves identity
+        and article dedup again inside the fenced publication transaction.
+        """
+        with self._lock:
+            known = self.seen_links(source_id, urls)
+            refreshable: set[str] = set()
+            suppressed: set[str] = set()
+            for offset in range(0, len(urls), 500):
+                chunk = urls[offset:offset + 500]
+                placeholders = ','.join('?' for _ in chunk)
+                rows = self._conn.execute(
+                    "SELECT external_id FROM items WHERE source_id = ? AND identity_policy = 'standard'"
+                    f" AND external_id IN ({placeholders})", [source_id, *chunk]).fetchall()
+                refreshable.update(row[0] for row in rows)
+                rows = self._conn.execute(
+                    f"SELECT external_id FROM suppressed_items WHERE source_id = ?"
+                    f" AND external_id IN ({placeholders})", [source_id, *chunk]).fetchall()
+                suppressed.update(row[0] for row in rows)
+        return {url: 'refresh' if url in refreshable and url not in suppressed
+                else 'skip' if url in known else 'new' for url in urls}
 
     def upsert_items(self, items: list[Item], *, source_id: str,
                      title_since: datetime | None, run_id: int | None = None,
