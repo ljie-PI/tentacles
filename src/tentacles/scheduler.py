@@ -57,11 +57,17 @@ class Scheduler:
         views = {}
         for key, task in self._tasks.items():
             state = self._store.get_task_state(task)
+            last_status, last_error = state.last_status, state.last_error
+            if task.kind == 'fetch' and state.last_run_at is None and last_status is None:
+                # Older fetches may have only source_state diagnostics. Fall
+                # back as a pair, never reviving an old error after a Task result.
+                source = self._store.get_source_state(task.target)
+                last_status, last_error = source.last_status, source.last_error
             views[key] = TaskView(
                 kind=task.kind, target=task.target, schedule=task.schedule, enabled=task.enabled,
                 last_run_at=state.last_run_at,
                 next_run_at=state.next_run(task) if task.enabled else None,
-                running=state.running(now), last_status=state.last_status, last_error=state.last_error)
+                running=state.running(now), last_status=last_status, last_error=last_error)
         return views
 
     def status(self) -> list[TaskView]:
