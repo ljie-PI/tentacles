@@ -59,7 +59,7 @@ A failed individual fetch's detailed sanitized status is available in run/source
 Domain errors: `invalid` 400, `not_found` 404, `conflict` and `busy` 409, `upstream` 502,
 unexpected exceptions 500 (`error`, generic message). Missing/wrong token is 401 (`unauthorized`),
 with `WWW-Authenticate: Bearer`. Untrusted browser origins or no-token API hosts are 403 (`forbidden`). Request validation is 400, not FastAPI's default 422.
-Responses never echo validation input, unexpected exception content or configured credentials.
+Request-shape validation errors never echo their input. Domain errors may identify supplied IDs or invalid values, with configured credentials redacted; unexpected exceptions use a generic message.
 
 ## Frontend
 
