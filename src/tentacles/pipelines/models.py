@@ -70,6 +70,21 @@ class PipelineQuery:
     limit: int
 
 
+class ReportDraft(BaseModel):
+    """Processor-owned content and provenance, without a publication location."""
+
+    pipeline_id: str
+    persona_version: int
+    kind: str
+    title: str
+    markdown: str
+    item_ids: list[str]
+    model: str | None
+    usage: TokenUsage
+    cost: float | None
+    created_at: datetime
+
+
 class ReportView(BaseModel):
     id: str
     pipeline_id: str
@@ -97,6 +112,8 @@ class PipelineView(BaseModel):
     filter_schedule: str | None = None
     next_run_at: datetime | None = None
     filter_next_run_at: datetime | None = None
+    running: bool = False
+    filter_running: bool = False
     last_run_at: datetime | None
     last_status: str | None
     last_error: str | None

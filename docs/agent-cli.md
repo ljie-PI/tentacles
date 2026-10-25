@@ -516,10 +516,14 @@ fetch 项保留 source_id/new/dup；filter/pipeline 项含 pipeline_id/report_id
 
 ### `scheduler status`
 
-列出来源任务（含禁用来源）及启用 pipeline 的实际调度任务。没有 filter_schedule 的手动过滤锁不作为调度任务列出。
-last_run_at 是最近已完成任务的**开始时间**，running 表示锁未到期，last_status 为 ok/error 或尚未运行时的 null。
-next_run_at 使用当前频率计算；禁用来源为 null。filter/pipeline 的 pending 是当前窗口、当前 Persona 版本的待报告数量，
-fetch 的 pending 为 null。同一 pipeline 的两个调度角色显示相同 pending。
+列出全部配置的来源任务（fetch），以及每条 pipeline 的运行（pipeline）和过滤（filter）任务，
+包括禁用的 pipeline 和没有 filter_schedule 的过滤角色。
+last_run_at 是最近已完成任务的**开始时间**，running 表示锁未到期。
+last_status 为 ok/error；没有已完成 Task 的旧来源沿用 source_state 的最近状态和错误，无历史结果时为 null。
+已有 Task 结果时只使用该结果，不回退到旧来源错误。
+next_run_at 使用当前频率计算；禁用任务（包括未配置 filter_schedule 的过滤任务）为 null。
+状态与 sources list / pipelines list 共用同一处计算。filter/pipeline 的 pending 是当前窗口、当前 Persona 版本的待报告数量，
+fetch 的 pending 为 null。同一 pipeline 的两个角色显示相同 pending。
 
 ```json
 [{"kind":"pipeline","target":"daily","schedule":"@daily","enabled":true,

@@ -11,7 +11,7 @@ from tentacles.llm.registry import ModelRegistry
 from tentacles.models import Item
 from tentacles.personas.models import PersonaView
 from tentacles.pipelines.config import PipelineSpec, StageSpec
-from tentacles.pipelines.models import Evaluation, ReportView, StageBatch
+from tentacles.pipelines.models import Evaluation, ReportDraft, StageBatch
 from tentacles.schemas import Completion
 
 
@@ -51,10 +51,11 @@ class Processor(Protocol):
     async def process(self, config: AppConfig, spec: PipelineSpec, persona: PersonaView,
                       selected: list[tuple[Item, Evaluation]], models: ModelRegistry,
                       clock: Callable[[], datetime],
-                      on_completion: Callable[[Completion], None]) -> list[ReportView]:
-        """Return reports (possibly empty), recording every known completion.
+                      on_completion: Callable[[Completion], None]) -> list[ReportDraft]:
+        """Return location-free drafts, recording every known completion.
 
-        The caller publishes atomically and consumes ALL selected evaluations,
-        not just report members. Failures leave the entire selection pending.
+        Publication allocates identities/paths in the fenced Store transaction
+        and consumes ALL selected evaluations, not just report members.
+        Failures leave the entire selection pending.
         """
         ...

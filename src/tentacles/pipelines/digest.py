@@ -14,8 +14,7 @@ from tentacles.personas.models import PersonaView
 from tentacles.personas.render import render_persona
 from tentacles.pipelines.adapters import ModelRequirement
 from tentacles.pipelines.config import PipelineSpec
-from tentacles.pipelines.models import Evaluation, ReportView
-from tentacles.pipelines.report_path import new_report_location
+from tentacles.pipelines.models import Evaluation, ReportDraft
 from tentacles.pipelines.report_writing import complete_report, require_citations
 from tentacles.schemas import Completion
 from tentacles.prompts import load_prompt
@@ -31,7 +30,7 @@ _SYSTEM = '''基于给定材料编写新闻日报，按用户画像取舍、排�
 
 async def make_digest(config: AppConfig, spec: PipelineSpec, persona: PersonaView,
                       selected: list[tuple[Item, Evaluation]], models: ModelRegistry,
-                      clock: Callable[[], datetime], on_completion: Callable[[Completion], None]) -> list[ReportView]:
+                      clock: Callable[[], datetime], on_completion: Callable[[Completion], None]) -> list[ReportDraft]:
     now = to_utc(clock())
     items: list[dict[str, Any]] = [{'number': i + 1, 'id': item.id, 'source': item.source_id, 'title': item.title,
               'summary': item.summary[:600] or '（无摘要）', 'url': item.url,
@@ -58,10 +57,9 @@ async def make_digest(config: AppConfig, spec: PipelineSpec, persona: PersonaVie
     title = f'{spec.name or spec.id} {now.astimezone(ZoneInfo(config.app.timezone)):%Y-%m-%d}'
     appendix = '\n'.join(f'[{item["number"]}] {item["source"]}: {item["title"]} {item["url"]}' for item in items)
     markdown = f'# {title}\n\n{content}\n\n## Sources\n\n{appendix}\n'
-    report_id, path = new_report_location(config, spec.id, 'digest', title, now)
-    return [ReportView(id=report_id, pipeline_id=spec.id, persona_version=persona.version, kind='digest',
+    return [ReportDraft(pipeline_id=spec.id, persona_version=persona.version, kind='digest',
         title=title, markdown=markdown, item_ids=[item.id for item, _ in selected], model=result.model,
-        usage=result.usage, cost=result.cost, path=str(path), created_at=now)]
+        usage=result.usage, cost=result.cost, created_at=now)]
 
 
 class DigestProcessor:

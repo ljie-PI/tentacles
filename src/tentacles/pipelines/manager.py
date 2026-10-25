@@ -12,30 +12,21 @@ from tentacles.llm.registry import ModelRegistry
 from tentacles.personas.models import PersonaView
 from tentacles.pipelines.config import PipelineSpec
 from tentacles.pipelines.filtering import filter_items, filter_stats
-from tentacles.pipelines.models import PipelineOutcome, PipelineQuery, PipelineView, FilterBatch
+from tentacles.pipelines.models import PipelineOutcome, PipelineQuery, FilterBatch
 from tentacles.pipelines.registry import PROCESSORS
 from tentacles.runs import RunLifecycle, RunOperation, RunResult
-from tentacles.store import Store
+from tentacles.store import RunWriter, Store
 from tentacles.tasks import Task
 from tentacles.timeutil import parse_duration, to_utc
 
 
 class PipelineManager:
     def __init__(self, config: AppConfig, store: Store, models: ModelRegistry,
-                 clock: Callable[[], datetime]):
+                 clock: Callable[[], datetime], *, task: Callable[[str, str], Task]):
         self._config, self._store, self._models, self._clock = config, store, models, clock
         self._runs = RunLifecycle(store, clock)
         self._specs = {spec.id: spec for spec in config.pipelines}
-        self._tasks = {(kind, spec.id): Task(kind, spec.id,
-                            spec.filter_schedule if kind == 'filter' and spec.filter_schedule else spec.schedule,
-                            config.app.timezone, spec.enabled and (kind != 'filter' or spec.filter_schedule is not None))
-                       for kind in ('filter', 'pipeline') for spec in config.pipelines}
-
-    def initialize(self) -> None:
-        self._store.sync_pipeline_schedules(list(self._tasks.values()), to_utc(self._clock()))
-
-    def scheduled_tasks(self) -> list[Task]:
-        return [task for task in self._tasks.values() if task.enabled]
+        self._task = task
 
     def spec(self, pipeline_id: str) -> PipelineSpec:
         if pipeline_id not in self._specs:
@@ -49,23 +40,6 @@ class PipelineManager:
             assert persona is not None
             counts[spec.id] = self._store.pending_count(self._query(spec, persona, now, spec.processor.max_items))
         return counts
-
-    def list_pipelines(self) -> list[PipelineView]:
-        views = []
-        now = to_utc(self._clock())
-        pending = self.pending_counts(now)
-        for spec in self._specs.values():
-            task = self._tasks['pipeline', spec.id]
-            filter_task = self._tasks['filter', spec.id]
-            state = self._store.get_task_state(task)
-            filter_state = self._store.get_task_state(filter_task)
-            views.append(PipelineView(id=spec.id, name=spec.name, persona=spec.persona,
-                sources=spec.sources, schedule=spec.schedule, enabled=spec.enabled, processor=spec.processor.type,
-                pending=pending[spec.id], filter_schedule=spec.filter_schedule,
-                next_run_at=state.next_run(task) if task.enabled else None,
-                filter_next_run_at=filter_state.next_run(filter_task) if filter_task.enabled else None,
-                last_run_at=state.last_run_at, last_status=state.last_status, last_error=state.last_error))
-        return views
 
     def _query(self, spec: PipelineSpec, persona: PersonaView, now: datetime, limit: int) -> PipelineQuery:
         return PipelineQuery(spec.id, spec.sources, persona.version, now - parse_duration(spec.window), now, limit)
@@ -101,7 +75,7 @@ class PipelineManager:
                 for stage in batch.batches:
                     op.metrics.merge(stage.metrics)
             await op.commit(lambda writer: writer.save_evaluations(batch.evaluations), error=batch.error)
-        result = await self._runs.execute(self._tasks['filter', spec.id], work, due_only=due_only,
+        result = await self._runs.execute(self._task('filter', spec.id), work, due_only=due_only,
             failure_message='pipeline operation failed', on_finished=on_finished)
         return self._outcome(spec, result)
 
@@ -123,15 +97,21 @@ class PipelineManager:
             op.stats['processor_candidates'] = len(selected)
             if not selected:
                 op.stats['no_new'] = True
-                await op.commit(lambda writer: writer.save_reports([], []))
+                await op.commit(lambda writer: None)
                 return
             evaluations = [evaluation for _, evaluation in selected]
             op.stats['consumed'] = 0
-            reports = await PROCESSORS[spec.processor.type].process(
+            drafts = await PROCESSORS[spec.processor.type].process(
                 self._config, spec, persona, selected, self._models, self._clock, op.metrics.record)
 
-            await op.commit(lambda writer: writer.save_reports(reports, evaluations),
-                            stats={'consumed': len(selected), 'report_ids': [r.id for r in reports]})
-        result = await self._runs.execute(self._tasks['pipeline', spec.id], work, due_only=due_only,
+            # Failed SQL/commit must not leak allocated IDs into failure stats.
+            publication_stats = {'consumed': len(selected), 'report_ids': []}
+
+            def publish(writer: RunWriter) -> None:
+                reports = writer.save_reports(drafts, evaluations, reports_dir=self._config.reports_dir)
+                publication_stats['report_ids'] = [report.id for report in reports]
+
+            await op.commit(publish, stats=publication_stats)
+        result = await self._runs.execute(self._task('pipeline', spec.id), work, due_only=due_only,
                                          failure_message='pipeline operation failed')
         return self._outcome(spec, result)

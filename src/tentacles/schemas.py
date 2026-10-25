@@ -39,6 +39,7 @@ class SourceView(BaseModel):
     last_error: str | None
     total_items: int
     next_run_at: datetime | None = None
+    running: bool = False
 
 
 class FetchOutcome(BaseModel):

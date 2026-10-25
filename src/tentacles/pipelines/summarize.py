@@ -23,8 +23,7 @@ from tentacles.personas.models import PersonaView
 from tentacles.personas.render import render_persona
 from tentacles.pipelines.adapters import ModelRequirement
 from tentacles.pipelines.config import PipelineSpec
-from tentacles.pipelines.models import Evaluation, ReportView
-from tentacles.pipelines.report_path import new_report_location
+from tentacles.pipelines.models import Evaluation, ReportDraft
 from tentacles.schemas import Completion
 from tentacles.prompts import load_prompt, MAX_PROMPT_CHARS
 from tentacles.text import truncate
@@ -142,7 +141,7 @@ def _entry(item: Item, row: SummaryRow | None, zone: ZoneInfo, redact: Callable[
 
 async def make_summarize(config: AppConfig, spec: PipelineSpec, persona: PersonaView,
                          selected: list[tuple[Item, Evaluation]], models: ModelRegistry,
-                         clock: Callable[[], datetime], on_completion: Callable[[Completion], None]) -> list[ReportView]:
+                         clock: Callable[[], datetime], on_completion: Callable[[Completion], None]) -> list[ReportDraft]:
     zone = ZoneInfo(config.app.timezone)
     metrics = UsageTotals()
     parsed: dict[str, SummaryRow] = {}
@@ -199,11 +198,10 @@ async def make_summarize(config: AppConfig, spec: PipelineSpec, persona: Persona
     sections = [f'# {_literal(title)}']
     for heading, entries in [('需要处理', actions), ('仅供参考', information), ('未能解析', unparsed)]:
         sections.append(f'## {heading}\n\n' + ('\n\n'.join(_entry(item, parsed.get(item.id), zone, models.redact) for item in entries) or '（无）'))
-    report_id, path = new_report_location(config, spec.id, 'summarize', title, now)
-    return [ReportView(id=report_id, pipeline_id=spec.id, persona_version=persona.version, kind='summarize',
+    return [ReportDraft(pipeline_id=spec.id, persona_version=persona.version, kind='summarize',
                       title=title, markdown='\n\n'.join(sections) + '\n',
                       item_ids=[item.id for item, _ in selected], model=', '.join(metrics.models) or None,
-                      usage=metrics.usage, cost=metrics.cost, path=str(path), created_at=now)]
+                      usage=metrics.usage, cost=metrics.cost, created_at=now)]
 
 
 class SummarizeProcessor:
