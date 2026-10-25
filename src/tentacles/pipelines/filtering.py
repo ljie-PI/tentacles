@@ -13,6 +13,7 @@ from tentacles.personas.models import PersonaView
 from tentacles.pipelines.config import PipelineSpec, KeywordSpec
 from tentacles.llm.registry import ModelRegistry
 from tentacles.pipelines.decision import score_decisions
+from tentacles.pipelines.llm import score_llm
 from tentacles.pipelines.models import Evaluation, StageScore, StageBatch, FilterBatch
 
 
@@ -60,6 +61,9 @@ async def filter_items(items: list[Item], persona: PersonaView, spec: PipelineSp
         batch = progress.batches[i]
         if stage.type == 'decision':
             await score_decisions(pending, persona, stage, i, models, batch)
+            scores = batch.scores
+        elif stage.type == 'llm':
+            await score_llm(pending, persona, stage, i, models, batch)
             scores = batch.scores
         else:
             scores = []

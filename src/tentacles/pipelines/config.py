@@ -54,7 +54,13 @@ class DecisionSpec(ThresholdSpec):
     relevance_type: Literal['noul', 'score'] = 'noul'
 
 
-StageSpec = Annotated[Union[KeywordSpec, DecisionSpec], Field(discriminator='type')]
+class LLMSpec(ThresholdSpec):
+    type: Literal['llm']
+    model: str | None = None
+    batch_size: int = Field(default=20, ge=1, le=100)
+
+
+StageSpec = Annotated[Union[KeywordSpec, DecisionSpec, LLMSpec], Field(discriminator='type')]
 
 
 class ProcessorSpec(BaseModel):

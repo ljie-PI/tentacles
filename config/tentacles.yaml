@@ -107,6 +107,11 @@ pipelines:
       #   relevance_type: noul    # 或 score：四级量表归一化到 0–1
       #   reject_below: 0.3
       #   accept_above: 0.8
+      # 可选：让聊天模型批量处理前面阶段拿不准的项（同样可能产生费用）。
+      # - type: llm
+      #   model: fast             # 可省略，默认 defaults.models.filter
+      #   batch_size: 20
+      #   reject_below: 0.5
     processor:
       type: digest
       language: zh-CN
