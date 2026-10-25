@@ -11,6 +11,7 @@ from tentacles.asyncutil import run_store_call
 from tentacles.config import AppConfig
 from tentacles.errors import ConfigError, NotFound, UpstreamError
 from tentacles.llm.registry import ModelRegistry
+from tentacles.llm.config import Stage
 from tentacles.personas.models import PersonaView
 from tentacles.pipelines.config import PipelineSpec
 from tentacles.pipelines.digest import make_digest
@@ -46,11 +47,13 @@ class PipelineManager:
                        for kind in ('filter', 'pipeline') for spec in config.pipelines}
         for spec in config.pipelines:
             for i, stage in enumerate(spec.filters):
-                if stage.type == 'decision':
+                if stage.type in {'decision', 'llm'}:
+                    phase: Stage = 'decision' if stage.type == 'decision' else 'filter'
+                    kind = 'decision' if stage.type == 'decision' else 'chat'
                     try:
-                        models.resolve('decision', stage.model)
+                        models.resolve(phase, stage.model)
                     except (ConfigError, NotFound):
-                        raise ConfigError(f'pipeline {spec.id!r}.filters[{i}].model requires an existing decision model') from None
+                        raise ConfigError(f'pipeline {spec.id!r}.filters[{i}].model requires an existing {kind} model') from None
             if spec.processor.prompt_file is not None:
                 load_prompt(config.resolve(spec.processor.prompt_file))
             if store.get_persona(spec.persona) is None and spec.persona not in config.personas:

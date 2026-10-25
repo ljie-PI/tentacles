@@ -88,7 +88,8 @@ class ModelClient:
 
 class ChatModel(ModelClient):
     async def complete(self, messages: list[dict[str, str]], *, system: str | None = None,
-                       max_tokens: int | None = None, temperature: float | None = None) -> Completion:
+                       max_tokens: int | None = None, temperature: float | None = None,
+                       on_completion: Callable[[Completion], None] | None = None) -> Completion:
         if not messages or any(m.get('role') not in {'system', 'user', 'assistant'} or
                                not isinstance(m.get('content'), str) for m in messages):
             raise ConfigError('messages require system/user/assistant roles and string content')
@@ -123,13 +124,16 @@ class ChatModel(ModelClient):
             body['temperature'] = temperature
         data = await self._post(path, body, headers=headers)
         try:
+            result = self._result(data, '', anthropic=anthropic)
+            if on_completion is not None:
+                on_completion(result)
             content = data['content'] if anthropic else data['choices'][0]['message']['content']
             if isinstance(content, list):
                 content = ''.join(block['text'] for block in content
                                   if block.get('type') in {'text', 'output_text'} and isinstance(block.get('text'), str))
             if not isinstance(content, str):
                 raise ValueError('no text')
-            return self._result(data, content, anthropic=anthropic)
+            return result.model_copy(update={'text': content})
         except (KeyError, IndexError, TypeError, ValueError, AttributeError):
             raise UpstreamError(f'model {self.name!r}: invalid chat response') from None
 

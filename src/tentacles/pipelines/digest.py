@@ -52,8 +52,8 @@ async def make_digest(config: AppConfig, spec: PipelineSpec, persona: PersonaVie
         raise UpstreamError('digest prompt exceeds size limit')
     system += f'\n输出语言：{spec.processor.language}\n追加指令：{spec.processor.instructions}'
     name = models.resolve('process', spec.processor.model)
-    result = await models.chat(name).complete([{'role': 'user', 'content': user}], system=system)
-    on_completion(result)
+    result = await models.chat(name).complete([{'role': 'user', 'content': user}], system=system,
+                                             on_completion=on_completion)
     now = to_utc(clock())
     content = models.redact(result.text).strip()
     references = [int(value) for value in re.findall(r'\[(\d+)\]', content)]
