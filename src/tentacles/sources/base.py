@@ -6,15 +6,19 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Callable, ClassVar, Type
+from typing import Any, Callable, ClassVar, Type, TYPE_CHECKING
 
 from pydantic import BaseModel, ValidationError
 
-from tentacles.config import SourceSpec, format_loc
+from tentacles.config import AppConfig, SourceSpec, format_loc
 from tentacles.errors import ConfigError
 from tentacles.models import Item
 from tentacles.net import HttpPool
 from tentacles.sources.imap_client import ImapFactory, connect_imap
+from tentacles.llm.types import UsageTotals
+
+if TYPE_CHECKING:
+    from tentacles.llm.registry import ModelRegistry
 
 
 @dataclass
@@ -24,6 +28,8 @@ class FetchContext:
     imap_factory: ImapFactory = connect_imap
     timezone: str = 'UTC'
     seen_links: Callable[[list[str]], set[str]] | None = None
+    models: ModelRegistry | None = None
+    metrics: UsageTotals = field(default_factory=UsageTotals)
 
 
 @dataclass
@@ -43,6 +49,10 @@ class Source(ABC):
         self.spec = spec
         self.options = options
 
+    @classmethod
+    def validate_config(cls, options: BaseModel, config: AppConfig, where: str) -> None:
+        """Validate references outside the source-local options model."""
+
     @abstractmethod
     async def fetch(self, cursor: dict[str, Any], ctx: FetchContext) -> FetchResult: ...
 
@@ -55,16 +65,19 @@ def register(cls: type[Source]) -> type[Source]:
     return cls
 
 
-def validate_source(spec: SourceSpec, where: str = "source") -> BaseModel:
+def validate_source(spec: SourceSpec, where: str = "source", *, config: AppConfig | None = None) -> BaseModel:
     cls = SOURCE_TYPES.get(spec.type)
     if cls is None:
         known = ", ".join(sorted(SOURCE_TYPES))
         raise ConfigError(f"{where}.type: unknown source type {spec.type!r} (known: {known})")
     try:
-        return cls.Options.model_validate(spec.options)
+        options = cls.Options.model_validate(spec.options)
     except ValidationError as exc:
         err = exc.errors()[0]
         raise ConfigError(f"{where}.{format_loc(err['loc'])}: {err['msg']}") from exc
+    if config is not None:
+        cls.validate_config(options, config, where)
+    return options
 
 
 def build_source(spec: SourceSpec) -> Source:

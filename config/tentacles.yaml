@@ -146,6 +146,22 @@ sources:
     timeout: 30
     proxy: ${HTTP_PROXY:-}
 
+  # 杂乱页面的付费抽取示例，默认关闭；使用 defaults.models.extract。
+  - id: web-llm
+    type: web
+    mode: llm
+    name: 网页智能抽取
+    enabled: false
+    schedule: 2h
+    url: https://example.com/updates
+    # model: fast          # 可选显式覆盖；必须是 chat 模型
+    max_input_chars: 20000
+    fetch_content: false
+    headers: {}
+    cookies: {}
+    timeout: 30
+    proxy: ${HTTP_PROXY:-}
+
 # tick 会先抓取、再只过滤、最后运行到期的 pipeline；模型调用可能产生费用。
 # 也可手动执行 pipelines filter/run ID；enabled: false 关闭自动执行。
 pipelines:

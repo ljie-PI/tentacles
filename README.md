@@ -88,7 +88,7 @@ UIDVALIDITY 和最后处理 UID；首次、UIDVALIDITY 或账户身份变化时�
 因此内容相同、Message-ID 不同的两封邮件都能保留。认证／连接等失败按 upstream 处理，错误不回显密码、
 服务端响应或邮件内容；像其他来源一样，单个失败以抓取结果的 `status=error` 返回，不阻断其他源。
 
-## 网页 list / page 信息源
+## 网页 list / page / llm 信息源
 
 没有 RSS 的站点可以配置 `type: web`：list 用 CSS 选择器提取文章，可选并发抓新详情；page 保存内容版本，
 内容变化时生成带增删行差异的条目。同 URL 的页面版本可独立入库，不会被普通文章判重吞掉。
@@ -102,6 +102,8 @@ tentacles items show ITEM_ID
 
 使用前替换 URL 与选择器；属性写法、500-id 缓存、Cookie 隔离和页面版本身份见 [Web 信息源协议](docs/web-sources.md)。
 仅支持静态页面；非 2xx（含重定向）会失败并保留旧游标。
+杂乱页面还可用 `mode: llm`，由 extract 阶段模型从有界“文本 + 链接”中抽取；编造链接被丢弃。
+`web-llm` 示例默认关闭，启用后会发送页面内容并可能产生费用；严格 JSON、缓存与计费规则同见协议。
 
 ## 模型配置
 
