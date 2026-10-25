@@ -513,3 +513,28 @@ def test_web_list_and_page_fetch_json_contract(write_config, web):
     changed = run('sources', 'fetch', 'page')
     assert changed.exit_code == 0 and payload(changed)[0]['new'] == 1
     assert payload(run('runs', 'list', '--kind', 'fetch', '--target', 'page'))[0]['status'] == 'ok'
+
+
+def test_llm_web_fetch_and_usage_json_contract(write_config, web):
+    import httpx
+    from test_fetch_web import URL
+    from test_models import CHAT_URL, chat_reply
+    from test_web_extract import extracted, extraction_config
+    path = write_config(extraction_config())
+    web.serve(URL, '<main><a href="/one">Robotics story</a></main>')
+    web.handle(CHAT_URL, lambda request: httpx.Response(200, json=chat_reply(json.dumps({
+        'items': [extracted('Robotics story', '/one'), extracted('Invented', 'https://invented.example.test/')]}))))
+
+    def run(*args):
+        return CliRunner().invoke(app, ['-c', str(path), '--json', *args], obj={'transport': web.transport()}, env={})
+
+    result = run('sources', 'fetch', 'web-news')
+    assert result.exit_code == 0 and payload(result)[0]['new'] == 1
+    assert payload(result)[0]['stats']['usage']['total_tokens'] == 15
+    listed = payload(run('items', 'list'))
+    assert listed['total'] == 1 and listed['items'][0]['title'] == 'Robotics story'
+    runs = run('runs', 'list', '--kind', 'fetch', '--target', 'web-news')
+    assert runs.exit_code == 0 and payload(runs)[0]['cost'] == 0.01
+    again = run('sources', 'fetch', 'web-news')
+    assert again.exit_code == 0 and payload(again)[0]['stats']['not_modified'] is True
+    assert len(web.requests_to(CHAT_URL)) == 1

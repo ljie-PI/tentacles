@@ -1,4 +1,4 @@
-# Web 信息源：list / page
+# Web 信息源：list / page / llm
 
 配置 `type: web`，先运行 `tentacles --json config check`，再手动 `sources fetch ID`。
 检查每项 `status`；失败项返回 `status=error`，批量命令仍退出 0。用 `items list --source ID`
@@ -59,6 +59,47 @@
 普通文章和邮件规则保持不变，页面版本也不会污染文章的判重候选。source + external_id 仍稳定：
 恢复已保存内容会复用既有版本，不生成同身份重复行。`stats.changed`、前后哈希和本次 diff 会记录恢复事件；
 已有版本的消费账本不重置。浏览历史版本请使用条目 id，而不是仅访问当前页面 URL。
+
+## llm：从杂乱页面抽取
+
+```yaml
+- id: web-llm
+  type: web
+  mode: llm
+  url: https://example.com/updates
+  schedule: 2h
+  enabled: false
+  # model: fast            # 显式覆盖优先，否则 defaults.models.extract
+  max_input_chars: 20000
+  fetch_content: false    # 可选：对新抽取链接继续抓正文
+```
+
+此模式会将页面内容发送给配置的 extract 模型，可能产生费用；确认隐私与费用后再启用。
+启动时检查引用必须为已有 chat 模型，仍允许 key 为空，仅在真正调用时检查凭据。
+
+先去除 script/style、导航、页眉页脚、表单等无关元素，转换为文本及规范化绝对链接，再把 text
+截断到 `max_input_chars`（默认 20000，1–200000）。请求另含当前时间与 app 时区；页面内容作为数据，
+不作为模型指令。页面会话、headers/cookies/proxy 不会转交模型 provider，使用独立模型 HTTP 客户端。
+
+严格输出协议如下；summary 可以为空，published 缺失或未知为 null，无法解析的日期保存为空：
+
+```json
+{"items":[{"title":"标题","url":"页面中存在的链接","summary":"摘要","published":null}]}
+```
+
+相对／带追踪参数的结果也会规范化；链接不在清洗后实际页面链接集合中则丢弃，并记 dropped_links。
+未知链接在校验其余字段前丢弃，不让无关幻觉行拖垮正确结果。同一链接本批或历史只交付一次，
+标题／摘要按已配置模型密钥脱敏，保留原始 URL 身份。仍可使用详情抓取及 500-id／持久观察记录规则。
+
+与宽容的摘要处理器不同，此来源遵照严格 JSON 协议：围栏、解释文字、尾逗号、非法 schema、
+超过 100 万字符的响应或模型调用失败都会令**本来源本次抓取失败**，旧游标保留，可重试。
+不发布局部结果，不回显模型响应正文。已返回的 usage/cost 保留在失败／取消运行中；
+HTTP200 但正文无效时也保留已知计费。迟到的旧租约结果只更新自己的费用，不覆盖新游标。
+
+模型输入文本哈希和模型定义缓存避免无效重复调用：输入不变、无有效链接或所有链接已知时跳过付费请求。
+更新模型定义／源覆盖／输入上限会重新判断；API key 轮换不会使相同输入重新计费。
+fetch stats 及 runs.stats 的 usage、cost、models 记录实际返回信息，runs.cost 保存本次已知费用。
+无付费请求时不伪造 usage；不要把同一 fetch 的 stats.cost 与 run.cost 再累加一次。
 
 ## HTTP 与运行边界
 

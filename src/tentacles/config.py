@@ -195,7 +195,7 @@ def _check_sources(config: AppConfig) -> None:
         if spec.id in seen:
             raise ConfigError(f"sources[{i}].id: duplicate source id {spec.id!r}")
         seen.add(spec.id)
-        validate_source(spec, where=f"sources[{i}]")
+        validate_source(spec, where=f"sources[{i}]", config=config)
 
 
 def _check_models(config: AppConfig) -> None:

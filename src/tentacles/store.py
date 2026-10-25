@@ -822,7 +822,7 @@ class Store:
                            row["last_status"], row["last_error"], row["total_items"])
 
     def save_fetch_success(self, st: SourceState, run_id: int, *, now: datetime,
-                           stats: dict[str, Any]) -> None:
+                           stats: dict[str, Any], cost: float | None = None) -> None:
         """Advance the cursor and finish its run together, or neither on failure."""
         with self._lock, self._conn:
             self._conn.execute("BEGIN IMMEDIATE")
@@ -836,23 +836,31 @@ class Store:
                 (st.source_id, json.dumps(st.cursor, ensure_ascii=False), to_iso(st.last_fetch_at),
                  st.last_status, st.last_error, st.total_items),
             )
-            self._finish_run(run_id, status="ok", now=now, stats=stats)
+            self._finish_run(run_id, status="ok", now=now, stats=stats, cost=cost)
             self._complete_task_run(run_id, 'ok', None)
 
     def save_fetch_failure(self, source_id: str, run_id: int | None, *, started_at: datetime,
-                           finished_at: datetime, error: str) -> None:
+                           finished_at: datetime, error: str, stats: dict[str, Any] | None = None,
+                           cost: float | None = None) -> None:
         """Record failure without overwriting a cursor committed by another fetch."""
         with self._lock, self._conn:
             self._conn.execute("BEGIN IMMEDIATE")
             if run_id is not None and not self._run_is_running(run_id):
-                return  # an expired owner must not overwrite the replacement's source state
+                # Late known fees belong to the expired run, never the replacement
+                # task/cursor. Preserve its original failure reason and other stats.
+                previous = self._conn.execute("SELECT stats FROM runs WHERE id = ? AND status = 'failed'", (run_id,)).fetchone()
+                if previous is not None and stats:
+                    combined = {**json.loads(previous['stats']), **stats}
+                    self._conn.execute('UPDATE runs SET stats = ?, cost = COALESCE(?, cost) WHERE id = ?',
+                                       (json.dumps(combined), cost, run_id))
+                return
             self._conn.execute(
                 "INSERT INTO source_state (source_id, last_fetch_at, last_status, last_error)"
                 " VALUES (?, ?, 'error', ?) ON CONFLICT (source_id) DO UPDATE SET"
                 " last_fetch_at = excluded.last_fetch_at, last_status = excluded.last_status,"
                 " last_error = excluded.last_error", (source_id, to_iso(started_at), error))
             if run_id is not None:
-                self._finish_run(run_id, status="failed", now=finished_at, error=error)
+                self._finish_run(run_id, status="failed", now=finished_at, error=error, stats=stats, cost=cost)
                 self._complete_task_run(run_id, 'failed', error)
 
     # ---- runs ---------------------------------------------------------------
