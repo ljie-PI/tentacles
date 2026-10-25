@@ -108,7 +108,7 @@ def _uid(value: Any) -> int:
 
 
 _REPLY_BOUNDARY = re.compile(
-    r'^(?:On .+wrote:|[在于].+写道[：:]|[-_]{2,}\s*(?:Original Message|原始邮件|Forwarded message|转发邮件)'
+    r'^(?:On .+\bwrote:|[在于].+写道[：:]|[-_]{2,}\s*(?:Original Message|原始邮件|Forwarded message|转发邮件)'
     r'\s*[-_]{2,}|Begin forwarded message:)\s*$', re.I)
 
 
@@ -162,19 +162,25 @@ def _reply_attribution(header: str) -> bool:
             and all(word.replace('-', '').replace("'", '').isalpha() and not word[0].islower() for word in name))
 
 
+def _sentence_end(line: str) -> bool:
+    return line.rstrip(" \t\"'”’»)]").endswith(('.', '!', '?', '。', '！', '？'))
+
+
 def _reply_header(lines: list[str], start: int) -> bool:
     header = lines[start].strip()
     if _reply_attribution(header):
         return True
-    if not re.match(r'^(?:On\s|[在于])', header, re.I) or header.endswith(('.', '!', '?', '。', '！', '？')):
+    if (_REPLY_BOUNDARY.fullmatch(header) or _sentence_end(header)
+            or not re.match(r'^(?:On\s|[在于])', header, re.I)):
         return False
     # Mail clients soft-wrap attribution headers. Join only that bounded,
     # uninterrupted paragraph, requiring date/sender evidence so ordinary prose
     # mentioning "wrote" is not mistaken for a reply attribution.
     for line in lines[start + 1:start + 5]:
-        if not line.strip():
+        continuation = line.strip()
+        if not continuation or _sentence_end(continuation) or _REPLY_BOUNDARY.fullmatch(continuation):
             break
-        header += ' ' + line.strip()
+        header += ' ' + continuation
         if len(header) > 1000:
             break
         if _reply_attribution(header):

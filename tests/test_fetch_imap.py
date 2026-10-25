@@ -559,3 +559,55 @@ def test_reply_cleanup_preserves_normal_paragraph_containing_wrote(write_config,
             await service.aclose()
 
     asyncio.run(scenario())
+
+
+@pytest.mark.parametrize('body', [
+    'On 2026-10-25 I rewrote:\n- the parser',
+    'On 2026-10-25 I overwrote:\n- the parser',
+    'On 2026-10-25\nI rewrote:\n- the parser',
+])
+def test_reply_cleanup_requires_the_independent_wrote_word(write_config, body):
+    text = 'Fresh update\n\n' + body
+    fake = FakeIMAP({'"INBOX"': Mailbox(messages={1: mail(body=text)})})
+    path = write_config(imap_config())
+
+    async def scenario():
+        service = TentaclesService.open(path, env={'MAIL_PASSWORD': 'secret-app-password'},
+                                        imap_factory=fake.factory, clock=lambda: NOW)
+        try:
+            assert (await service.fetch_sources())[0].new == 1
+            item = service.get_item(service.list_items().items[0].id)
+            assert item.content == text
+        finally:
+            await service.aclose()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(('prose', 'trailer'), [
+    ('On this project we made\n2 changes.', 'Here is what Alice <alice@example.test> wrote:\nNew technical findings'),
+    ('On this project we completed phase 2\nand shipped it.',
+     'On Sun, 25 Oct 2026 Alice <alice@example.test> wrote:\nOld quoted reply body'),
+    ('On this project we completed phase 2\nand shipped it.”',
+     'On Sun, 25 Oct 2026 Alice <alice@example.test> wrote:\nOld quoted reply body'),
+    ('On this project I wrote:', 'On Sun, 25 Oct 2026 Alice <alice@example.test> wrote:\nOld quoted reply body'),
+])
+def test_reply_cleanup_does_not_borrow_attribution_across_new_content(write_config, prose, trailer):
+    text = f'Fresh update\n\n{prose}\n{trailer}'
+    expected = f'Fresh update\n\n{prose}'
+    if trailer.startswith('Here'):
+        expected = text
+    fake = FakeIMAP({'"INBOX"': Mailbox(messages={1: mail(body=text)})})
+    path = write_config(imap_config())
+
+    async def scenario():
+        service = TentaclesService.open(path, env={'MAIL_PASSWORD': 'secret-app-password'},
+                                        imap_factory=fake.factory, clock=lambda: NOW)
+        try:
+            assert (await service.fetch_sources())[0].new == 1
+            item = service.get_item(service.list_items().items[0].id)
+            assert item.content == expected
+        finally:
+            await service.aclose()
+
+    asyncio.run(scenario())
