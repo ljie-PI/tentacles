@@ -17,6 +17,7 @@ from tentacles.personas.tags import parse_tags, tag_messages
 from tentacles.personas.models import PersonaEdit, PersonaSeed, PersonaView, persona_name, keywords
 from tentacles.store import Store
 from tentacles.timeutil import to_utc
+from tentacles.schemas import Completion
 
 
 log = logging.getLogger(__name__)
@@ -129,9 +130,10 @@ class PersonaManager:
         try:
             name = self._models.resolve('persona')
             edit.run_stats['model'] = name
-            result = await self._models.chat(name).complete(messages, system=system)
-            edit.run_stats['usage'] = result.usage.model_dump()
-            edit.cost = result.cost
+            def record_usage(result: Completion) -> None:
+                edit.run_stats['usage'] = result.usage.model_dump()
+                edit.cost = result.cost
+            result = await self._models.chat(name).complete(messages, system=system, on_completion=record_usage)
             edit.tags = parse_tags(extract_json(result.text), old_tags)
             edit.tag_status = 'ok'
         except Exception as exc:

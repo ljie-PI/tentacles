@@ -347,3 +347,58 @@ def test_empty_persona_is_a_stage_error_not_an_unreliable_zero_match(write_confi
         assert web.requests_to(CHAT_URL) == []
 
     asyncio.run(scenario())
+
+
+@pytest.mark.parametrize('text', ['[1]', '[[{"id":1,"tag_id":1,"score":0.9,"reason":"nested"}]]'])
+def test_wrong_row_shapes_are_not_cached_as_missing_matches(write_config, open_service, web, text):
+    web.serve(FEED, rss_feed({'title': 'AI news', 'guid': 'x', 'description': 'news'}))
+    web.handle(CHAT_URL, lambda r: httpx.Response(200, json=chat_reply(text)))
+    service = open_service(write_config(llm_config()))
+
+    async def scenario():
+        await service.fetch_sources()
+        result = await service.filter_pipeline('daily')
+        assert result.stats['errors'] == 1 and result.stats['evaluated'] == 0
+        assert len(web.requests_to(CHAT_URL)) == 2
+        assert service.list_items(pipeline='daily').total == 0
+        assert (await service.filter_pipeline('daily')).stats['candidates'] == 1
+
+    asyncio.run(scenario())
+
+
+def test_invalid_chat_content_keeps_valid_billing_without_split(write_config, open_service, web):
+    web.serve(FEED, three_entries())
+    web.handle(CHAT_URL, lambda r: httpx.Response(200, json=chat_reply(None)))
+    service = open_service(write_config(llm_config()))
+
+    async def scenario():
+        await service.fetch_sources()
+        result = await service.filter_pipeline('daily')
+        assert result.stats['errors'] == 3 and result.stats['evaluated'] == 0
+        assert len(web.requests_to(CHAT_URL)) == 1
+        run = service.list_runs(kind='filter')[0]
+        assert run.stats['usage']['total_tokens'] == 15 and run.cost == 0.01
+        assert service.list_items(pipeline='daily').total == 0
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize('operation', ['report', 'persona'])
+def test_chat_billing_callback_also_protects_other_recorded_operations(write_config, open_service, web, operation):
+    web.serve(FEED, three_entries())
+    web.handle(CHAT_URL, lambda r: httpx.Response(200, json=chat_reply(None)))
+    data = {**model_config(), **pipeline_config(filters=[], processor={'type': 'digest'})}
+    service = open_service(write_config(data))
+
+    async def scenario():
+        if operation == 'report':
+            await service.fetch_sources()
+            assert (await service.run_pipeline('daily')).status == 'error'
+            run = service.list_runs(kind='pipeline')[0]
+        else:
+            result = await service.set_persona('default', profile='Changed interests')
+            assert result.tag_status == 'error'
+            run = service.list_runs(kind='persona')[0]
+        assert run.cost == 0.01 and run.stats['usage']['total_tokens'] == 15
+
+    asyncio.run(scenario())

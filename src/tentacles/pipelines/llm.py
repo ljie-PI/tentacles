@@ -55,7 +55,7 @@ def _parse(text: str, ids: list[int], labels: list[dict[str, Any]], model: str,
     returned = {}
     for row in data:
         if not isinstance(row, dict):
-            continue
+            raise ValueError('llm classification rows must be objects')
         number = _id(row.get('id'), allowed)
         if number is None:
             continue
@@ -92,8 +92,8 @@ async def score_llm(items: list[Item], persona: PersonaView, stage: LLMSpec, ind
                    'items': [{'id': number, 'source': item.source_id, 'title': item.title}
                              for number, item in chunk]}
         result = await models.chat(name).complete(
-            [{'role': 'user', 'content': json.dumps(payload, ensure_ascii=False)}], system=_SYSTEM)
-        progress.metrics.record(result)
+            [{'role': 'user', 'content': json.dumps(payload, ensure_ascii=False)}], system=_SYSTEM,
+            on_completion=progress.metrics.record)
         try:
             return _parse(result.text, [n for n, _ in chunk], labels, result.model, index, models)
         except ValueError:
