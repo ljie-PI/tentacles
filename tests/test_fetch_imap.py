@@ -491,3 +491,56 @@ def test_failed_logout_falls_back_to_socket_shutdown_without_losing_success(writ
             await service.aclose()
 
     asyncio.run(scenario())
+
+
+@pytest.mark.parametrize('reply_header', [
+    'On Sun, 25 Oct 2026 at 10:00,\nAlice <alice@example.test> wrote:',
+    'On Sun, 25 Oct 2026\nat 10:00, Alice <alice@example.test>\nwrote:',
+    '在 2026年10月25日，\nAlice <alice@example.test> 写道：',
+    '于 2026年10月25日，\nAlice <alice@example.test> 写道：',
+])
+def test_wrapped_reply_headers_remove_unprefixed_old_body_and_summary(write_config, reply_header):
+    fake = FakeIMAP({'"INBOX"': Mailbox(messages={1: mail(
+        body=f'Fresh update\n\n{reply_header}\nOld quoted reply body')})})
+    path = write_config(imap_config())
+
+    async def scenario():
+        service = TentaclesService.open(path, env={'MAIL_PASSWORD': 'secret-app-password'},
+                                        imap_factory=fake.factory, clock=lambda: NOW)
+        try:
+            assert (await service.fetch_sources())[0].new == 1
+            item = service.get_item(service.list_items().items[0].id)
+            assert item.content == item.summary == 'Fresh update'
+            assert 'Old quoted reply body' not in item.model_dump_json()
+        finally:
+            await service.aclose()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize('field', ['host', 'username', 'password', 'search', 'folders', 'exclude_senders'])
+def test_imap_arguments_consistently_reject_delete_controls(write_config, field):
+    from tentacles.errors import ConfigError
+    value = ['invalid\x7fargument'] if field in {'folders', 'exclude_senders'} else 'invalid\x7fargument'
+    path = write_config(imap_config(**{field: value}))
+    with pytest.raises(ConfigError) as failure:
+        TentaclesService.open(path, env={'MAIL_PASSWORD': 'secret-app-password'}, imap_factory=FakeIMAP().factory)
+    assert field in str(failure.value)
+
+
+def test_reply_cleanup_preserves_normal_paragraph_containing_wrote(write_config):
+    body = 'Fresh update\n\nOn this project we made progress.\nThis is what I wrote:\nNew technical findings'
+    fake = FakeIMAP({'"INBOX"': Mailbox(messages={1: mail(body=body)})})
+    path = write_config(imap_config())
+
+    async def scenario():
+        service = TentaclesService.open(path, env={'MAIL_PASSWORD': 'secret-app-password'},
+                                        imap_factory=fake.factory, clock=lambda: NOW)
+        try:
+            assert (await service.fetch_sources())[0].new == 1
+            item = service.get_item(service.list_items().items[0].id)
+            assert item.content == body
+        finally:
+            await service.aclose()
+
+    asyncio.run(scenario())

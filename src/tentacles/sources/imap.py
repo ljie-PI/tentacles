@@ -22,6 +22,10 @@ from tentacles.text import html_to_text, truncate
 from tentacles.sources.base import FetchContext, FetchResult, Source, register
 
 
+def _has_controls(value: str) -> bool:
+    return any(ord(c) < 32 or ord(c) == 127 for c in value)
+
+
 class ImapOptions(BaseModel):
     model_config = ConfigDict(extra='forbid')
     host: str
@@ -42,35 +46,35 @@ class ImapOptions(BaseModel):
     @classmethod
     def _argument(cls, value: str) -> str:
         value = value.strip()
-        if not value or any(ord(c) < 32 or ord(c) == 127 for c in value):
+        if not value or _has_controls(value):
             raise ValueError('must be nonempty without control characters')
         return value
 
     @field_validator('username')
     @classmethod
     def _username(cls, value: str) -> str:
-        if any(ord(c) < 32 or ord(c) == 127 for c in value):
+        if _has_controls(value):
             raise ValueError('username must not contain control characters')
         return value.strip()
 
     @field_validator('password')
     @classmethod
     def _password(cls, value: SecretStr) -> SecretStr:
-        if any(ord(c) < 32 or ord(c) == 127 for c in value.get_secret_value()):
+        if _has_controls(value.get_secret_value()):
             raise ValueError('password must not contain control characters')
         return value
 
     @field_validator('folders')
     @classmethod
     def _folders(cls, values: list[str]) -> list[str]:
-        if any(not value.strip() or any(ord(c) < 32 or ord(c) == 127 for c in value) for value in values):
+        if any(not value.strip() or _has_controls(value) for value in values):
             raise ValueError('folders must be nonempty without control characters')
         return list(dict.fromkeys(values))
 
     @field_validator('exclude_senders')
     @classmethod
     def _excluded(cls, values: list[str]) -> list[str]:
-        if any(not value.strip() or any(ord(c) < 32 for c in value) for value in values):
+        if any(not value.strip() or _has_controls(value) for value in values):
             raise ValueError('excluded sender addresses must not be blank or contain controls')
         return list(dict.fromkeys(value.strip().casefold() for value in values))
 
@@ -104,7 +108,7 @@ def _uid(value: Any) -> int:
 
 
 _REPLY_BOUNDARY = re.compile(
-    r'^(?:On .+wrote:|在.+写道[：:]|[-_]{2,}\s*(?:Original Message|原始邮件|Forwarded message|转发邮件)'
+    r'^(?:On .+wrote:|[在于].+写道[：:]|[-_]{2,}\s*(?:Original Message|原始邮件|Forwarded message|转发邮件)'
     r'\s*[-_]{2,}|Begin forwarded message:)\s*$', re.I)
 
 
@@ -126,11 +130,33 @@ def _body_parts(msg: MIMEPart) -> list[tuple[str, str]]:
     return [(kind, text)]
 
 
+def _reply_header(lines: list[str], start: int) -> bool:
+    header = lines[start].strip()
+    if _REPLY_BOUNDARY.fullmatch(header):
+        return True
+    if not re.match(r'^(?:On\s|[在于])', header, re.I):
+        return False
+    # Mail clients soft-wrap attribution headers. Join only that bounded,
+    # uninterrupted paragraph, requiring date/sender evidence so ordinary prose
+    # mentioning "wrote" is not mistaken for a reply attribution.
+    for line in lines[start + 1:start + 5]:
+        if not line.strip():
+            break
+        header += ' ' + line.strip()
+        if len(header) > 1000:
+            break
+        if _REPLY_BOUNDARY.fullmatch(header) and re.search(
+                r'\d|@|\b(?:Mon(?:day)?|Tue(?:sday)?|Wed(?:nesday)?|Thu(?:rsday)?|'
+                r'Fri(?:day)?|Sat(?:urday)?|Sun(?:day)?)\b', header, re.I):
+            return True
+    return False
+
+
 def _new_text(text: str) -> str:
     result = []
     lines = text.splitlines()
     for i, line in enumerate(lines):
-        if _REPLY_BOUNDARY.match(line.strip()):
+        if _reply_header(lines, i):
             break
         if re.match(r'^(?:From|发件人)[：:]', line.strip(), re.I) and any(
                 re.match(r'^(?:Sent|Date|Subject|发送时间|主题)[：:]', following.strip(), re.I)
