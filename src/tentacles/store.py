@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 from contextlib import closing
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Literal
 
 from tentacles.dedup import split_similar
 from tentacles.models import Item, item_id
@@ -474,29 +474,6 @@ class Store:
                                       (name,)).fetchall()
         return [_row_to_persona(row) for row in rows]
 
-    def save_persona(self, edit: PersonaEdit, now: datetime, run_id: int) -> PersonaView:
-        with self._lock, self._conn:
-            self._conn.execute("BEGIN IMMEDIATE")
-            old = self.get_persona(edit.name)
-            version = old.version if old else 0
-            if edit.expected_version is not None and edit.expected_version != version:
-                raise Conflict('persona changed while preparing the edit; refresh and retry')
-            view = PersonaView(
-                name=edit.name, version=version + 1,
-                profile=edit.profile if edit.profile is not None else old.profile if old else '',
-                tags=edit.tags if edit.tags is not None else old.tags if old else [],
-                include=keywords(edit.include_replace) if edit.include_replace is not None else
-                        edit_keywords(old.include if old else [], edit.include_add, edit.include_remove),
-                exclude=keywords(edit.exclude_replace) if edit.exclude_replace is not None else
-                        edit_keywords(old.exclude if old else [], edit.exclude_add, edit.exclude_remove),
-                source=edit.source, note=edit.note, created_at=to_utc(now),
-                tag_status=edit.tag_status, tag_error=edit.tag_error)
-            self._insert_persona(view)
-            self._finish_run(run_id, status='ok', now=now, stats={
-                'version': view.version, 'tag_status': view.tag_status, 'tag_error': view.tag_error, **edit.run_stats},
-                             cost=edit.cost, error=edit.tag_error)
-            return view
-
     def _insert_persona(self, view: PersonaView) -> None:
         self._conn.execute(
             "INSERT INTO persona_versions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -588,12 +565,8 @@ class Store:
                 assert state.run_id is not None
                 self._finish_run(state.run_id, status=status, now=now, error=error)
                 if task.kind == 'fetch':
-                    self._conn.execute(
-                        "INSERT INTO source_state (source_id, last_fetch_at, last_status, last_error)"
-                        " VALUES (?, ?, 'error', ?) ON CONFLICT (source_id) DO UPDATE SET"
-                        " last_fetch_at = excluded.last_fetch_at, last_status = excluded.last_status,"
-                        " last_error = excluded.last_error",
-                        (task.target, to_iso(state.started_at), error))
+                    assert state.started_at is not None
+                    RunWriter(self, now).save_source_failure(task.target, state.started_at, error)
             assert state.run_id is not None
             self._complete_task_run(state.run_id, status, error)
 
@@ -765,49 +738,11 @@ class Store:
         return SourceState(source_id, json.loads(row["cursor"]), from_iso(row["last_fetch_at"]),
                            row["last_status"], row["last_error"], row["total_items"])
 
-    def save_fetch_success(self, st: SourceState, run_id: int, *, now: datetime,
-                           stats: dict[str, Any], cost: float | None = None) -> None:
-        """Advance the cursor and finish its run together, or neither on failure."""
-        with self._lock, self._conn:
-            self._conn.execute("BEGIN IMMEDIATE")
-            self._require_running(run_id)
-            self._conn.execute(
-                "INSERT INTO source_state (source_id, cursor, last_fetch_at, last_status,"
-                " last_error, total_items) VALUES (?, ?, ?, ?, ?, ?)"
-                " ON CONFLICT (source_id) DO UPDATE SET cursor = excluded.cursor,"
-                " last_fetch_at = excluded.last_fetch_at, last_status = excluded.last_status,"
-                " last_error = excluded.last_error",
-                (st.source_id, json.dumps(st.cursor, ensure_ascii=False), to_iso(st.last_fetch_at),
-                 st.last_status, st.last_error, st.total_items),
-            )
-            self._finish_run(run_id, status="ok", now=now, stats=stats, cost=cost)
-            self._complete_task_run(run_id, 'ok', None)
-
-    def save_fetch_failure(self, source_id: str, run_id: int | None, *, started_at: datetime,
-                           finished_at: datetime, error: str, stats: dict[str, Any] | None = None,
-                           cost: float | None = None) -> None:
-        """Record failure without overwriting a cursor committed by another fetch."""
-        with self._lock, self._conn:
-            self._conn.execute("BEGIN IMMEDIATE")
-            if run_id is not None and not self._run_is_running(run_id):
-                # Late known fees belong to the expired run, never the replacement
-                # task/cursor. Preserve its original failure reason and other stats.
-                if stats:
-                    self._backfill_failed_run_metrics(run_id, stats, cost, merge=True)
-                return
-            self._conn.execute(
-                "INSERT INTO source_state (source_id, last_fetch_at, last_status, last_error)"
-                " VALUES (?, ?, 'error', ?) ON CONFLICT (source_id) DO UPDATE SET"
-                " last_fetch_at = excluded.last_fetch_at, last_status = excluded.last_status,"
-                " last_error = excluded.last_error", (source_id, to_iso(started_at), error))
-            if run_id is not None:
-                self._finish_run(run_id, status="failed", now=finished_at, error=error, stats=stats, cost=cost)
-                self._complete_task_run(run_id, 'failed', error)
-
     # ---- runs ---------------------------------------------------------------
 
     def commit_run(self, run_id: int, write: Callable[[RunWriter], None], *, now: datetime,
-                   stats: dict[str, Any], cost: float | None = None, error: str | None = None) -> None:
+                   stats: dict[str, Any], cost: float | None = None, error: str | None = None,
+                   status: Literal['ok', 'failed'] | None = None) -> None:
         """Fence domain writes, Run completion and task progress in one transaction.
 
         File rollback is best effort on an observed failure, not crash atomicity.
@@ -820,7 +755,7 @@ class Store:
                 self._conn.execute('BEGIN IMMEDIATE')
                 self._require_running(run_id)
                 write(writer)
-                status = 'failed' if error is not None else 'ok'
+                status = status or ('failed' if error is not None else 'ok')
                 self._finish_run(run_id, status=status, now=now, stats=stats, cost=cost, error=error)
                 self._complete_task_run(run_id, status, error)
         except BaseException:
@@ -832,6 +767,7 @@ class Store:
             raise
 
     def start_run(self, kind: str, target: str, now: datetime) -> int:
+        """Create an unleased Run; RunLifecycle owns its terminal cleanup."""
         with self._lock, self._conn:
             cur = self._conn.execute(
                 "INSERT INTO runs (kind, target, status, started_at) VALUES (?, ?, 'running', ?)",
@@ -843,23 +779,28 @@ class Store:
                    stats: dict[str, Any] | None = None, cost: float | None = None) -> None:
         with self._lock, self._conn:
             self._conn.execute('BEGIN IMMEDIATE')
-            previous = self._conn.execute('SELECT status FROM runs WHERE id = ?', (run_id,)).fetchone()
+            previous = self._conn.execute(
+                'SELECT status, kind, target, started_at FROM runs WHERE id = ?', (run_id,)).fetchone()
+            if previous is not None and previous['status'] == 'running' and status == 'failed' and previous['kind'] == 'fetch':
+                # Only the still-running owner may change source status. Never
+                # touch the cursor, even when the fetch failed after item upsert.
+                RunWriter(self, now).save_source_failure(
+                    previous['target'], from_iso(previous['started_at']), error)
             self._finish_run(run_id, status=status, now=now, error=error, stats=stats, cost=cost)
             if previous is not None and previous['status'] == status == 'failed' and stats is not None:
                 # A late response may reveal billed usage after lease reclamation.
                 # Update that old run's metrics only, never its status or replacement task.
-                self._backfill_failed_run_metrics(run_id, stats, cost, merge=False)
+                self._backfill_failed_run_metrics(run_id, stats, cost)
             actual = self._conn.execute('SELECT status, error FROM runs WHERE id = ?', (run_id,)).fetchone()
             if actual is not None and actual['status'] != 'running':
                 self._complete_task_run(run_id, actual['status'], actual['error'])
 
-    def _backfill_failed_run_metrics(self, run_id: int, stats: dict[str, Any], cost: float | None,
-                                     *, merge: bool) -> None:
+    def _backfill_failed_run_metrics(self, run_id: int, stats: dict[str, Any], cost: float | None) -> None:
         """Caller holds the transaction; backfill telemetry, not ownership/state."""
         previous = self._conn.execute("SELECT stats FROM runs WHERE id = ? AND status = 'failed'", (run_id,)).fetchone()
         if previous is None:
             return
-        updated = {**json.loads(previous['stats']), **stats} if merge else stats
+        updated = {**json.loads(previous['stats']), **stats}
         self._conn.execute("UPDATE runs SET stats = ?, cost = COALESCE(?, cost) WHERE id = ? AND status = 'failed'",
                            (json.dumps(updated, ensure_ascii=False), cost, run_id))
 
@@ -901,6 +842,42 @@ class RunWriter:
     def __init__(self, store: Store, now: datetime) -> None:
         self._store, self._now = store, now
         self._created_files: list[Path] = []
+
+    def save_source_state(self, st: SourceState) -> None:
+        """Publish cursor/status without overwriting the upsert's item count."""
+        self._store._conn.execute(
+            "INSERT INTO source_state (source_id, cursor, last_fetch_at, last_status,"
+            " last_error, total_items) VALUES (?, ?, ?, ?, ?, ?)"
+            " ON CONFLICT (source_id) DO UPDATE SET cursor = excluded.cursor,"
+            " last_fetch_at = excluded.last_fetch_at, last_status = excluded.last_status,"
+            " last_error = excluded.last_error",
+            (st.source_id, json.dumps(st.cursor, ensure_ascii=False), to_iso(st.last_fetch_at),
+             st.last_status, st.last_error, st.total_items))
+
+    def save_source_failure(self, source_id: str, started_at: datetime, error: str | None) -> None:
+        self._store._conn.execute(
+            "INSERT INTO source_state (source_id, last_fetch_at, last_status, last_error)"
+            " VALUES (?, ?, 'error', ?) ON CONFLICT (source_id) DO UPDATE SET"
+            " last_fetch_at = excluded.last_fetch_at, last_status = excluded.last_status,"
+            " last_error = excluded.last_error", (source_id, to_iso(started_at), error))
+
+    def save_persona(self, edit: PersonaEdit) -> PersonaView:
+        old = self._store.get_persona(edit.name)
+        version = old.version if old else 0
+        if edit.expected_version is not None and edit.expected_version != version:
+            raise Conflict('persona changed while preparing the edit; refresh and retry')
+        view = PersonaView(
+            name=edit.name, version=version + 1,
+            profile=edit.profile if edit.profile is not None else old.profile if old else '',
+            tags=edit.tags if edit.tags is not None else old.tags if old else [],
+            include=keywords(edit.include_replace) if edit.include_replace is not None else
+                    edit_keywords(old.include if old else [], edit.include_add, edit.include_remove),
+            exclude=keywords(edit.exclude_replace) if edit.exclude_replace is not None else
+                    edit_keywords(old.exclude if old else [], edit.exclude_add, edit.exclude_remove),
+            source=edit.source, note=edit.note, created_at=to_utc(self._now),
+            tag_status=edit.tag_status, tag_error=edit.tag_error)
+        self._store._insert_persona(view)
+        return view
 
     def save_evaluations(self, evaluations: list[Evaluation]) -> None:
         for evaluation in evaluations:

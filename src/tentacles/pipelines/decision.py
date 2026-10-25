@@ -8,14 +8,16 @@ from tentacles.llm.registry import ModelRegistry
 from tentacles.models import Item
 from tentacles.personas.models import PersonaView
 from tentacles.personas.render import render_persona
-from tentacles.pipelines.config import DecisionSpec
+from tentacles.pipelines.adapters import ModelRequirement
+from tentacles.pipelines.config import DecisionSpec, StageSpec
 from tentacles.pipelines.models import StageBatch, StageScore
 from tentacles.schemas import DecisionCompletion
 
 
-async def score_decisions(items: list[Item], persona: PersonaView, stage: DecisionSpec,
+async def score_decisions(items: list[Item], persona: PersonaView, stage: StageSpec,
                           index: int, models: ModelRegistry, progress: StageBatch) -> StageBatch:
-    name = models.resolve('decision', stage.model)
+    assert isinstance(stage, DecisionSpec)
+    name = DecisionStage.models[0].resolve(models, stage.model)
     progress.model_name = name
     relevance: dict[str, Any] = {'type': stage.relevance_type,
         'instructions': 'Would this user want to read this item, according to the persona and its priorities?'}
@@ -50,3 +52,8 @@ async def score_decisions(items: list[Item], persona: PersonaView, stage: Decisi
             details={'model': result.model, 'answers': result.answers, 'labels': labels}))
     progress.scores, progress.error, progress.http_status = scores, error, status
     return progress
+
+
+class DecisionStage:
+    models = (ModelRequirement('decision', 'decision'),)
+    score = staticmethod(score_decisions)

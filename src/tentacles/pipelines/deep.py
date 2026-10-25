@@ -12,6 +12,7 @@ from tentacles.llm.registry import ModelRegistry
 from tentacles.models import Item
 from tentacles.personas.models import PersonaView
 from tentacles.personas.render import render_persona
+from tentacles.pipelines.adapters import ModelRequirement
 from tentacles.pipelines.config import PipelineSpec
 from tentacles.pipelines.models import Evaluation, ReportView
 from tentacles.pipelines.report_path import new_report_location
@@ -54,7 +55,8 @@ async def make_deep(config: AppConfig, spec: PipelineSpec, persona: PersonaView,
                 'tags': [tag.model_dump() for tag in persona.tags],
                 'now': now.astimezone(ZoneInfo(config.app.timezone)).isoformat(),
                 'pipeline': {'id': spec.id, 'name': spec.name}})
-        result = await complete_report(spec.processor, models, system, user, on_completion)
+        result = await complete_report(spec.processor, models, system, user, on_completion,
+                                       model=DeepProcessor.models[0].resolve(models, spec.processor.model))
         now = to_utc(clock())
         content = result.text
         references = [int(a or b) for a, b in re.findall(r'\[(\d+)\]|来源\s*(\d+)', content)]
@@ -68,3 +70,8 @@ async def make_deep(config: AppConfig, spec: PipelineSpec, persona: PersonaView,
             title=title, markdown=markdown, item_ids=[item.id for item in event.members], model=result.model,
             usage=result.usage, cost=result.cost, path=str(path), created_at=now))
     return reports
+
+
+class DeepProcessor:
+    models = (ModelRequirement('process', 'chat'),)
+    process = staticmethod(make_deep)

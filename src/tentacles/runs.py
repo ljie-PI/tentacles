@@ -50,19 +50,32 @@ class RunOperation:
         return RunResult(self.run_id, self._status, combined, metrics, self._error)
 
     async def commit(self, write: Callable[[RunWriter], None], *, stats: dict[str, Any] | None = None,
-                     error: str | None = None) -> None:
-        """Publish writes, stats additions and terminal state together, or neither."""
+                     error: str | None = None, status: Literal['ok', 'failed'] | None = None) -> None:
+        """Publish writes, stats additions and terminal state together, or neither.
+
+        By default an error fails the Run. status='ok' preserves a successful
+        domain edit with a diagnostic (e.g. degraded Persona tag extraction).
+        """
         def publish() -> None:
             if self._committed:
                 raise RuntimeError('run already committed')
-            result = self._result(stats)
-            self._store.commit_run(self.run_id, write, now=to_utc(self._clock()),
-                                   stats=result.stats, cost=result.metrics.cost, error=error)
+            final_stats: dict[str, Any] = {}
+
+            def persist(writer: RunWriter) -> None:
+                write(writer)
+                # Domain writes can discover stats (e.g. a Persona version)
+                # inside the transaction. Snapshot them after the write.
+                final_stats.update(self._result(stats).stats)
+
+            terminal_status = status or ('failed' if error is not None else 'ok')
+            self._store.commit_run(self.run_id, persist, now=to_utc(self._clock()),
+                                   stats=final_stats, cost=self.metrics.cost, error=error,
+                                   status=terminal_status)
             # Set in the worker: cancellation while draining a committed write
             # must not turn its durable success into a reported failure.
             self._committed = True
             self.stats.update(stats or {})
-            self._status = 'error' if error is not None else 'ok'
+            self._status = 'error' if terminal_status == 'failed' else 'ok'
             self._error = error
 
         await run_store_call(publish)
@@ -72,22 +85,31 @@ class RunLifecycle:
     def __init__(self, store: Store, clock: Callable[[], datetime]) -> None:
         self._store, self._clock = store, clock
 
-    async def execute(self, task: Task, work: Callable[[RunOperation], Awaitable[None]], *,
+    async def execute(self, task: Task | tuple[str, str], work: Callable[[RunOperation], Awaitable[None]], *,
                       due_only: bool = False,
-                      failure_message: str = 'run failed',
+                      failure_message: str | Callable[[BaseException], str] = 'run failed',
+                      raise_errors: bool = False,
                       on_finished: Callable[[RunResult], None] | None = None) -> RunResult | None:
         """Busy returns a result; not-due returns None without creating a Run.
 
-        Ordinary failures become error results. Cancellation/interruption is
-        re-raised after cleanup. on_finished also receives partial results on
+        A Task acquires a lease; a (kind, target) pair creates an unleased Run.
+        Unleased Runs have no schedule and cannot use due_only.
+        Ordinary failures become error results unless raise_errors is set.
+        Cancellation/interruption is re-raised after cleanup.
+        on_finished also receives partial results on
         cancellation so a parent Run can retain its child Run's known charges.
         """
+        if due_only and not isinstance(task, Task):
+            raise ValueError('unleased runs have no due check')
         operation = RunOperation(self._store, self._clock)
         token = uuid4().hex
         not_due = False
 
         def claim() -> None:
             nonlocal not_due
+            if not isinstance(task, Task):
+                operation.run_id = self._store.start_run(*task, operation.started_at)
+                return
             result = self._store.claim_task(task, token, operation.started_at, force=not due_only)
             not_due = result.status == 'not_due'
             if result.status == 'ready':
@@ -108,10 +130,11 @@ class RunLifecycle:
                                            error=result.error, stats=result.stats, cost=result.metrics.cost)
                 except Exception as failure:
                     log.warning('could not finish run (%s)', type(failure).__name__)
-            try:
-                self._store.finish_task(task, token, to_utc(self._clock()))
-            except Exception as failure:
-                log.warning('could not release run lease (%s)', type(failure).__name__)
+            if isinstance(task, Task):
+                try:
+                    self._store.finish_task(task, token, to_utc(self._clock()))
+                except Exception as failure:
+                    log.warning('could not release run lease (%s)', type(failure).__name__)
 
         try:
             await run_store_call(claim)
@@ -124,9 +147,11 @@ class RunLifecycle:
         except BaseException as exc:
             if not operation._committed:
                 operation._status = 'error'
-                operation._error = f'{failure_message} ({type(exc).__name__})'
+                operation._error = (failure_message(exc) if callable(failure_message)
+                                    else f'{failure_message} ({type(exc).__name__})')
+                log.warning('run %s failed (%s)', operation.run_id, type(exc).__name__)
                 await run_store_call(cleanup)
-            if not isinstance(exc, Exception):
+            if raise_errors or not isinstance(exc, Exception):
                 raise
         finally:
             if on_finished is not None and not not_due:

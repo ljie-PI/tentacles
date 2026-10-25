@@ -13,10 +13,12 @@ from tentacles.config import AppConfig
 from tentacles.errors import ConfigError, Conflict, NotFound, UpstreamError
 from tentacles.llm.registry import ModelRegistry
 from tentacles.llm.json import extract_json
+from tentacles.llm.types import UsageTotals
 from tentacles.personas.evolution import evolution_messages, make_proposal
 from tentacles.personas.tags import parse_tags, tag_messages
 from tentacles.personas.models import PersonaEdit, PersonaProposal, PersonaSeed, PersonaUpdate, PersonaView, persona_name, keywords
-from tentacles.store import Store
+from tentacles.runs import RunLifecycle, RunOperation
+from tentacles.store import RunWriter, Store
 from tentacles.timeutil import parse_duration, to_utc
 
 
@@ -32,6 +34,7 @@ def _expected_version(value: int | None) -> int | None:
 class PersonaManager:
     def __init__(self, store: Store, models: ModelRegistry, clock: Callable[[], datetime], update: PersonaUpdate):
         self._store, self._models, self._clock, self._update = store, models, clock, update
+        self._runs = RunLifecycle(store, clock)
 
     def seed(self, config: AppConfig) -> None:
         def loader(name: str, seed: PersonaSeed) -> Callable[[], PersonaView]:
@@ -118,14 +121,13 @@ class PersonaManager:
 
         proposal: PersonaProposal | None = None
 
-        async def prepare(edit: PersonaEdit) -> None:
+        async def prepare(edit: PersonaEdit, metrics: UsageTotals) -> None:
             nonlocal proposal
             model = self._models.resolve('persona')
-            edit.run_stats['model'] = model
             system, messages = evolution_messages(current, instruction, feedback, self._update.max_profile_chars)
 
             try:
-                result = await self._models.chat(model).complete(messages, system=system, on_completion=edit.record_completion)
+                result = await self._models.chat(model).complete(messages, system=system, on_completion=metrics.record)
             except UpstreamError as exc:
                 raise UpstreamError(f'persona evolution failed ({type(exc).__name__}); persona unchanged') from None
             try:
@@ -135,7 +137,7 @@ class PersonaManager:
             self._proposal_edit(proposal, edit)
 
         if dry_run:
-            await prepare(edit)
+            await prepare(edit, UsageTotals())
             assert proposal is not None
             return proposal
         return await self._save(edit, prepare=prepare)
@@ -159,37 +161,29 @@ class PersonaManager:
         edit.note = proposal.summary
         edit.run_stats['feedback_count'] = proposal.feedback_count
 
-    async def _save(self, edit: PersonaEdit, *, prepare: Callable[[PersonaEdit], Awaitable[None]] | None = None) -> PersonaView:
-        run_id: int | None = None
-        completed = False
+    async def _save(self, edit: PersonaEdit, *,
+                    prepare: Callable[[PersonaEdit, UsageTotals], Awaitable[None]] | None = None) -> PersonaView:
+        view: PersonaView | None = None
 
-        def start() -> None:
-            nonlocal run_id
-            run_id = self._store.start_run('persona', edit.name, self._clock())
-
-        def commit() -> PersonaView:
-            nonlocal completed
-            assert run_id is not None
-            result = self._store.save_persona(edit, self._clock(), run_id)
-            completed = True
-            return result
-
-        try:
-            await run_store_call(start)
+        async def work(op: RunOperation) -> None:
+            op.stats = edit.run_stats
             if prepare is not None:
-                await prepare(edit)
-            return await run_store_call(commit)
-        except BaseException as exc:
-            if run_id is not None and not completed:
-                try:
-                    await run_store_call(self._store.finish_run, run_id, status='failed',
-                                         now=self._clock(), error=f'persona edit failed ({type(exc).__name__})',
-                                         stats=edit.run_stats, cost=edit.cost)
-                except Exception as cleanup_error:
-                    log.warning('could not finish persona run (%s)', type(cleanup_error).__name__)
-            raise
+                await prepare(edit, op.metrics)
 
-    async def _extract_tags(self, edit: PersonaEdit) -> None:
+            def save(writer: RunWriter) -> None:
+                nonlocal view
+                view = writer.save_persona(edit)
+                op.stats.update(version=view.version, tag_status=view.tag_status, tag_error=view.tag_error)
+
+            # Tag extraction degradation is a saved Persona, not a failed edit.
+            await op.commit(save, error=edit.tag_error, status='ok')
+
+        await self._runs.execute(('persona', edit.name), work,
+                                 failure_message='persona edit failed', raise_errors=True)
+        assert view is not None
+        return view
+
+    async def _extract_tags(self, edit: PersonaEdit, metrics: UsageTotals) -> None:
         old = await run_store_call(self._store.get_persona, edit.name)
         version = old.version if old else 0
         if edit.expected_version is not None and edit.expected_version != version:
@@ -202,8 +196,7 @@ class PersonaManager:
         system, messages = tag_messages(edit.profile, old_tags)
         try:
             name = self._models.resolve('persona')
-            edit.run_stats['model'] = name
-            result = await self._models.chat(name).complete(messages, system=system, on_completion=edit.record_completion)
+            result = await self._models.chat(name).complete(messages, system=system, on_completion=metrics.record)
             edit.tags = parse_tags(extract_json(result.text), old_tags)
             edit.tag_status = 'ok'
         except Exception as exc:

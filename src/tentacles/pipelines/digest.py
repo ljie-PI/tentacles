@@ -12,6 +12,7 @@ from tentacles.llm.registry import ModelRegistry
 from tentacles.models import Item
 from tentacles.personas.models import PersonaView
 from tentacles.personas.render import render_persona
+from tentacles.pipelines.adapters import ModelRequirement
 from tentacles.pipelines.config import PipelineSpec
 from tentacles.pipelines.models import Evaluation, ReportView
 from tentacles.pipelines.report_path import new_report_location
@@ -30,7 +31,7 @@ _SYSTEM = '''基于给定材料编写新闻日报，按用户画像取舍、排�
 
 async def make_digest(config: AppConfig, spec: PipelineSpec, persona: PersonaView,
                       selected: list[tuple[Item, Evaluation]], models: ModelRegistry,
-                      clock: Callable[[], datetime], on_completion: Callable[[Completion], None]) -> ReportView:
+                      clock: Callable[[], datetime], on_completion: Callable[[Completion], None]) -> list[ReportView]:
     now = to_utc(clock())
     items: list[dict[str, Any]] = [{'number': i + 1, 'id': item.id, 'source': item.source_id, 'title': item.title,
               'summary': item.summary[:600] or '（无摘要）', 'url': item.url,
@@ -48,7 +49,8 @@ async def make_digest(config: AppConfig, spec: PipelineSpec, persona: PersonaVie
         prompt = load_prompt(config.resolve(spec.processor.prompt_file))
         system = prompt.system
         user = prompt.render({**payload, 'items': items, 'tags': [tag.model_dump() for tag in persona.tags]})
-    result = await complete_report(spec.processor, models, system, user, on_completion)
+    result = await complete_report(spec.processor, models, system, user, on_completion,
+                                   model=DigestProcessor.models[0].resolve(models, spec.processor.model))
     now = to_utc(clock())
     content = result.text
     references = [int(value) for value in re.findall(r'\[(\d+)\]', content)]
@@ -57,6 +59,11 @@ async def make_digest(config: AppConfig, spec: PipelineSpec, persona: PersonaVie
     appendix = '\n'.join(f'[{item["number"]}] {item["source"]}: {item["title"]} {item["url"]}' for item in items)
     markdown = f'# {title}\n\n{content}\n\n## Sources\n\n{appendix}\n'
     report_id, path = new_report_location(config, spec.id, 'digest', title, now)
-    return ReportView(id=report_id, pipeline_id=spec.id, persona_version=persona.version, kind='digest',
+    return [ReportView(id=report_id, pipeline_id=spec.id, persona_version=persona.version, kind='digest',
         title=title, markdown=markdown, item_ids=[item.id for item, _ in selected], model=result.model,
-        usage=result.usage, cost=result.cost, path=str(path), created_at=now)
+        usage=result.usage, cost=result.cost, path=str(path), created_at=now)]
+
+
+class DigestProcessor:
+    models = (ModelRequirement('process', 'chat'),)
+    process = staticmethod(make_digest)

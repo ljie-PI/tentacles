@@ -561,10 +561,17 @@ fetch 的 pending 为 null。同一 pipeline 的两个调度角色显示相同 p
 
 ```json
 [{"id": 8, "kind": "fetch", "target": "broken", "status": "failed",
-  "started_at": "…", "finished_at": "…", "stats": {}, "cost": null, "error": "…HTTP 500"}]
+  "started_at": "…", "finished_at": "…",
+  "stats": {"usage": {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}, "cost": null, "models": []},
+  "cost": null, "error": "…HTTP 500"}]
 ```
 
 `status` 的取值为 `running`、`ok` 或 `failed`。
+新完成的 fetch、filter、pipeline、persona Run 均在 `stats` 中使用同一组 `usage` / `cost` / `models`：
+用量累计所有已返回调用，模型列表按首次实际返回顺序去重，未知费用为 null；没有模型调用时为零用量和空模型列表。
+Persona 标签抽取降级仍是成功编辑，Run 为 `ok`，`error` / `stats.tag_error` 保留诊断。
+来源失败不推进 cursor；过期 Lease 的迟到用量只回填原 Run，不改变接替抓取的 cursor 或状态。
+历史 Run 不重写；`sources fetch` 的无模型输出保持原有简洁形式，省略这三个累计字段。
 
 ## 典型工作流
 

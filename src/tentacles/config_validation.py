@@ -20,6 +20,8 @@ from tentacles.config import AppConfig, AppSpec, SourceSpec, format_loc
 from tentacles.errors import ConfigError, ConfigIssue, ConfigValidationError
 from tentacles.llm.config import ModelSpec, STAGES
 from tentacles.personas.models import persona_name
+from tentacles.pipelines.adapters import ModelRequirement
+from tentacles.pipelines.registry import PROCESSORS, STAGES as FILTER_STAGES
 from tentacles.prompts import load_prompt
 
 
@@ -117,16 +119,30 @@ def _path(value: Any, config_path: Path) -> Path | None:
 
 
 def _model_error(models: Mapping[str, ModelSpec], defaults: Mapping[str, Any],
-                 stage: str, override: Any, where: str) -> ConfigIssue | None:
+                 stage: str, override: Any, where: str, *, kind: str = 'chat') -> ConfigIssue | None:
     # Invalid scalar types already have schema diagnostics.
     if override is not None and not isinstance(override, str):
         return None
     name = override if override is not None else defaults.get(stage)
-    kind = 'decision' if stage == 'decision' else 'chat'
     model = models.get(name) if isinstance(name, str) else None
     if model is None or model.kind != kind:
         return ConfigIssue(where, f'requires an existing {kind} model or {stage}-stage default')
     return None
+
+
+def _adapter_model_errors(requirements: tuple[ModelRequirement, ...], data: Mapping[str, Any],
+                          models: Mapping[str, ModelSpec], defaults: Mapping[str, Any],
+                          where: str) -> list[ConfigIssue]:
+    errors = []
+    for requirement in requirements:
+        override = data.get('model')
+        if requirement.optional and override is None:
+            continue
+        error = _model_error(models, defaults, requirement.stage, override, f'{where}.model',
+                             kind=requirement.kind)
+        if error is not None:
+            errors.append(error)
+    return errors
 
 
 def _source_options(data: Mapping[str, Any], where: str) -> tuple[BaseModel | None, list[ConfigIssue]]:
@@ -261,16 +277,16 @@ def validate_config(config: AppConfig | Mapping[str, Any], existing_personas: Co
         for j, value in enumerate(_entries(pipeline.get('filters'))):
             filter_data = _mapping(value)
             stage_type = filter_data.get('type', 'keyword')
-            if stage_type in ('decision', 'llm'):
-                error = _model_error(models, defaults, 'decision' if stage_type == 'decision' else 'filter',
-                                     filter_data.get('model'), f'{where}.filters[{j}].model')
-                if error is not None:
-                    errors.append(error)
+            adapter = FILTER_STAGES.get(stage_type) if isinstance(stage_type, str) else None
+            if adapter is not None:
+                errors.extend(_adapter_model_errors(adapter.models, filter_data, models, defaults,
+                                                     f'{where}.filters[{j}]'))
         processor = _mapping(pipeline.get('processor'))
-        if processor.get('type', 'digest') != 'none' or processor.get('model') is not None:
-            error = _model_error(models, defaults, 'process', processor.get('model'), f'{where}.processor.model')
-            if error is not None:
-                errors.append(error)
+        processor_type = processor.get('type', 'digest')
+        processor_adapter = PROCESSORS.get(processor_type) if isinstance(processor_type, str) else None
+        if processor_adapter is not None:
+            errors.extend(_adapter_model_errors(processor_adapter.models, processor, models, defaults,
+                                                 f'{where}.processor'))
         if processor.get('prompt_file') is not None:
             prompt = _path(processor['prompt_file'], config_path)
             if prompt is None:
