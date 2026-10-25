@@ -3,36 +3,33 @@
 from __future__ import annotations
 
 import asyncio
-import logging
 import json
 from datetime import datetime
 from pathlib import Path
 from typing import Callable, Mapping, Any, Literal
 from zoneinfo import ZoneInfo
-from uuid import uuid4
 
 import httpx
 
 from tentacles.config import AppConfig, SourceSpec, load_config
 from tentacles.config_validation import validate_config
-from tentacles.errors import ConfigError, ConfigValidationError, NotFound, UpstreamError
+from tentacles.errors import ConfigError, ConfigValidationError, NotFound, TentaclesError, UpstreamError
 from tentacles.net import HttpPool
 from tentacles.llm.registry import ModelRegistry
 from tentacles.llm.config import Stage
 from tentacles.llm.json import extract_json
 from tentacles.schemas import ConfigCheck, FetchOutcome, ItemDetail, ItemView, Page, RunView, SourceView, TaskView, ModelView, Completion, ModelTest, TickOutcome
 from tentacles.sources.runner import fetch_source
-from tentacles.asyncutil import run_store_call, gather_draining
+from tentacles.asyncutil import gather_draining
 from tentacles.store import ItemQuery, Store
 from tentacles.personas.manager import PersonaManager
 from tentacles.personas.models import FeedbackView, PersonaProposal, PersonaView
 from tentacles.pipelines.manager import PipelineManager
 from tentacles.pipelines.models import PipelineOutcome, ReportView, PipelineView
+from tentacles.runs import RunLifecycle, RunOperation
 from tentacles.timeutil import parse_since, utcnow, to_utc
 from tentacles.tasks import Task
 from tentacles.sources.imap_client import ImapFactory, connect_imap
-
-log = logging.getLogger(__name__)
 
 FETCH_CONCURRENCY = 4
 
@@ -52,6 +49,7 @@ class TentaclesService:
         self.store = store
         self._transport = transport
         self._clock = clock
+        self._runs = RunLifecycle(store, clock)
         self._imap_factory = imap_factory
         self._model_http = HttpPool(transport)
         self.models = ModelRegistry(config.models, config.defaults, self._model_http, clock=clock)
@@ -263,40 +261,22 @@ class TentaclesService:
         return views
 
     async def _fetch_task(self, spec: SourceSpec, http: HttpPool, *, due_only: bool) -> FetchOutcome | None:
-        task = self._tasks[spec.id]
-        token, started_at = uuid4().hex, to_utc(self._clock())
-        outcome: FetchOutcome | None = None
-        failure: Exception | None = None
-        run_id, needs_cleanup = 0, True
-        try:
-            claim = await run_store_call(self.store.claim_task, task, token, started_at,
-                                         force=not due_only)
-            if claim.status != 'ready':
-                needs_cleanup = False
-                if claim.status == 'busy':
-                    outcome = FetchOutcome(source_id=spec.id, run_id=0, status='busy', new=0, dup=0)
-            else:
-                run_id = claim.run_id or 0
-                outcome = await fetch_source(spec, store=self.store, http=http, clock=self._clock,
-                                             run_id=claim.run_id, started_at=started_at, imap_factory=self._imap_factory,
-                                             timezone=self.config.app.timezone, models=self.models)
-        except Exception as exc:
-            failure = exc
-        finally:
-            if needs_cleanup:
-                try:
-                    # The token is known even if cancellation arrived after acquisition committed.
-                    await run_store_call(self.store.finish_task, task, token, to_utc(self._clock()))
-                except Exception as exc:
-                    log.warning('could not finish task %s (%s)', spec.id, type(exc).__name__)
-                    failure = failure or exc
-        if failure is not None:
-            error = f'fetch task failed ({type(failure).__name__})'
-            log.warning('fetch %s failed: %s', spec.id, error)
-            return FetchOutcome(source_id=spec.id, run_id=run_id, status='error',
-                                new=outcome.new if outcome else 0, dup=outcome.dup if outcome else 0,
-                                error=error, stats=outcome.stats if outcome else {})
-        return outcome
+        async def work(op: RunOperation) -> None:
+            await fetch_source(spec, op, store=self.store, http=http, imap_factory=self._imap_factory,
+                               timezone=self.config.app.timezone, models=self.models)
+
+        result = await self._runs.execute(self._tasks[spec.id], work, due_only=due_only,
+            failure_message=lambda exc: exc.message if isinstance(exc, TentaclesError)
+            else f'fetch failed ({type(exc).__name__})')
+        if result is None:
+            return None
+        # Preserve the fetch adapter's no-model output; durable Run stats always
+        # have the common usage/cost/models shape (including zero-call Runs).
+        stats = result.stats if result.metrics.models else {
+            key: value for key, value in result.stats.items() if key not in {'usage', 'cost', 'models'}}
+        return FetchOutcome(source_id=spec.id, run_id=result.run_id, status=result.status,
+                            new=stats.get('new', 0), dup=stats.get('dup', 0),
+                            error=result.error, stats=stats)
 
     async def _fetch_batch(self, specs: list[SourceSpec], *, due_only: bool) -> list[FetchOutcome]:
         sem = asyncio.Semaphore(FETCH_CONCURRENCY)

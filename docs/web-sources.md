@@ -101,7 +101,8 @@ HTTP200 但正文无效时也保留已知计费。迟到的旧租约结果只更
 模型输入文本哈希和模型定义缓存避免无效重复调用：输入不变、无有效链接或所有链接已知时跳过付费请求。
 更新模型定义／源覆盖／输入上限会重新判断；API key 轮换不会使相同输入重新计费。
 fetch stats 及 runs.stats 的 usage、cost、models 记录实际返回信息，runs.cost 保存本次已知费用。
-无付费请求时不伪造 usage；不要把同一 fetch 的 stats.cost 与 run.cost 再累加一次。
+无模型调用时 fetch 输出不附加计费字段，Run 则统一记录零 usage、null cost 和空 models，不估算费用；
+不要把同一 fetch 的 stats.cost 与 run.cost 再累加一次。
 
 ## HTTP 与运行边界
 
