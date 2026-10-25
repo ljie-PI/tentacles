@@ -107,10 +107,7 @@ def filter_stats(progress: FilterBatch, candidates: int) -> dict[str, Any]:
         if batch.model_name is not None:
             counts.update(models=batch.metrics.models, model_name=batch.model_name,
                           aborted=batch.error is not None, abort_status=batch.http_status)
-    costs = [batch.metrics.cost for batch in progress.batches if batch.metrics.cost is not None]
     return {'candidates': candidates, 'evaluated': len(progress.evaluations), 'stages': progress.stages,
             'passed': sum(e.passed for e in progress.evaluations),
             'rejected': sum(not e.passed for e in progress.evaluations),
-            'errors': candidates - len(progress.evaluations), 'cost': sum(costs) if costs else None,
-            'usage': {key: sum(getattr(batch.metrics.usage, key) for batch in progress.batches)
-                      for key in ('input_tokens', 'output_tokens', 'total_tokens')}}
+            'errors': candidates - len(progress.evaluations)}
