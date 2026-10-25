@@ -8,8 +8,7 @@
     "typecheck": "tsc --noEmit",
     "build": "tsc --noEmit && vite build",
     "generate:api": "node scripts/generate-api.mjs",
-    "check:api": "node scripts/generate-api.mjs --check",
-    "check:dev-proxy": "node scripts/check-dev-proxy.mjs"
+    "check:api": "node scripts/generate-api.mjs --check"
   },
   "dependencies": {
     "@fontsource-variable/noto-sans-sc": "^5.3.1",
