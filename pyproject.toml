@@ -24,7 +24,7 @@ dependencies = [
 tentacles = "tentacles.cli:app"
 
 [project.optional-dependencies]
-dev = ["pytest>=8.0", "mypy>=1.10", "types-PyYAML"]
+dev = ["mypy>=1.10", "types-PyYAML"]
 
 [build-system]
 requires = ["hatchling"]
@@ -32,9 +32,6 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/tentacles"]
-
-[tool.pytest.ini_options]
-testpaths = ["tests"]
 
 [tool.mypy]
 ignore_missing_imports = true

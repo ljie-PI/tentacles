@@ -1,5 +1,9 @@
 # #18 implementation audit
 
+> Historical record: the automated test suite and proxy regression script referenced below were
+> removed after this audit. Test evidence describes validation at implementation time, not checks
+> available in the current checkout.
+
 This maps the parent specification's user stories to the implemented child issues and observable
 validation. Passing tests are evidence, not a guarantee of defect-free behavior.
 

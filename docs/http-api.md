@@ -80,8 +80,7 @@ Request-shape validation errors never echo their input. Domain errors may identi
 ## Frontend
 
 The Vite development proxy explicitly preserves Host (`changeOrigin: false`), so same-origin
-frontend POSTs pass the origin guard without granting broad development CORS access. The executable
-`pnpm check:dev-proxy` regression starts real Vite/Uvicorn with an isolated fake source.
+frontend POSTs pass the origin guard without granting broad development CORS access.
 
 See [frontend setup](../frontend/README.md). Build separately with pnpm, then keep `server.static_dir`
 pointed at the built directory. GETs outside `/api` serve a matching asset or fall back to index.html;

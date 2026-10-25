@@ -354,9 +354,5 @@ launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/local.tentacles.tick.pli
 ## 开发
 
 ```bash
-pytest                 # 测试，不联网：HTTP transport / IMAP 工厂均可注入
 mypy src/tentacles     # 类型检查
 ```
-
-测试都通过 Service 门面（`TentaclesService`）驱动。外部依赖只在边界处替换：HTTP 用 `tests/conftest.py` 里的 `FakeWeb`，
-IMAP 用可注入的连接工厂，时钟也可注入；不替换内部组件。
