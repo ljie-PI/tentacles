@@ -266,7 +266,8 @@ class TentaclesService:
             else:
                 run_id = claim.run_id or 0
                 outcome = await fetch_source(spec, store=self.store, http=http, clock=self._clock,
-                                             run_id=claim.run_id, started_at=started_at, imap_factory=self._imap_factory)
+                                             run_id=claim.run_id, started_at=started_at, imap_factory=self._imap_factory,
+                                             timezone=self.config.app.timezone)
         except Exception as exc:
             failure = exc
         finally:

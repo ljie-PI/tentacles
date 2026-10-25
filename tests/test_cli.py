@@ -487,3 +487,29 @@ def test_summarize_pipeline_and_report_json_contract(write_config, web):
     assert '- [ ] Call team' in payload(shown)['markdown'] and 'CLI brief' in payload(shown)['markdown']
     assert payload(run('pipelines', 'run', 'mail-summary'))['status'] == 'no_new'
     assert len(web.requests_to(CHAT_URL)) == 1
+
+
+def test_web_list_and_page_fetch_json_contract(write_config, web):
+    from test_fetch_web import web_config
+    list_url, page_url = 'https://news.example.test/list', 'https://news.example.test/page'
+    config = web_config(url=list_url)
+    config['sources'].append({**web_config(mode='page', url=page_url)['sources'][0], 'id': 'page'})
+    path = write_config(config)
+    web.serve(list_url, '<div class="entry"><h2>Robotics research</h2><a href="/story">Read</a></div>')
+    web.serve(page_url, '<html><title>Service status</title><main>Pending</main></html>')
+
+    def run(*args):
+        return CliRunner().invoke(app, ['-c', str(path), '--json', *args], obj={'transport': web.transport()}, env={})
+
+    fetched = run('sources', 'fetch')
+    assert fetched.exit_code == 0 and all(row['new'] == 1 for row in payload(fetched))
+    listed = run('items', 'list', '--source', 'page')
+    assert listed.exit_code == 0 and payload(listed)['items'][0]['kind'] == 'web'
+    shown = run('items', 'show', payload(listed)['items'][0]['id'])
+    assert shown.exit_code == 0 and payload(shown)['meta']['web_mode'] == 'page'
+    repeat = run('sources', 'fetch')
+    assert repeat.exit_code == 0 and all(row['new'] == 0 for row in payload(repeat))
+    web.serve(page_url, '<html><title>Service status</title><main>Ready</main></html>')
+    changed = run('sources', 'fetch', 'page')
+    assert changed.exit_code == 0 and payload(changed)[0]['new'] == 1
+    assert payload(run('runs', 'list', '--kind', 'fetch', '--target', 'page'))[0]['status'] == 'ok'

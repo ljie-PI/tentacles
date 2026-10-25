@@ -425,6 +425,14 @@ show 返回完整报告：id/pipeline_id/persona_version/kind/title/markdown/ite
 1. **与已入库条目重复**：同源同外部 id、同 url，或同内容指纹（邮件不按指纹去重）。
 2. **近似标题**：同一批次内标题高度相似时保留第一条；也会跳过其他来源最近 48 小时内已入库过的近似标题。这些被跳过条目的外部 id 会持久化保存，重启或超过 48 小时也不会重新入库。同一来源不同批次的近似标题不会仅因此被合并。
 
+### Web 来源（list / page）
+
+配置 `type: web` 后，仍用 `sources fetch ID`、`items list/show` 和 `runs list`。
+模式、CSS 属性选择器、详情抓取、500-id 缓存及页面版本身份见 [Web 信息源协议](web-sources.md)。
+list 的 `stats.entries` 计解析项，`new_links` 计新身份，`details_fetched` 计详情请求，`seen_cached` 最多 500。
+page 的 `stats` 包含 baseline、changed、content_hash、previous_hash、diff；恢复旧版本可 changed=true 而 new=0。
+两个样例默认关闭；显式命名抓取仍执行。检查逐项 status，错误正文会脱敏，游标不推进。
+
 ### `tick`
 
 一次执行启用且已到期的任务，严格分三个阶段：

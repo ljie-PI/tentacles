@@ -112,6 +112,40 @@ sources:
     max_summary_chars: 2000
     timeout: 30
 
+  # 网页示例均默认关闭；URL 和 CSS 需替换为实际站点，完整语义见 docs/web-sources.md。
+  - id: web-list
+    type: web
+    mode: list
+    name: 网页列表
+    enabled: false
+    schedule: 1h
+    url: https://example.com/news
+    selectors:
+      item: article
+      title: h2
+      link: a@href
+      summary: .summary
+      date: time@datetime
+    fetch_content: true
+    concurrency: 4
+    headers: {}
+    cookies: {}
+    timeout: 30
+    proxy: ${HTTP_PROXY:-}
+  - id: web-page
+    type: web
+    mode: page
+    name: 页面监控
+    enabled: false
+    schedule: 30m
+    url: https://example.com/status
+    selector: main
+    emit_baseline: true
+    headers: {}
+    cookies: {}
+    timeout: 30
+    proxy: ${HTTP_PROXY:-}
+
 # tick 会先抓取、再只过滤、最后运行到期的 pipeline；模型调用可能产生费用。
 # 也可手动执行 pipelines filter/run ID；enabled: false 关闭自动执行。
 pipelines:
