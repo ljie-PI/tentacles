@@ -29,6 +29,7 @@ from tentacles.pipelines.manager import PipelineManager
 from tentacles.pipelines.models import PipelineOutcome, ReportView, PipelineView
 from tentacles.timeutil import parse_since, utcnow, to_utc
 from tentacles.tasks import Task
+from tentacles.sources.imap_client import ImapFactory, connect_imap
 
 log = logging.getLogger(__name__)
 
@@ -38,11 +39,12 @@ FETCH_CONCURRENCY = 4
 class TentaclesService:
     def __init__(self, config: AppConfig, store: Store, *,
                  transport: httpx.AsyncBaseTransport | None = None,
-                 clock: Callable[[], datetime] = utcnow):
+                 clock: Callable[[], datetime] = utcnow, imap_factory: ImapFactory = connect_imap):
         self.config = config
         self.store = store
         self._transport = transport
         self._clock = clock
+        self._imap_factory = imap_factory
         self._model_http = HttpPool(transport)
         self.models = ModelRegistry(config.models, config.defaults, self._model_http, clock=clock)
         self.personas = PersonaManager(store, self.models, clock, config.persona_update)
@@ -61,10 +63,12 @@ class TentaclesService:
     def open(cls, config_path: Path | str | None = None, *,
              transport: httpx.AsyncBaseTransport | None = None,
              env: Mapping[str, str] | None = None,
-             clock: Callable[[], datetime] = utcnow, snapshot: bool = False) -> "TentaclesService":
+             clock: Callable[[], datetime] = utcnow, snapshot: bool = False,
+             imap_factory: ImapFactory = connect_imap) -> "TentaclesService":
         """Open normally, or isolate all initialization and writes in an in-memory snapshot."""
         config = load_config(config_path, env=env)
-        return cls(config, Store(config.db_path, snapshot=snapshot), transport=transport, clock=clock)
+        return cls(config, Store(config.db_path, snapshot=snapshot), transport=transport, clock=clock,
+                   imap_factory=imap_factory)
 
     async def aclose(self) -> None:
         try:
@@ -262,7 +266,7 @@ class TentaclesService:
             else:
                 run_id = claim.run_id or 0
                 outcome = await fetch_source(spec, store=self.store, http=http, clock=self._clock,
-                                             run_id=claim.run_id, started_at=started_at)
+                                             run_id=claim.run_id, started_at=started_at, imap_factory=self._imap_factory)
         except Exception as exc:
             failure = exc
         finally:

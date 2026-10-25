@@ -34,6 +34,7 @@ from typer.core import TyperGroup
 from tentacles.errors import ConfigError, TentaclesError, exit_code
 from tentacles.service import TentaclesService
 from tentacles.personas.models import PersonaProposal
+from tentacles.sources.imap_client import ImapFactory, connect_imap
 
 # 与 click 布尔参数的环境变量取值保持一致
 _TRUTHY = {"1", "true", "t", "yes", "y", "on"}
@@ -98,7 +99,8 @@ app.add_typer(runs_app, name="runs")
 class State:
     config: Optional[Path]
     json: bool
-    transport: Any = None  # tests inject an httpx transport via ctx.obj
+    transport: Any = None  # tests inject external IO boundaries via ctx.obj
+    imap_factory: ImapFactory = connect_imap
 
 
 @app.callback()
@@ -113,7 +115,8 @@ def main(
     for noisy in ("httpx", "httpcore"):
         logging.getLogger(noisy).setLevel(logging.WARNING)
     obj = ctx.obj if isinstance(ctx.obj, dict) else {}
-    ctx.obj = State(config=config, json=json_mode, transport=obj.get("transport"))
+    ctx.obj = State(config=config, json=json_mode, transport=obj.get("transport"),
+                    imap_factory=obj.get("imap_factory", connect_imap))
 
 
 def _jsonable(value: Any) -> Any:
@@ -135,7 +138,8 @@ def _run(ctx: typer.Context, op: Callable[[TentaclesService], Awaitable[Any] | A
     tz: list[ZoneInfo] = []
 
     async def go() -> Any:
-        svc = TentaclesService.open(state.config, transport=state.transport, snapshot=snapshot)
+        svc = TentaclesService.open(state.config, transport=state.transport, snapshot=snapshot,
+                                   imap_factory=state.imap_factory)
         tz.append(ZoneInfo(svc.config.app.timezone))  # 人类可读输出按配置的时区展示时间
         try:
             result = op(svc)

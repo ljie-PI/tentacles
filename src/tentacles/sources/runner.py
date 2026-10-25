@@ -14,6 +14,7 @@ from tentacles.net import HttpPool
 from tentacles.schemas import FetchOutcome
 from tentacles.sources.base import FetchContext, build_source
 from tentacles.store import Store
+from tentacles.sources.imap_client import ImapFactory, connect_imap
 
 log = logging.getLogger(__name__)
 
@@ -23,7 +24,8 @@ CROSS_SOURCE_WINDOW = timedelta(hours=48)
 
 async def fetch_source(spec: SourceSpec, *, store: Store, http: HttpPool,
                        clock: Callable[[], datetime], run_id: int | None = None,
-                       started_at: datetime | None = None) -> FetchOutcome:
+                       started_at: datetime | None = None,
+                       imap_factory: ImapFactory = connect_imap) -> FetchOutcome:
     """Never raises for fetch failures (network, parsing or the store itself):
     they are recorded on the source state and the run where possible, and the
     previous cursor is kept so the next fetch retries. Cancellation is re-raised
@@ -32,7 +34,7 @@ async def fetch_source(spec: SourceSpec, *, store: Store, http: HttpPool,
     Store calls run in a worker thread so a locked database can't stall the
     event loop shared by concurrent fetches.
     """
-    ctx = FetchContext(http=http, now=started_at or clock())
+    ctx = FetchContext(http=http, now=started_at or clock(), imap_factory=imap_factory)
     completed = False
 
     def start_run() -> None:
