@@ -192,6 +192,24 @@ tentacles reports show REPORT_ID
 `processor.type: none` 不调用模型、不生成文件，但将选中的条目标记为已消费。
 完整参数和自定义提示词格式见 [agent 命令说明](docs/agent-cli.md)。
 
+## summarize 邮件简报与待办
+
+示例 `mail-summary` 使用 `inbox` 邮件源，二者默认关闭。配置好邮箱和 process 模型后，可以手动运行：
+
+```sh
+tentacles sources fetch inbox
+tentacles pipelines run mail-summary       # 会调用模型，可能产生费用
+tentacles reports list --pipeline mail-summary
+tentacles reports show REPORT_ID
+```
+
+处理器每 10 条一批生成结构化简报，再汇总成“需要处理”“仅供参考”“未能解析”三部分。
+待办用勾选框列出，条目保留发件人、时间及原文／邮件定位。格式错误的一批整体进入“未能解析”，
+仍视为已报告；传输或模型调用失败则不消费本次条目，可以重试。设置 `enabled: true` 后会按
+pipeline 的频率自动运行；手动命名调用不受开关限制。确认隐私和费用后再开启。
+
+批次关联规则、截止日期排序、提示词格式和费用语义见 [summarize 协议](docs/agent-cli.md#summarize-处理器)。
+
 ## Decision（JEV）过滤
 
 可以在 pipeline.filters 中加入 OpenRouter Decisions 阶段：

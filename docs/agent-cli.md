@@ -332,10 +332,39 @@ Digest 使用 process 默认模型或 processor `model` 覆盖，按 Persona 取
 
 `processor.type: none` 不生成报告、不调用模型，但选中的前 N 条仍会被标记为已消费（evaluations.reported_at）。
 
-### 自定义 digest 提示词
+### summarize 处理器
 
-处理器共用字段：`type`（digest/none）、`model`、`language`（默认 zh-CN）、`instructions`（追加指令）、
-`max_items` 和 `prompt_file`。prompt_file 相对配置目录，UTF-8，格式如下：
+将 pipeline 的 `processor.type` 设为 `summarize`，然后调用 `pipelines run ID`。先检查返回的 `status`；
+单个 pipeline 失败返回 `status=error`，CLI 仍退出 0。成功后用 `report_id` 查询报告。
+
+- 使用 `process` 默认模型；`processor.model` 可覆盖。`language` 控制摘要／待办文本语言，`instructions` 追加要求。
+- 选中的条目每批至多 10 条，正文每条至多 8000 字符。请求包含稳定 `id`、标题、发件人、时间、收件人／抄送、
+  来源摘要、评分、标签和安全 URL；不把 URL 凭据交给模型。空正文使用来源摘要。
+- 模型必须返回以下 JSON；顺序可变，但每个输入 `id` 恰好一次：
+
+  ```json
+  {"items":[{"id":"输入条目 id","summary":"摘要","action_required":true,
+             "deadline":"2026-11-01","todos":["联系团队"]}]}
+  ```
+
+- `summary` 为 1–4000 字符的非空文本，`action_required` 为 JSON 布尔值，`deadline` 为 ISO 日期／日期时间或 null，
+  `todos` 为每项 1–1000 字符的非空文本列表（没有待办时 `[]`），不另限条数。日期未知用 null，避免猜测。可恢复围栏／解释文字中的 JSON。
+- 缺项、未知／重复 id、非法字段或超过 100 万字符的响应，均使**整批**进入“未能解析”；不保留可信度不明的局部结果，
+  不回显模型原始输出。其他批次继续。报告保留三个固定栏目：需要处理、仅供参考、未能解析。
+- “需要处理”按截止时间排序，未知截止日期放最后。日期时间按明确偏移量排序；没有偏移量时使用 app 时区；
+  仅日期视作该时区当天结束。摘要、待办和来源元数据按纯文本转义，不执行 HTML／Markdown 控制内容。
+- 每项附来源时间（发布时间，缺省为抓取时间；越过本地 datetime 范围时保留 UTC）、发件人及安全 http(s) 原文链接；邮件无链接时提供
+  source、文件夹、UIDVALIDITY、UID、Message-ID、条目 id，供 `items show ID` 定位。
+- 成功发布时，**所有交给处理器的条目**原子标记已报告，包括“未能解析”。重复运行、Persona 改版或 `--reevaluate`
+  均不清消费账本。检查“未能解析”后可人工处理原文；其条目不会自动产生下一次模型调用。
+- HTTP／模型调用、模板或报告发布失败时，整次运行失败、没有报告／消费标记；可重试。
+  已返回的用量／费用仍保留；重复取消会等待 HTTP 清理。Report 的 usage/cost 只含处理器各批（包括解析失败批次），
+  pipeline 的总量另含过滤子运行；汇总时继续按 `filter_run_id` 避免重复。
+
+### 自定义处理器提示词
+
+处理器共用字段：`type`（digest/summarize/none）、`model`、`language`（默认 zh-CN）、`instructions`（追加指令）、
+`max_items` 和 `prompt_file`。prompt_file 相对配置目录，UTF-8；以下是 digest 示例：
 
 ```text
 [system]
@@ -351,7 +380,9 @@ pipeline：{{ pipeline.id }}
 ```
 
 system 是纯文本；user 使用沙箱 Jinja 模板，字段有 persona、items、groups、tags、now、pipeline。
-items 含 number/id/source/title/summary/url/score/tags；摘要最多 600 字。persona 渲染最多 12000 字。
+Summarize 按批渲染模板，groups 按每项首个标签分组（无标签为 other）；系统仍追加固定 JSON 输出协议。
+Digest 的 items 含 number/id/source/title/summary/url/score/tags，来源摘要最多 600 字。
+Summarize 的 items 如上文协议，另有 kind/author/time/to/cc/content，来源摘要最多 2000 字。persona 共用 12000 字渲染上限。
 模板文件和模板渲染结果最多 100 万字符，未知变量、语法错误、外部模板引用在配置检查时拒绝；渲染时缺失字段则本次运行失败。
 只使用可信的本地模板；沙箱不等于独立进程的 CPU/内存隔离。language 和 instructions 会追加到 system。
 

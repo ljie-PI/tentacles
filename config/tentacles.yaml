@@ -144,3 +144,20 @@ pipelines:
       language: zh-CN
       max_items: 60
       instructions: 优先按兴趣画像组织事实，避免标题党和重复表述。
+
+
+  # 邮件简报：源 inbox 和本 pipeline 均默认关闭，确认隐私与模型费用后再启用。
+  # 手动 pipelines run mail-summary 仍会调用 process 模型（即使 enabled: false）。
+  - id: mail-summary
+    name: 邮件简报
+    persona: default
+    sources: [inbox]
+    enabled: false
+    window: 7d
+    schedule: '@daily'
+    filters: []             # 可按需求添加 keyword / decision / llm；此处保留全部邮件
+    processor:
+      type: summarize
+      language: zh-CN
+      max_items: 50
+      instructions: 仅提取邮件明确要求的待办，无法确定截止日期时留空。

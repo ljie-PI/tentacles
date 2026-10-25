@@ -451,3 +451,39 @@ def test_imap_fetch_items_runs_and_tick_json_contract(write_config):
     assert 'secret-app-password' not in runs.stdout
     ticked = run('tick')
     assert ticked.exit_code == 0 and payload(ticked) == []
+
+
+def test_summarize_pipeline_and_report_json_contract(write_config, web):
+    from test_fetch_imap import FakeIMAP, Mailbox, mail
+    from test_models import CHAT_URL, chat_reply
+    from test_summarize import row, summary_config
+    fake = FakeIMAP({'"INBOX"': Mailbox(messages={1: mail(subject='CLI mail')})})
+    path = write_config(summary_config())
+
+    def respond(request):
+        payload = json.loads(json.loads(request.content)['messages'][1]['content'])
+        return httpx.Response(200, json=chat_reply(json.dumps({'items': [
+            row(item['id'], summary='CLI brief', action_required=True,
+                deadline='2026-11-01', todos=['Call team']) for item in payload['items']]})))
+
+    import httpx
+    web.handle(CHAT_URL, respond)
+
+    def run(*args):
+        return CliRunner().invoke(app, ['-c', str(path), '--json', *args],
+                                   obj={'imap_factory': fake.factory, 'transport': web.transport()},
+                                   env={'MAIL_PASSWORD': 'secret-app-password'})
+
+    assert run('sources', 'fetch', 'inbox').exit_code == 0
+    pipelines = run('pipelines', 'list')
+    assert pipelines.exit_code == 0 and payload(pipelines)[0]['processor'] == 'summarize'
+    result = run('pipelines', 'run', 'mail-summary')
+    assert result.exit_code == 0 and payload(result)['status'] == 'ok'
+    report_id = payload(result)['report_id']
+    listed = run('reports', 'list', '--pipeline', 'mail-summary')
+    assert listed.exit_code == 0 and payload(listed)['items'][0]['id'] == report_id
+    shown = run('reports', 'show', report_id)
+    assert shown.exit_code == 0 and payload(shown)['kind'] == 'summarize'
+    assert '- [ ] Call team' in payload(shown)['markdown'] and 'CLI brief' in payload(shown)['markdown']
+    assert payload(run('pipelines', 'run', 'mail-summary'))['status'] == 'no_new'
+    assert len(web.requests_to(CHAT_URL)) == 1
