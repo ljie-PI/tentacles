@@ -43,7 +43,7 @@ async def fetch_source(spec: SourceSpec, operation: RunOperation, *, store: Stor
 
     def publish(writer: RunWriter) -> None:
         saved = writer.upsert_items(result.items, source_id=spec.id, title_since=title_since,
-                                    observations=result.observations if spec.update_existing else {})
+                                    observations=result.observations if spec.update_existing else [])
         writer.save_source_state(state)
         stats.update(new=len(saved.new_ids), updated=saved.updated, dup=saved.dup)
 

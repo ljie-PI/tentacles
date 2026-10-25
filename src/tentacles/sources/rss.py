@@ -76,7 +76,7 @@ def entry_to_item(entry, source_id: str, *, allow_partial: bool = False) -> Item
     )
 
 
-def entry_observation(entry, item: Item) -> ItemObservation:
+def entry_observation(entry, item: Item, *, feed_version: str = "") -> ItemObservation:
     """Presence comes from the parsed entry, never Item's default empty strings."""
     fields: dict[str, Any] = {"stable_external_id": bool((entry.get("id") or "").strip())}
     for name, key in (("title", "title"), ("author", "author")):
@@ -85,18 +85,22 @@ def entry_observation(entry, item: Item) -> ItemObservation:
     # feedparser can synthesize entry.link from Atom id / RSS guid. Only
     # actual alternate links are URL observations (including explicit empty).
     alternates = [link for link in entry.get("links", []) or []
-                  if link.get("rel", "alternate") == "alternate" and "href" in link]
+                  if link.get("rel", "alternate") == "alternate"]
     if alternates:
-        alternate = next((link for link in alternates if link["href"] == entry.get("link")), alternates[0])
-        fields["url"] = alternate["href"]
-    # Summary/body fallbacks belong to insertion, not observations. An excerpt
-    # is not an observed full body, even when explicitly empty.
+        alternate = next((link for link in alternates if link.get("href", "") == entry.get("link")), alternates[0])
+        # RSS <link/> has an alternate record but no href. No alternate record
+        # means missing; a record with no href is an explicitly empty URL.
+        fields["url"] = alternate.get("href", "")
+    # Atom summaries are excerpts, whereas RSS descriptions supply the full
+    # description-backed body when no explicit content field was delivered.
     summary_key = next((key for key in ("summary", "description") if key in entry), None)
     if isinstance(entry, feedparser.FeedParserDict) and "summary_detail" not in entry:
         summary_key = None  # feedparser also synthesizes summary from content
     if summary_key is not None:
         summary = entry[summary_key]
         fields["summary"] = None if summary is None else truncate(html_to_text(summary), 2000)
+        if feed_version.startswith("rss") and "content" not in entry:
+            fields["content"] = None if summary is None else html_to_text(summary)
     if "content" in entry:
         body = entry["content"]
         value = body[0].get("value") if body else None
@@ -145,7 +149,7 @@ class RssSource(Source):
 
         cutoff = None if opts.max_age_days is None else ctx.now - timedelta(days=opts.max_age_days)
         items, too_old = [], 0
-        observations: dict[str, ItemObservation] = {}
+        observations: list[ItemObservation] = []
         for entry in parsed.entries:
             item = entry_to_item(entry, self.spec.id, allow_partial=self.spec.update_existing)
             if item is None:
@@ -155,7 +159,7 @@ class RssSource(Source):
                 continue
             items.append(item)
             if self.spec.update_existing:
-                observations.setdefault(item.id, entry_observation(entry, item))
+                observations.append(entry_observation(entry, item, feed_version=parsed.get("version", "")))
 
         new_cursor = {"url": opts.url, **{k: v for k, v in (
             ("etag", resp.headers.get("etag")), ("last_modified", resp.headers.get("last-modified"))) if v}}

@@ -633,7 +633,7 @@ class Store:
 
     def upsert_items(self, items: list[Item], *, source_id: str,
                      title_since: datetime | None, run_id: int | None = None,
-                     observations: dict[str, ItemObservation] | None = None,
+                     observations: dict[str, ItemObservation] | list[ItemObservation] | None = None,
                      now: datetime | None = None) -> ItemWriteResult:
         """Standalone fenced batch seam; RunWriter shares its implementation."""
         with self._lock, self._conn:
@@ -643,28 +643,31 @@ class Store:
                                       observations=observations or {}, now=now)
 
     def _upsert_items(self, items: list[Item], *, source_id: str, title_since: datetime | None,
-                      observations: dict[str, ItemObservation], now: datetime | None) -> ItemWriteResult:
+                      observations: dict[str, ItemObservation] | list[ItemObservation],
+                      now: datetime | None) -> ItemWriteResult:
         """Caller owns the write transaction before any identity/dedup reads."""
         if any(it.source_id != source_id for it in items):
             raise Conflict('source batch identity mismatch')
+        if isinstance(observations, list) and observations and len(observations) != len(items):
+            raise Conflict('source observation batch length mismatch')
         fetched, updated = len(items), 0
         new: list[str] = []
         self._conn.executemany('INSERT OR IGNORE INTO source_seen_ids VALUES (?, ?)',
             [(source_id, it.external_id) for it in items if it.kind == 'web' and it.identity_policy == 'standard'])
         candidates: list[Item] = []
         seen: set[str] = set()
-        for it in items:
-            if observations:
-                if it.external_id in seen:
-                    continue  # first observation wins, including unchanged updates
-                seen.add(it.external_id)
-            observation = observations.get(it.id)
+        for index, it in enumerate(items):
+            if observations and it.external_id in seen:
+                continue  # first valid observation wins, including unchanged updates
+            observation = (observations[index] if isinstance(observations, list)
+                           else observations.get(it.id)) if observations else None
             row = None
             if observation is not None and observation.stable_external_id and it.identity_policy == 'standard':
                 row = self._conn.execute(f"SELECT {_ITEM_COLUMNS} FROM items"
                     " WHERE source_id = ? AND external_id = ? AND identity_policy = 'standard'",
                     (source_id, it.external_id)).fetchone()
             if row is not None:
+                seen.add(it.external_id)
                 assert observation is not None
                 old = _row_to_item(row)
                 latest = observation.apply(old)
@@ -694,6 +697,8 @@ class Store:
                     # Partial observations can update a known identity, never
                     # create an untitled Item.
                     continue
+                if observations:
+                    seen.add(it.external_id)
                 if not self._is_duplicate(candidate):
                     candidates.append(candidate)
         suppressed: list[Item] = []
@@ -919,7 +924,7 @@ class RunWriter:
         self._created_files: list[Path] = []
 
     def upsert_items(self, items: list[Item], *, source_id: str, title_since: datetime | None,
-                     observations: dict[str, ItemObservation]) -> ItemWriteResult:
+                     observations: dict[str, ItemObservation] | list[ItemObservation]) -> ItemWriteResult:
         return self._store._upsert_items(items, source_id=source_id, title_since=title_since,
                                          observations=observations, now=self._now)
 

@@ -36,7 +36,9 @@ class FetchResult:
     items: list[Item]
     cursor: dict[str, Any]
     stats: dict[str, Any] = field(default_factory=dict)
-    observations: dict[str, ItemObservation] = field(default_factory=dict)
+    # One observation per delivered entry, in item order. Repeated identities
+    # must retain their distinct fields until Store selects the first valid one.
+    observations: list[ItemObservation] = field(default_factory=list)
 
 
 class Source(ABC):
