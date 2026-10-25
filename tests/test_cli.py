@@ -365,7 +365,8 @@ def test_feedback_evolve_preview_apply_pipe_contract(write_config, web, tmp_path
 
 
 @pytest.mark.parametrize('existing', [False, True])
-def test_evolution_dry_run_never_persists_service_initialization(write_config, web, tmp_path, existing):
+@pytest.mark.parametrize('instruction', ['Update', ''])
+def test_evolution_dry_run_never_persists_service_initialization(write_config, web, tmp_path, existing, instruction):
     import asyncio
     from test_models import CHAT_URL, chat_reply, model_config
     from test_persona_evolution import evolved_content
@@ -382,10 +383,13 @@ def test_evolution_dry_run_never_persists_service_initialization(write_config, w
     web.serve(CHAT_URL, json.dumps(chat_reply(json.dumps(evolved_content()))),
               headers={'content-type': 'application/json'})
     result = CliRunner().invoke(app, ['-c', str(path), '--json', 'persona', 'evolve', 'default',
-                                      '--instruction', 'Update', '--dry-run'],
+                                      '--instruction', instruction, '--dry-run'],
                                 obj={'transport': web.transport()}, env={})
-    assert result.exit_code == 0
-    assert payload(result)['base_version'] == (2 if existing else 1)
+    assert result.exit_code == (0 if instruction else 2)
+    if instruction:
+        assert payload(result)['base_version'] == (2 if existing else 1)
+    else:
+        assert payload(result)['error']['code'] == 'invalid'
     if not existing:
         assert not (tmp_path / 'data').exists()
     write_config(original)
