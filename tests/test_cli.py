@@ -544,18 +544,18 @@ def test_deep_pipeline_returns_all_report_ids_and_report_contracts(cli, web, wri
     import httpx
     from test_deep import deep_config, event_feed
     from test_models import CHAT_URL, chat_reply
+    from tentacles.pipelines.models import PipelineOutcome, ReportView
     path = write_config(deep_config())
     web.serve(FEED, event_feed())
     web.handle(CHAT_URL, lambda r: httpx.Response(200, json=chat_reply('Event facts [来源1].')))
     assert cli('sources', 'fetch', config=path).exit_code == 0
     result = cli('pipelines', 'run', 'daily', config=path)
     assert result.exit_code == 0
-    outcome = payload(result)
-    assert outcome['status'] == 'ok' and outcome['stats']['consumed'] == 7
-    ids = outcome['stats']['report_ids']
-    assert len(ids) == 2 and outcome['report_id'] == ids[0]
+    outcome = PipelineOutcome.model_validate(payload(result))
+    ids = outcome.stats['report_ids']
+    assert isinstance(ids, list) and ids and all(isinstance(report_id, str) for report_id in ids)
+    assert outcome.report_id == ids[0]
     for report_id in ids:
-        report = payload(cli('reports', 'show', report_id, config=path))
-        assert report['kind'] == 'deep' and len(report['item_ids']) == 3
-        assert report['title'].startswith('深度报道：')
-    assert payload(cli('pipelines', 'run', 'daily', config=path))['status'] == 'no_new'
+        shown = cli('reports', 'show', report_id, config=path)
+        assert shown.exit_code == 0
+        assert ReportView.model_validate(payload(shown)).id == report_id

@@ -8,7 +8,6 @@ from zoneinfo import ZoneInfo
 
 from tentacles.cluster import cluster_articles
 from tentacles.config import AppConfig
-from tentacles.errors import UpstreamError
 from tentacles.llm.registry import ModelRegistry
 from tentacles.models import Item
 from tentacles.personas.models import PersonaView
@@ -16,7 +15,8 @@ from tentacles.personas.render import render_persona
 from tentacles.pipelines.config import PipelineSpec
 from tentacles.pipelines.models import Evaluation, ReportView
 from tentacles.pipelines.report_path import new_report_location
-from tentacles.prompts import MAX_PROMPT_CHARS, load_prompt
+from tentacles.pipelines.report_writing import complete_report, require_citations
+from tentacles.prompts import load_prompt
 from tentacles.schemas import Completion
 from tentacles.timeutil import to_utc
 
@@ -37,7 +37,6 @@ async def make_deep(config: AppConfig, spec: PipelineSpec, persona: PersonaView,
     if not events:
         return []
     evaluations = {item.id: evaluation for item, evaluation in selected}
-    name = models.resolve('process', spec.processor.model)
     prompt = load_prompt(config.resolve(spec.processor.prompt_file)) if spec.processor.prompt_file is not None else None
     reports = []
     for event in events:
@@ -55,16 +54,11 @@ async def make_deep(config: AppConfig, spec: PipelineSpec, persona: PersonaView,
                 'tags': [tag.model_dump() for tag in persona.tags],
                 'now': now.astimezone(ZoneInfo(config.app.timezone)).isoformat(),
                 'pipeline': {'id': spec.id, 'name': spec.name}})
-        if len(user) > MAX_PROMPT_CHARS:
-            raise UpstreamError('deep prompt exceeds size limit')
-        system += f'\n输出语言：{spec.processor.language}\n追加指令：{spec.processor.instructions}'
-        result = await models.chat(name).complete([{'role': 'user', 'content': user}], system=system,
-                                                 on_completion=on_completion)
+        result = await complete_report(spec.processor, models, system, user, on_completion)
         now = to_utc(clock())
-        content = models.redact(result.text).strip()
+        content = result.text
         references = [int(a or b) for a, b in re.findall(r'\[(\d+)\]|来源\s*(\d+)', content)]
-        if not content or not references or any(not 1 <= number <= len(items) for number in references):
-            raise UpstreamError('deep returned no valid numbered citations')
+        require_citations('deep', content, references, len(items))
         title = models.redact(f'深度报道：{event.title()}')
         appendix = '\n'.join(f'[来源{item["number"]}] {item["source"]}: {item["title"]} {item["url"]}' for item in items)
         markdown = models.redact(f'# {title}\n\n> 基于来自 {len(event.sources)} 个来源的 {event.size} 篇文章。\n\n'
