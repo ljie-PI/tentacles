@@ -53,10 +53,13 @@ def _entry_published(entry) -> datetime | None:
     return None
 
 
-def entry_to_item(entry, source_id: str) -> Item | None:
+def entry_to_item(entry, source_id: str, *, allow_partial: bool = False) -> Item | None:
     link = (entry.get("link") or "").strip()
     title = (entry.get("title") or "").strip()
-    if not title or not (link or entry.get("id")):
+    # Opted-in stable identities may carry updates without a usable new-item
+    # title. Store resolves them under its write lock and rejects unknown ones.
+    partial = allow_partial and bool((entry.get("id") or "").strip())
+    if (not title and not partial) or not (link or entry.get("id")):
         return None
     content = entry.content[0].value if entry.get("content") else ""
     summary = entry.get("summary") or entry.get("description") or content
@@ -76,23 +79,28 @@ def entry_to_item(entry, source_id: str) -> Item | None:
 def entry_observation(entry, item: Item) -> ItemObservation:
     """Presence comes from the parsed entry, never Item's default empty strings."""
     fields: dict[str, Any] = {"stable_external_id": bool((entry.get("id") or "").strip())}
-    for name, key in (("title", "title"), ("url", "link"), ("author", "author")):
+    for name, key in (("title", "title"), ("author", "author")):
         if key in entry:
             fields[name] = getattr(item, name) if entry[key] is not None else None
-    # A content body can supply the original summary fallback, but an absent
-    # body/summary must not turn a partial observation into a destructive clear.
+    # feedparser can synthesize entry.link from Atom id / RSS guid. Only
+    # actual alternate links are URL observations (including explicit empty).
+    alternates = [link for link in entry.get("links", []) or []
+                  if link.get("rel", "alternate") == "alternate" and "href" in link]
+    if alternates:
+        alternate = next((link for link in alternates if link["href"] == entry.get("link")), alternates[0])
+        fields["url"] = alternate["href"]
+    # Summary/body fallbacks belong to insertion, not observations. An excerpt
+    # is not an observed full body, even when explicitly empty.
     summary_key = next((key for key in ("summary", "description") if key in entry), None)
+    if isinstance(entry, feedparser.FeedParserDict) and "summary_detail" not in entry:
+        summary_key = None  # feedparser also synthesizes summary from content
     if summary_key is not None:
         summary = entry[summary_key]
         fields["summary"] = None if summary is None else truncate(html_to_text(summary), 2000)
-        if "content" not in entry:
-            fields["content"] = None if summary is None else html_to_text(summary)
     if "content" in entry:
         body = entry["content"]
         value = body[0].get("value") if body else None
         fields["content"] = None if value is None else html_to_text(value)
-        if summary_key is None:
-            fields["summary"] = None if value is None else truncate(html_to_text(value), 2000)
     if any(key in entry for key in ("published", "updated", "published_parsed", "updated_parsed")):
         # Malformed nonempty dates are not successful observations.
         if item.published is not None or not (entry.get("published") or entry.get("updated")):
@@ -139,7 +147,7 @@ class RssSource(Source):
         items, too_old = [], 0
         observations: dict[str, ItemObservation] = {}
         for entry in parsed.entries:
-            item = entry_to_item(entry, self.spec.id)
+            item = entry_to_item(entry, self.spec.id, allow_partial=self.spec.update_existing)
             if item is None:
                 continue
             if cutoff and item.published and item.published < cutoff:

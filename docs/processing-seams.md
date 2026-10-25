@@ -40,6 +40,11 @@ explicit null clears, unset preserves. Stable external identity is declared,
 not inferred from a fallback URL/fingerprint. Only opted-in RSS currently emits
 these observations. Store owns target resolution, full downstream-field
 comparison, content revision and evaluation invalidation in its write transaction.
+RSS/Atom insertion fallbacks are not update observations: a summary/description
+does not replace a missing full body, and feedparser's ID-derived `link` is not
+an observed alternate URL. Stable-ID entries without a title may update known
+Items (missing title preserves; explicit empty/null clears), but cannot insert
+untitled Items. Target resolution and this insertion check share Store's fence.
 `RunWriter.upsert_items` shares that implementation so batch writes, source cursor,
 counts and Run completion commit together. Counts-only metadata is not content;
 the `to`/`cc` fields used by summarize do participate in content comparison.

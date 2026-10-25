@@ -690,6 +690,10 @@ class Store:
                                        (json.dumps(latest.meta, ensure_ascii=False), old.id))
             else:
                 candidate = observation.apply(it) if observation is not None else it
+                if observation is not None and not candidate.title:
+                    # Partial observations can update a known identity, never
+                    # create an untitled Item.
+                    continue
                 if not self._is_duplicate(candidate):
                     candidates.append(candidate)
         suppressed: list[Item] = []
