@@ -7,7 +7,7 @@ from datetime import datetime
 from typing import Any, Callable
 
 import httpx
-from fastapi import Depends, FastAPI, HTTPException
+from fastapi import APIRouter, Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 
@@ -16,6 +16,7 @@ from tentacles.api.errors import ERROR_RESPONSES, install_error_handlers
 from tentacles.api.privacy import LogSafeAPI
 from tentacles.api.security import authorization
 from tentacles.api.routes import router
+from tentacles.api.management import router as management_router
 from tentacles.config import AppConfig
 from tentacles.service import TentaclesService
 from tentacles.server_runtime import poll_scheduler
@@ -60,7 +61,10 @@ def create_app(config: AppConfig, *, transport: httpx.AsyncBaseTransport | None 
     def health():
         return Health()
 
-    app.include_router(router, prefix='/api', dependencies=[Depends(authorize)])
+    api = APIRouter(prefix='/api', dependencies=[Depends(authorize)])
+    api.include_router(router)
+    api.include_router(management_router)
+    app.include_router(api)
     app.add_middleware(CORSMiddleware, allow_origins=config.server.cors_origins,
                        allow_methods=['GET', 'POST', 'PUT', 'PATCH', 'DELETE'],
                        allow_headers=['Authorization', 'Content-Type'])

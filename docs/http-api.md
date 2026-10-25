@@ -40,6 +40,13 @@ Generate types offline with `python -m tentacles.api_schema`, without user confi
 | `POST /api/sources/{source_id}/fetch` | `FetchOutcome`; unknown ID 404, busy 409, failed fetch 502 |
 | `GET /api/items` | `Page[ItemView]`; `sources` and `kinds` may repeat; `since`, `until`, `search`, `pipeline`, `passed`, `limit`, `offset` |
 | `GET /api/items/{item_id}` | `ItemDetail`, including body and evaluations |
+| `GET /api/pipelines` | `PipelineView[]`：persona、来源、处理方式、计划、待报告数和最近状态 |
+| `POST /api/pipelines/{pipeline_id}/filter` | `PipelineOutcome`；可选 `{ "reevaluate": true, "since": "7d" }`，since 仅配合重新评估 |
+| `POST /api/pipelines/{pipeline_id}/run` | `PipelineOutcome`；ok/no_new 为 200，busy 409，处理失败 502 |
+| `GET /api/reports` | `Page[ReportView]`，可选 `pipeline`、`limit`、`offset`（int64 上限） |
+| `GET /api/reports/{report_id}` | `ReportView`，Markdown 与引用 item_ids |
+| `GET /api/models` | `ModelView[]`，只有 key_configured 布尔值，没有密钥 |
+| `POST /api/models/{name}/test` | `ModelTest`：完成的测试即使不可用也返回 200 / ok=false，保留延迟和已脱敏的错误；未知模型 404 |
 | `GET /api/runs` | `RunView[]`, optional `kind`, `target`, `limit` |
 | `GET /api/scheduler` | `TaskView[]` from Service |
 | `GET /api/scheduler/loop` | polling enabled/running state, interval, cycle/failure counts and last tick/error |
@@ -76,3 +83,19 @@ If no build exists, API works normally and non-API GETs return a helpful 404.
 The frontend formats Feed/detail/source timestamps using the authenticated `/api/settings` timezone,
 not the browser timezone. If the browser does not support that IANA timezone, it shows explicitly
 labeled UTC and a warning rather than silently showing local time.
+
+
+## Management pages
+
+Pipelines actions, model tests and manual ticks are explicit, potentially billable operations, never
+triggered by loading a page. Even disabled pipelines can be run manually, matching Service/CLI.
+Pipeline error responses are generic; Runs contains the persistent run status/stats/known fees.
+Model availability is a completed diagnostic result (`ok=false` with latency/error), not an API error.
+Its provider error excerpt retains Service's configured-key redaction and bounds.
+
+Feed shares its pipeline and passed filters with the URL. Cleared pipeline selection clears the
+passed filter. Reports render GFM tables, suppress raw HTML, restrict links and turn images into
+explicit no-referrer links rather than auto-fetching remote content. Referenced items can be opened
+in Feed. Visible Runs and scheduler views refresh every five seconds; background tabs pause polling by default, and refresh on return when stale; null cost is displayed as unknown.
+Saving a browser token reloads Settings after clearing caches, resetting active observers and prior
+probe results so a credential change cannot leave stale protected data visible.

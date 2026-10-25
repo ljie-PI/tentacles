@@ -49,3 +49,11 @@ in `public/fonts/OFL-NotoSansSC.txt`. Navigation icons are inline SVG, not a sys
 Timestamps use the server's non-sensitive `/api/settings` timezone metadata. No browser-local
 fallback is used; an unsupported timezone displays labeled UTC with a warning. A late 401 from an
 old token does not redirect after a new token has been saved.
+
+Management pages include Pipelines, Reports, Runs and expanded Settings. Feed supports pipeline and
+passed/rejected URL filters with interval-colored score badges, tags, reason and final stage. Reports
+use react-markdown + remark-gfm for tables; raw HTML is skipped, unsafe links are not clickable,
+and remote images become explicit no-referrer links (no automatic tracking-image fetch).
+Runs/scheduler refresh every 5 seconds, preserving unknown costs. Model tests are manual and may
+incur fees. Token save intentionally reloads Settings so mounted queries/local test results cannot
+retain data from old credentials. Narrow navigation wraps rather than overflowing the page.

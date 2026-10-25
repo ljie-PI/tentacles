@@ -32,3 +32,9 @@ class SchedulerLoopView(BaseModel):
 
 class DisplaySettings(BaseModel):
     timezone: str
+
+
+class PipelineFilter(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    reevaluate: bool = False
+    since: str | None = None
