@@ -49,6 +49,45 @@ tentacles items list --since 24h  # 查看最近 24 小时的条目
 
 所有命令都支持 `--json`：stdout 只输出一个 JSON 值，日志写到 stderr，退出码按错误类型区分。给 agent 用的完整说明见 [docs/agent-cli.md](docs/agent-cli.md)。
 
+## IMAP 邮箱
+
+示例配置的 `inbox` 默认 `enabled: false`，不会因升级自动连接邮箱。填好 `.env` 中的
+`IMAP_HOST`、`IMAP_USERNAME`、`IMAP_PASSWORD` 后，可手动抓取；设置 `enabled: true`
+后由 `tick` 按该源的 `schedule` 自动抓取。密码只通过环境变量／`.env` 注入，不写入游标或日志。
+
+```sh
+tentacles sources fetch inbox
+tentacles items list --source inbox
+tentacles items show ITEM_ID
+```
+
+- **Gmail**：本客户端不使用“通过 Google 登录”，需在账户允许时启用两步验证并创建
+  **应用专用密码**，不要填写日常账户密码。工作／学校账户、Advanced Protection 等策略可能禁止此功能。
+- **Outlook.com / Hotmail**：微软已从 **2024-09-16** 起关闭 Basic Authentication，当前 IMAP
+  需要 OAuth2；应用专用密码不能绕过该限制。本期仅实现 IMAP LOGIN，OAuth2/XOAUTH2 不在范围内，
+  因此暂不支持这些账户。其他允许密码或应用专用密码的 IMAP 服务器可按其实际策略配置。
+- 服务商依据：[Google 应用专用密码](https://support.google.com/accounts/answer/185833)、
+  [Microsoft Outlook 现代认证要求](https://support.microsoft.com/en-us/support/known-issues/modern-authentication-methods-now-needed-to-continue-syncing-outlook-email-in-non-microsoft-email-ap)。
+
+`host`、`username`、`password` 配置连接；`ssl` 默认 true，启用时校验证书和主机名，
+`port` 默认随 SSL 取 993／143（显式端口优先），`timeout` 默认 30 秒。
+`ssl: false` 不会自动升级 STARTTLS，用户名和密码可能明文发送，**只应在可信本地连接使用**。
+
+`folders` 默认 `[INBOX]`，支持含空格、引号和非 ASCII 字符的文件夹名。每个文件夹分别保存
+UIDVALIDITY 和最后处理 UID；首次、UIDVALIDITY 或账户身份变化时按 `initial_days`（默认 30）搜索，
+之后仅处理更大的 UID。按 UID 升序处理，所有文件夹合计最多 `max_fetch`（默认 100）个 UID，
+剩余邮件留到下一轮。文件夹按配置顺序处理；排除的发件人和期间被删除的邮件也消耗处理名额并推进游标。
+附加的 `search`（默认 `ALL`）直接与日期／UID 条件组合，例如 `UNSEEN` 或 `FROM "name@example.com"`。
+`exclude_senders` 按 From 中完整邮箱地址不区分大小写精确匹配，不按显示名或子串误排除。
+
+文件夹以只读方式选择，正文使用 `BODY.PEEK[]`；不标已读、不移动、不删除、不 expunge。
+主题缺失用 `(no subject)`，发件人与 MIME 标题会解码，日期统一为 UTC；外部 ID 优先使用 Message-ID，
+缺失时采用“原始文件夹名:UIDVALIDITY:UID”。正文优先纯文本，否则 HTML 转文本；附件及附带邮件的正文
+不进入信息流，只记录附件名。清理常见 `>` 引用、回复头及 HTML quote 容器后，正文和摘要分别截断到
+`max_body_chars`（默认 20000）、`max_summary_chars`（默认 2000）。邮件不按内容指纹或近似标题去重，
+因此内容相同、Message-ID 不同的两封邮件都能保留。认证／连接等失败按 upstream 处理，错误不回显密码、
+服务端响应或邮件内容；像其他来源一样，单个失败以抓取结果的 `status=error` 返回，不阻断其他源。
+
 ## 模型配置
 
 示例提供 `fast`（DeepSeek）、`smart`（Claude Sonnet）、`max`（Claude Opus）和 `decision`（JEV）。
@@ -239,8 +278,9 @@ launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/local.tentacles.tick.pli
 ## 开发
 
 ```bash
-pytest                 # 测试，不联网：HTTP 通过可注入的 transport 伪造
+pytest                 # 测试，不联网：HTTP transport / IMAP 工厂均可注入
 mypy src/tentacles     # 类型检查
 ```
 
-测试都通过 Service 门面（`TentaclesService`）驱动。外部依赖只在边界处替换：HTTP 用 `tests/conftest.py` 里的 `FakeWeb`。
+测试都通过 Service 门面（`TentaclesService`）驱动。外部依赖只在边界处替换：HTTP 用 `tests/conftest.py` 里的 `FakeWeb`，
+IMAP 用可注入的连接工厂，时钟也可注入；不替换内部组件。

@@ -426,3 +426,28 @@ def test_evolution_human_diff_is_colored_while_json_stays_plain(write_config, we
                            env={'FORCE_COLOR': '1', 'TERM': 'xterm-256color', 'NO_COLOR': None})
     assert result.exit_code == 0 and '\x1b[' not in result.stdout
     assert payload(result)['base_version'] == 1
+
+
+def test_imap_fetch_items_runs_and_tick_json_contract(write_config):
+    from test_fetch_imap import FakeIMAP, Mailbox, imap_config, mail
+    fake = FakeIMAP({'"INBOX"': Mailbox(messages={1: mail(subject='邮件进展')})})
+    path = write_config(imap_config())
+
+    def run(*args):
+        return CliRunner().invoke(app, ['-c', str(path), '--json', *args],
+                                   obj={'imap_factory': fake.factory},
+                                   env={'MAIL_PASSWORD': 'secret-app-password'})
+
+    fetched = run('sources', 'fetch', 'inbox')
+    assert fetched.exit_code == 0 and payload(fetched)[0]['new'] == 1
+    listed = run('items', 'list', '--source', 'inbox')
+    assert listed.exit_code == 0 and payload(listed)['items'][0]['kind'] == 'email'
+    item_id = payload(listed)['items'][0]['id']
+    detail = run('items', 'show', item_id)
+    assert detail.exit_code == 0 and payload(detail)['title'] == '邮件进展'
+    assert payload(detail)['meta']['uid'] == 1
+    runs = run('runs', 'list', '--kind', 'fetch', '--target', 'inbox')
+    assert runs.exit_code == 0 and payload(runs)[0]['status'] == 'ok'
+    assert 'secret-app-password' not in runs.stdout
+    ticked = run('tick')
+    assert ticked.exit_code == 0 and payload(ticked) == []

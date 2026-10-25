@@ -14,12 +14,14 @@ from tentacles.config import SourceSpec, format_loc
 from tentacles.errors import ConfigError
 from tentacles.models import Item
 from tentacles.net import HttpPool
+from tentacles.sources.imap_client import ImapFactory, connect_imap
 
 
 @dataclass
 class FetchContext:
     http: HttpPool
     now: datetime
+    imap_factory: ImapFactory = connect_imap
 
 
 @dataclass

@@ -1,4 +1,4 @@
-"""Cancellation-safe worker IO for SQLite operations shared by async tasks."""
+"""Cancellation-safe owned worker IO (SQLite and IMAP), shared by async tasks."""
 from __future__ import annotations
 
 import asyncio
@@ -7,8 +7,8 @@ from typing import Any, Callable, TypeVar
 _T = TypeVar("_T")
 
 
-async def run_store_call(fn: Callable[..., _T], *args: Any, **kwargs: Any) -> _T:
-    """Drain worker IO before cancellation can close its shared SQLite connection."""
+async def run_blocking(fn: Callable[..., _T], *args: Any, **kwargs: Any) -> _T:
+    """Drain worker IO before cancellation can close its shared resources."""
     worker = asyncio.create_task(asyncio.to_thread(fn, *args, **kwargs))
     cancellation: asyncio.CancelledError | None = None
     while True:
@@ -26,6 +26,10 @@ async def run_store_call(fn: Callable[..., _T], *args: Any, **kwargs: Any) -> _T
             if cancellation is not None:
                 raise cancellation
             return result
+
+
+# Preserve the established name for existing database call sites.
+run_store_call = run_blocking
 
 
 

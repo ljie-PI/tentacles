@@ -91,6 +91,27 @@ sources:
   - {id: nytimes-world, type: rss, url: "https://rss.nytimes.com/services/xml/rss/nyt/World.xml", schedule: 1h}
   - {id: cnbc-top, type: rss, url: "https://search.cnbc.com/rs/search/combinedcms/view.xml?partnerId=wrss01", schedule: 1h}
 
+  # 邮箱默认关闭，避免配置尚未完成时连接真实邮箱；显式 sources fetch inbox 可手动测试。
+  # 仅支持密码/应用专用密码登录，不支持 Outlook.com 要求的 OAuth2。
+  - id: inbox
+    type: imap
+    name: 邮箱
+    enabled: false
+    schedule: 30m
+    host: ${IMAP_HOST:-imap.gmail.com}
+    port: 993
+    ssl: true
+    username: ${IMAP_USERNAME:-}
+    password: ${IMAP_PASSWORD:-}
+    folders: [INBOX]
+    initial_days: 30
+    max_fetch: 100          # 所有文件夹合计；被排除/已删除的 UID 也计入上限
+    search: ALL            # 可用 UNSEEN、FROM "sender@example.com" 等 IMAP 搜索条件
+    exclude_senders: []    # 发件人的完整邮箱地址，不区分大小写
+    max_body_chars: 20000
+    max_summary_chars: 2000
+    timeout: 30
+
 # tick 会先抓取、再只过滤、最后运行到期的 pipeline；模型调用可能产生费用。
 # 也可手动执行 pipelines filter/run ID；enabled: false 关闭自动执行。
 pipelines:
