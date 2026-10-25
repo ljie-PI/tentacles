@@ -88,6 +88,21 @@ UIDVALIDITY 和最后处理 UID；首次、UIDVALIDITY 或账户身份变化时�
 因此内容相同、Message-ID 不同的两封邮件都能保留。认证／连接等失败按 upstream 处理，错误不回显密码、
 服务端响应或邮件内容；像其他来源一样，单个失败以抓取结果的 `status=error` 返回，不阻断其他源。
 
+## 网页 list / page 信息源
+
+没有 RSS 的站点可以配置 `type: web`：list 用 CSS 选择器提取文章，可选并发抓新详情；page 保存内容版本，
+内容变化时生成带增删行差异的条目。同 URL 的页面版本可独立入库，不会被普通文章判重吞掉。
+示例 `web-list` / `web-page` 默认关闭，不会因升级新增网络请求。
+
+```sh
+tentacles sources fetch web-list web-page
+tentacles items list --source web-page
+tentacles items show ITEM_ID
+```
+
+使用前替换 URL 与选择器；属性写法、500-id 缓存、Cookie 隔离和页面版本身份见 [Web 信息源协议](docs/web-sources.md)。
+仅支持静态页面；非 2xx（含重定向）会失败并保留旧游标。
+
 ## 模型配置
 
 示例提供 `fast`（DeepSeek）、`smart`（Claude Sonnet）、`max`（Claude Opus）和 `decision`（JEV）。

@@ -8,7 +8,7 @@ from datetime import datetime
 from typing import Any, Literal
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, ValidationInfo, field_validator
 
 from tentacles.timeutil import to_utc, utcnow
 
@@ -50,6 +50,7 @@ class Item(BaseModel):
     id: str = ""
     source_id: str
     kind: ItemKind
+    identity_policy: Literal["standard", "revision"] = "standard"
     external_id: str = ""
     url: str = ""
     title: str
@@ -63,7 +64,9 @@ class Item(BaseModel):
 
     @field_validator("title", "summary", "author")
     @classmethod
-    def _clean(cls, v: str) -> str:
+    def _clean(cls, v: str, info: ValidationInfo) -> str:
+        if info.field_name == "summary" and info.data.get("identity_policy") == "revision":
+            return v.strip()
         return re.sub(r"\s+", " ", v).strip()
 
     @field_validator("published", "fetched_at")

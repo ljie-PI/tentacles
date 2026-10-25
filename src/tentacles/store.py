@@ -205,10 +205,28 @@ def _migrate_v8(conn: sqlite3.Connection) -> None:
     conn.execute('CREATE INDEX feedback_persona_time ON feedback (persona, created_at, id)')
 
 
-MIGRATIONS: list[Callable[[sqlite3.Connection], None]] = [_migrate_v1, _migrate_v2, _migrate_v3, _migrate_v4, _migrate_v5, _migrate_v6, _migrate_v7, _migrate_v8]
+def _migrate_v9(conn: sqlite3.Connection) -> None:
+    conn.execute("ALTER TABLE items ADD COLUMN identity_policy TEXT NOT NULL DEFAULT 'standard'"
+                 " CHECK (identity_policy IN ('standard', 'revision'))")
+    conn.execute("CREATE INDEX idx_items_article_url ON items (url)"
+                 " WHERE url != '' AND identity_policy = 'standard'")
+    conn.execute("CREATE INDEX idx_items_article_fp ON items (fingerprint)"
+                 " WHERE kind != 'email' AND identity_policy = 'standard'")
+
+
+def _migrate_v10(conn: sqlite3.Connection) -> None:
+    # The cursor is only a 500-id cache; observations survive eviction and
+    # article deduplication, so old links never trigger detail downloads again.
+    conn.execute("""CREATE TABLE source_seen_ids (
+        source_id TEXT NOT NULL, external_id TEXT NOT NULL,
+        PRIMARY KEY (source_id, external_id)
+    )""")
+
+
+MIGRATIONS: list[Callable[[sqlite3.Connection], None]] = [_migrate_v1, _migrate_v2, _migrate_v3, _migrate_v4, _migrate_v5, _migrate_v6, _migrate_v7, _migrate_v8, _migrate_v9, _migrate_v10]
 
 _ITEM_COLUMNS = ("id, source_id, kind, external_id, url, title, author, summary, content,"
-                 " published, fetched_at, fingerprint, meta")
+                 " published, fetched_at, fingerprint, meta, identity_policy")
 _EVAL_COLUMNS = ('pipeline_id', 'item_id', 'persona_version', 'passed', 'score', 'tags',
                  'reason', 'stage', 'stage_scores', 'evaluated_at', 'reported_at')
 _EVAL_PROJECTION = ', '.join(f'e.{column} AS eval_{column}' for column in _EVAL_COLUMNS)
@@ -655,6 +673,21 @@ class Store:
 
     # ---- items -------------------------------------------------------------
 
+    def seen_links(self, source_id: str, urls: list[str]) -> set[str]:
+        known: set[str] = set()
+        with self._lock:
+            for offset in range(0, len(urls), 500):
+                chunk = urls[offset:offset + 500]
+                placeholders = ','.join('?' for _ in chunk)
+                for table in ('source_seen_ids', 'suppressed_items'):
+                    rows = self._conn.execute(f'SELECT external_id FROM {table}'
+                        f' WHERE source_id = ? AND external_id IN ({placeholders})', [source_id, *chunk]).fetchall()
+                    known.update(row[0] for row in rows)
+                rows = self._conn.execute(f"SELECT url FROM items WHERE identity_policy = 'standard'"
+                    f" AND url != '' AND url IN ({placeholders})", chunk).fetchall()
+                known.update(row[0] for row in rows)
+        return known
+
     def upsert_items(self, items: list[Item], *, source_id: str,
                      title_since: datetime | None, run_id: int | None = None) -> tuple[list[str], int]:
         """Atomically deduplicate and insert a source's batch, including its counts.
@@ -668,22 +701,27 @@ class Store:
         with self._lock, self._conn:
             self._conn.execute("BEGIN IMMEDIATE")
             self._require_running(run_id)
+            self._conn.executemany('INSERT OR IGNORE INTO source_seen_ids VALUES (?, ?)',
+                [(source_id, it.external_id) for it in items if it.kind == 'web' and it.identity_policy == 'standard'])
             suppressed: list[Item] = []
             if items and title_since is not None:
                 candidates = [it for it in items if not self._is_duplicate(it)]
                 if candidates:
-                    items, suppressed = split_similar(candidates, self._recent_titles(
+                    ordinary = [it for it in candidates if it.identity_policy == 'standard']
+                    kept, suppressed = split_similar(ordinary, self._recent_titles(
                         exclude_source=source_id, since=title_since))
+                    allowed = {it.id for it in kept}
+                    items = [it for it in candidates if it.identity_policy == 'revision' or it.id in allowed]
                 else:
                     items = []
             for it in items:
                 if self._is_duplicate(it):
                     continue
                 self._conn.execute(
-                    f"INSERT INTO items ({_ITEM_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    f"INSERT INTO items ({_ITEM_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (it.id, it.source_id, it.kind, it.external_id, it.url, it.title, it.author,
                      it.summary, it.content, to_iso(it.published), to_iso(it.fetched_at),
-                     it.fingerprint, json.dumps(it.meta, ensure_ascii=False)),
+                     it.fingerprint, json.dumps(it.meta, ensure_ascii=False), it.identity_policy),
                 )
                 new.append(it.id)
                 counts[it.source_id] = counts.get(it.source_id, 0) + 1
@@ -698,15 +736,17 @@ class Store:
     # 三条规则各走自己的索引；合成一个 OR 查询会退化为全表扫描
     _SUPPRESSED = "SELECT 1 FROM suppressed_items WHERE source_id = ? AND external_id = ?"
     _DUP_BY_ID = "SELECT 1 FROM items WHERE source_id = ? AND external_id = ?"
-    _DUP_BY_URL = "SELECT 1 FROM items WHERE url = ? AND url != ''"
-    _DUP_BY_FP = "SELECT 1 FROM items WHERE fingerprint = ? AND kind != 'email'"
+    _DUP_BY_URL = "SELECT 1 FROM items WHERE url = ? AND url != '' AND identity_policy = 'standard'"
+    _DUP_BY_FP = "SELECT 1 FROM items WHERE fingerprint = ? AND kind != 'email' AND identity_policy = 'standard'"
 
     def _is_duplicate(self, it: Item) -> bool:
         c = self._conn
-        if c.execute(self._SUPPRESSED, (it.source_id, it.external_id)).fetchone():
+        if it.identity_policy == 'standard' and c.execute(self._SUPPRESSED, (it.source_id, it.external_id)).fetchone():
             return True
         if c.execute(self._DUP_BY_ID, (it.source_id, it.external_id)).fetchone():
             return True
+        if it.identity_policy == 'revision':
+            return False
         if it.url and c.execute(self._DUP_BY_URL, (it.url,)).fetchone():
             return True
         return it.kind != "email" and bool(c.execute(self._DUP_BY_FP, (it.fingerprint,)).fetchone())
@@ -719,7 +759,7 @@ class Store:
         """Titles of non-email items other sources stored since `since`."""
         with self._lock:
             rows = self._conn.execute(
-                "SELECT title FROM items WHERE source_id != ? AND kind != 'email' AND fetched_at >= ?",
+                "SELECT title FROM items WHERE source_id != ? AND kind != 'email' AND identity_policy = 'standard' AND fetched_at >= ?",
                 (exclude_source, to_iso(since))).fetchall()
         return [r[0] for r in rows]
 
@@ -878,7 +918,7 @@ def _row_to_item(r: sqlite3.Row) -> Item:
         url=r["url"], title=r["title"], author=r["author"], summary=r["summary"],
         content=r["content"], published=from_iso(r["published"]),
         fetched_at=from_iso(r["fetched_at"]), fingerprint=r["fingerprint"],
-        meta=json.loads(r["meta"]),
+        meta=json.loads(r["meta"]), identity_policy=r["identity_policy"],
     )
 
 

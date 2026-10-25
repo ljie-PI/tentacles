@@ -25,7 +25,7 @@ CROSS_SOURCE_WINDOW = timedelta(hours=48)
 async def fetch_source(spec: SourceSpec, *, store: Store, http: HttpPool,
                        clock: Callable[[], datetime], run_id: int | None = None,
                        started_at: datetime | None = None,
-                       imap_factory: ImapFactory = connect_imap) -> FetchOutcome:
+                       imap_factory: ImapFactory = connect_imap, timezone: str = 'UTC') -> FetchOutcome:
     """Never raises for fetch failures (network, parsing or the store itself):
     they are recorded on the source state and the run where possible, and the
     previous cursor is kept so the next fetch retries. Cancellation is re-raised
@@ -34,7 +34,8 @@ async def fetch_source(spec: SourceSpec, *, store: Store, http: HttpPool,
     Store calls run in a worker thread so a locked database can't stall the
     event loop shared by concurrent fetches.
     """
-    ctx = FetchContext(http=http, now=started_at or clock(), imap_factory=imap_factory)
+    ctx = FetchContext(http=http, now=started_at or clock(), imap_factory=imap_factory, timezone=timezone,
+                       seen_links=lambda urls: store.seen_links(spec.id, urls))
     completed = False
 
     def start_run() -> None:

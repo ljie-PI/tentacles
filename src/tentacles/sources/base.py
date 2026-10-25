@@ -6,7 +6,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, ClassVar, Type
+from typing import Any, Callable, ClassVar, Type
 
 from pydantic import BaseModel, ValidationError
 
@@ -22,6 +22,8 @@ class FetchContext:
     http: HttpPool
     now: datetime
     imap_factory: ImapFactory = connect_imap
+    timezone: str = 'UTC'
+    seen_links: Callable[[list[str]], set[str]] | None = None
 
 
 @dataclass
