@@ -1,0 +1,78 @@
+# HTTP API and server
+
+Start `tentacles serve` (or `python -m tentacles.cli serve`). CLI `--host`, `--port`,
+`--scheduler` / `--no-scheduler` override YAML server options. Defaults: loopback `127.0.0.1:8000`,
+scheduler enabled, 30-second polling, `../frontend/dist` relative to YAML as the static root.
+The loop waits for each tick; no overlapping rounds. It logs a sanitized failure and continues.
+Shutdown stops polling, waits for the current tick to finish, then closes Service and its resources.
+Long operations may delay shutdown up to their configured network/retry limits.
+
+All `/api` operations except `GET /api/health` require `Authorization: Bearer TOKEN` when
+`server.token` is nonempty (including OpenAPI). The comparison uses `hmac.compare_digest`.
+Empty token disables authentication. Tokens must be printable ASCII without whitespace. External
+binding without a token warns on stderr. This is a single-user service: use HTTPS and a trusted
+reverse proxy for remote access; do not expose an unauthenticated instance.
+Static pages/assets remain public so the browser can reach Settings to enter the token.
+CORS allows only explicitly configured `server.cors_origins`; list origins without trailing `/`,
+paths or wildcards. CORS preflights are handled before API authentication.
+Disallowed browser origins are rejected before API operations, including bodyless/simple POSTs
+that do not cause a CORS preflight. A no-token server also rejects unknown Host names to prevent
+DNS rebinding from manufacturing a trusted same-origin request; loopback aliases, the configured
+host and hosts in explicit CORS origins are trusted. A wildcard bind also accepts literal IP hosts.
+For a reverse-proxy hostname with no token, explicitly list its public origin in `cors_origins`.
+Non-browser clients without Origin remain supported on trusted hosts. Cross-site requests without
+an Origin are rejected when the browser supplies cross-site fetch metadata.
+Access logging is disabled to keep request URLs/content out of logs and stdout. An outer ASGI
+privacy boundary also sanitizes lifespan failure messages and prevents raw framework exception
+rethrows from reaching Uvicorn logs. Interrupted responses preserve only a fixed safe error.
+
+## Routes
+
+OpenAPI is `GET /api/openapi.json`; all operations declare response models shared with the CLI.
+Generate types offline with `python -m tentacles.api_schema`, without user configuration or DB access.
+
+| Method / path | Response / behavior |
+| --- | --- |
+| `GET /api/health` | `{ "ok": true }`, no token required |
+| `GET /api/settings` | non-sensitive display metadata: `{ "timezone": "Asia/Shanghai" }`; no credentials or paths |
+| `GET /api/sources` | `SourceView[]` |
+| `POST /api/sources/fetch` | optional `{ "ids": ["id"] }`, returns `FetchOutcome[]`; omitted/empty IDs fetch enabled sources |
+| `POST /api/sources/{source_id}/fetch` | `FetchOutcome`; unknown ID 404, busy 409, failed fetch 502 |
+| `GET /api/items` | `Page[ItemView]`; `sources` and `kinds` may repeat; `since`, `until`, `search`, `pipeline`, `passed`, `limit`, `offset` |
+| `GET /api/items/{item_id}` | `ItemDetail`, including body and evaluations |
+| `GET /api/runs` | `RunView[]`, optional `kind`, `target`, `limit` |
+| `GET /api/scheduler` | `TaskView[]` from Service |
+| `GET /api/scheduler/loop` | polling enabled/running state, interval, cycle/failure counts and last tick/error |
+| `POST /api/scheduler/tick` | `TickOutcome[]`, manual due-task execution even if the polling loop is disabled |
+
+`since` / `until` accept the same duration/ISO/local-date formats as CLI. Page limits are 1–500,
+offset between 0 and SQLite’s signed 64-bit maximum. Out-of-range numbers/dates are invalid (400). API filters reject unknown item kinds. Batch fetch and tick return each target's status,
+including mixed failures, rather than turning a partially successful batch into a single HTTP error.
+A failed individual fetch's detailed sanitized status is available in run/source records.
+
+## Errors
+
+```json
+{"error":{"code":"not_found","message":"unknown item 'missing'"}}
+```
+
+Domain errors: `invalid` 400, `not_found` 404, `conflict` and `busy` 409, `upstream` 502,
+unexpected exceptions 500 (`error`, generic message). Missing/wrong token is 401 (`unauthorized`),
+with `WWW-Authenticate: Bearer`. Untrusted browser origins or no-token API hosts are 403 (`forbidden`). Request validation is 400, not FastAPI's default 422.
+Request-shape validation errors never echo their input. Domain errors may identify supplied IDs or invalid values, with configured credentials redacted; unexpected exceptions use a generic message.
+
+## Frontend
+
+The Vite development proxy explicitly preserves Host (`changeOrigin: false`), so same-origin
+frontend POSTs pass the origin guard without granting broad development CORS access. The executable
+`pnpm check:dev-proxy` regression starts real Vite/Uvicorn with an isolated fake source.
+
+See [frontend setup](../frontend/README.md). Build separately with pnpm, then keep `server.static_dir`
+pointed at the built directory. GETs outside `/api` serve a matching asset or fall back to index.html;
+unknown API routes remain 404 JSON and resolved paths outside the static root are not served.
+If no build exists, API works normally and non-API GETs return a helpful 404.
+
+
+The frontend formats Feed/detail/source timestamps using the authenticated `/api/settings` timezone,
+not the browser timezone. If the browser does not support that IANA timezone, it shows explicitly
+labeled UTC and a warning rather than silently showing local time.

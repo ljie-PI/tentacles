@@ -559,3 +559,11 @@ def test_deep_pipeline_returns_all_report_ids_and_report_contracts(cli, web, wri
         shown = cli('reports', 'show', report_id, config=path)
         assert shown.exit_code == 0
         assert ReportView.model_validate(payload(shown)).id == report_id
+
+
+def test_serve_usage_and_invalid_options_are_cli_contracts(cli):
+    help_result = cli('serve', '--help', json_mode=False)
+    assert help_result.exit_code == 0 and '--no-scheduler' in help_result.stdout
+    for args in [('serve', '--port', '0'), ('serve', '--host', ' '), ('serve', '--port', '70000')]:
+        result = cli(*args)
+        assert result.exit_code == 2 and payload(result)['error']['code'] == 'invalid'

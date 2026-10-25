@@ -4,6 +4,27 @@
 
 > 已支持配置驱动的 RSS、IMAP 和网页抓取、去重入库、持久化调度、命名模型、版本化 Persona 与反馈演化，以及 keyword/decision/llm 级联过滤和 digest/deep/summarize/none 处理器。Web 端正在按子 issue 继续实施。
 
+## 网页与 REST API
+
+```bash
+# 安装后端依赖后，启动 API 与调度器；省略轮询可加 --no-scheduler
+tentacles serve --no-scheduler
+# 另一个终端：构建网页后，后端会直接托管静态产物
+cd frontend
+pnpm install --frozen-lockfile
+pnpm build
+# 浏览 http://127.0.0.1:8000
+```
+
+已提供 Feed（来源／时间／关键词筛选、加载更多、正文抽屉）与 Sources（状态、立即抓取）页面，
+支持暗色模式和移动端。Settings 可保存当前浏览器的访问 token；其他管理页将在后续 issue 加入。
+开发模式运行 `pnpm dev`，通过 Vite 代理访问后端。要求 Node >=22.12、pnpm 10.33；
+`pnpm generate:api` 重新生成提交的后端类型，`pnpm check:api` 检查一致性。
+
+默认仅监听本机；对外监听前设置 `.env` 的 `TENTACLES_SERVER_TOKEN`，并配置 HTTPS 代理。
+除了健康检查，API 均需 Bearer token（若已配置），静态网页无需鉴权。
+详细配置、路由、错误及关闭行为见 [HTTP API](docs/http-api.md) 和 [前端开发说明](frontend/README.md)。
+
 ## 快速开始
 
 ```bash

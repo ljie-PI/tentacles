@@ -308,8 +308,8 @@ class TentaclesService:
             self._known_pipeline(pipeline)
         if not 1 <= limit <= 500:
             raise ConfigError("limit must be between 1 and 500")
-        if offset < 0:
-            raise ConfigError("offset must be >= 0")
+        if not 0 <= offset <= 2**63 - 1:
+            raise ConfigError("offset must be between 0 and 9223372036854775807")
         if sources:
             known = {s.id for s in self.config.sources} | self.store.source_ids()
             for s in sources:  # 已从配置移除的源仍可按 id 查询历史条目
@@ -349,9 +349,13 @@ class TentaclesService:
                 for r in self.store.list_runs(kind, target, limit)]
 
     def _time(self, value: str | datetime | None) -> datetime | None:
-        if value is None or isinstance(value, datetime):
-            return value
+        if value is None:
+            return None
         try:
+            if isinstance(value, datetime):
+                return to_utc(value)
             return parse_since(value, self._clock(), ZoneInfo(self.config.app.timezone))
+        except OverflowError:
+            raise ConfigError('time value is out of range') from None
         except ValueError as exc:
             raise ConfigError(str(exc)) from exc

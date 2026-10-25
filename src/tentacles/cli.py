@@ -19,7 +19,7 @@ from typing import Any, Awaitable, Callable, Optional
 from zoneinfo import ZoneInfo
 
 import typer
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 from rich.console import Console
 from rich.markup import escape
 from rich.markdown import Markdown
@@ -28,7 +28,7 @@ from rich.text import Text
 try:  # typer >= 0.27 内置 click；更早的版本依赖外部 click
     from typer._click.exceptions import ClickException, UsageError
 except ImportError:  # pragma: no cover
-    from click.exceptions import ClickException, UsageError  # type: ignore[no-redef]
+    from click.exceptions import ClickException, UsageError  # type: ignore[assignment,no-redef]
 from typer.core import TyperGroup
 
 from tentacles.errors import ConfigError, TentaclesError, exit_code
@@ -498,6 +498,44 @@ def runs_list(ctx: typer.Context,
         "Runs", ["id", "kind", "target", "status", "started", "stats", "error"],
         [[r.id, r.kind, r.target, r.status, when(r.started_at), json.dumps(r.stats, ensure_ascii=False),
           r.error] for r in rows])))
+
+
+@app.command('serve')
+def serve(
+    ctx: typer.Context,
+    host: Optional[str] = typer.Option(None, help='覆盖 server.host（默认仅本机）'),
+    port: Optional[int] = typer.Option(None, min=1, max=65535, help='覆盖 server.port'),
+    scheduler: Optional[bool] = typer.Option(None, '--scheduler/--no-scheduler', help='覆盖后台调度器开关'),
+) -> None:
+    """同时启动 REST API、可选调度器和已构建前端；Ctrl-C 关闭。"""
+    import uvicorn
+    from tentacles.config import load_config
+    from tentacles.server_config import ServerSpec
+    from tentacles.server import create_app, warn_if_exposed
+    state: State = ctx.obj
+    try:
+        config = load_config(state.config)
+        overrides = {key: value for key, value in {'host': host, 'port': port, 'scheduler': scheduler}.items()
+                     if value is not None}
+        try:
+            config.server = ServerSpec.model_validate({**config.server.model_dump(), **overrides})
+        except ValidationError:
+            raise ConfigError('invalid server options') from None
+        warn_if_exposed(config)
+        uvicorn.run(create_app(config, transport=state.transport, imap_factory=state.imap_factory),
+                    host=config.server.host, port=config.server.port, access_log=False, log_level='warning')
+    except TentaclesError as exc:
+        _fail(state, exc.code, exc.message)
+    except (KeyboardInterrupt, asyncio.CancelledError):
+        _fail(state, 'aborted', 'interrupted')
+    except SystemExit as exc:
+        if exc.code:
+            _fail(state, 'error', 'server failed to start')
+    except Exception as exc:
+        logging.getLogger(__name__).error('server failed (%s)', type(exc).__name__)
+        _fail(state, 'error', f'server failed ({type(exc).__name__})')
+    if state.json:
+        typer.echo(json.dumps({'status': 'stopped'}))
 
 
 if __name__ == "__main__":
