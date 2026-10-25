@@ -221,9 +221,9 @@ def config_check(ctx: typer.Context) -> None:
 def pipelines_list(ctx: typer.Context) -> None:
     """列出 pipeline 及当前待报告数量。"""
     _run(ctx, lambda s: s.list_pipelines(), lambda rows, out, when: out.print(_table(
-        "Pipelines", ["id", "persona", "processor", "schedule", "next run", "next filter", "enabled", "pending", "status"],
+        "Pipelines", ["id", "persona", "processor", "schedule", "next run", "next filter", "enabled", "running", "filter running", "pending", "status"],
         [[r.id, r.persona, r.processor, r.schedule, when(r.next_run_at), when(r.filter_next_run_at),
-          r.enabled, r.pending, r.last_status] for r in rows])))
+          r.enabled, r.running, r.filter_running, r.pending, r.last_status] for r in rows])))
 
 
 def _render_pipeline(result, out: Console, when: TimeFmt) -> None:
@@ -417,8 +417,8 @@ def models_test(ctx: typer.Context, name: str = typer.Argument(..., help="配置
 def sources_list(ctx: typer.Context) -> None:
     """列出信息源及其抓取状态。"""
     _run(ctx, lambda s: s.list_sources(), lambda rows, out, when: out.print(_table(
-        "Sources", ["id", "type", "schedule", "enabled", "last fetch", "next run", "status", "items", "error"],
-        [[r.id, r.type, r.schedule, r.enabled, when(r.last_fetch_at), when(r.next_run_at), r.last_status,
+        "Sources", ["id", "type", "schedule", "enabled", "last fetch", "next run", "running", "status", "items", "error"],
+        [[r.id, r.type, r.schedule, r.enabled, when(r.last_fetch_at), when(r.next_run_at), r.running, r.last_status,
           r.total_items, r.last_error] for r in rows])))
 
 

@@ -2,37 +2,29 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
 from datetime import datetime
 from pathlib import Path
-from typing import Callable, Mapping, Any, Literal
+from typing import Callable, Mapping, Any
 from zoneinfo import ZoneInfo
 
 import httpx
 
-from tentacles.config import AppConfig, SourceSpec, load_config
+from tentacles.config import AppConfig, load_config
 from tentacles.config_validation import validate_config
-from tentacles.errors import ConfigError, ConfigValidationError, NotFound, TentaclesError, UpstreamError
+from tentacles.errors import ConfigError, ConfigValidationError, NotFound, UpstreamError
 from tentacles.net import HttpPool
 from tentacles.llm.registry import ModelRegistry
 from tentacles.llm.config import Stage
 from tentacles.llm.json import extract_json
 from tentacles.schemas import ConfigCheck, FetchOutcome, ItemDetail, ItemView, Page, RunView, SourceView, TaskView, ModelView, Completion, ModelTest, TickOutcome
-from tentacles.sources.runner import fetch_source
-from tentacles.asyncutil import gather_draining
 from tentacles.store import ItemQuery, Store
 from tentacles.personas.manager import PersonaManager
 from tentacles.personas.models import FeedbackView, PersonaProposal, PersonaView
-from tentacles.pipelines.manager import PipelineManager
 from tentacles.pipelines.models import PipelineOutcome, ReportView, PipelineView
-from tentacles.runs import RunLifecycle, RunOperation
+from tentacles.scheduler import Scheduler
 from tentacles.timeutil import parse_since, utcnow, to_utc
-from tentacles.tasks import Task
 from tentacles.sources.imap_client import ImapFactory, connect_imap
-
-FETCH_CONCURRENCY = 4
-
 
 class TentaclesService:
     def __init__(self, config: AppConfig, store: Store, *,
@@ -47,20 +39,16 @@ class TentaclesService:
             raise
         self.config = config
         self.store = store
-        self._transport = transport
         self._clock = clock
-        self._runs = RunLifecycle(store, clock)
-        self._imap_factory = imap_factory
         self._model_http = HttpPool(transport)
         self.models = ModelRegistry(config.models, config.defaults, self._model_http, clock=clock)
         self.personas = PersonaManager(store, self.models, clock, config.persona_update)
-        self._tasks = {s.id: Task('fetch', s.id, s.schedule, config.app.timezone, s.enabled)
-                       for s in config.sources}
         try:
-            self.pipelines = PipelineManager(config, store, self.models, clock)
+            self.scheduler = Scheduler(config, store, self.models, clock,
+                                       transport=transport, imap_factory=imap_factory)
+            self.pipelines = self.scheduler.pipelines
             self.personas.seed(config)
-            self.pipelines.initialize()
-            store.register_tasks(list(self._tasks.values()), to_utc(clock()))
+            self.scheduler.initialize()
         except BaseException:
             store.close()
             raise
@@ -93,7 +81,7 @@ class TentaclesService:
     # ---- pipelines ----------------------------------------------------------
 
     def list_pipelines(self) -> list[PipelineView]:
-        return self.pipelines.list_pipelines()
+        return self.scheduler.list_pipelines()
 
     async def filter_pipeline(self, pipeline_id: str, *, reevaluate: bool = False,
                               since: str | datetime | None = None) -> PipelineOutcome:
@@ -208,85 +196,18 @@ class TentaclesService:
     # ---- sources ------------------------------------------------------------
 
     def list_sources(self) -> list[SourceView]:
-        views = []
-        for s in self.config.sources:
-            st = self.store.get_source_state(s.id)
-            views.append(SourceView(
-                id=s.id, type=s.type, name=s.name, schedule=s.schedule, enabled=s.enabled,
-                last_fetch_at=st.last_fetch_at, last_status=st.last_status,
-                last_error=st.last_error, total_items=st.total_items,
-                next_run_at=self.store.get_task_state(self._tasks[s.id]).next_run(self._tasks[s.id])
-                if s.enabled else None,
-            ))
-        return views
+        return self.scheduler.list_sources()
 
     async def fetch_sources(self, ids: list[str] | None = None) -> list[FetchOutcome]:
         """Fetch the named sources (even disabled ones), or every enabled source."""
-        if ids:
-            specs = [self.config.source(i) for i in dict.fromkeys(ids)]
-        else:
-            specs = [s for s in self.config.sources if s.enabled]
-        return await self._fetch_batch(specs, due_only=False)
+        return await self.scheduler.fetch_sources(ids)
 
     async def tick(self) -> list[TickOutcome]:
         """Drain concurrent fetches, then due filters, then due pipeline runs."""
-        fetched = await self._fetch_batch([s for s in self.config.sources if s.enabled], due_only=True)
-        outcomes = [TickOutcome.of_fetch(outcome) for outcome in fetched]
-        busy_sources = {outcome.source_id for outcome in fetched if outcome.status == 'busy'}
-        deferred = {spec.id for spec in self.config.pipelines if busy_sources.intersection(spec.sources)}
-        for task in self.pipelines.scheduled_tasks():
-            # Another tick may still own an upstream fetch. Do not advance a
-            # dependent schedule against an incomplete snapshot of its inputs.
-            if task.target in deferred:
-                continue
-            kind: Literal['filter', 'pipeline'] = 'filter' if task.kind == 'filter' else 'pipeline'
-            result = (await self.pipelines.filter(task.target, due_only=True) if kind == 'filter'
-                      else await self.pipelines.run(task.target, due_only=True))
-            if result is not None:
-                outcomes.append(TickOutcome.of_pipeline(kind, result))
-        return outcomes
+        return await self.scheduler.tick()
 
     def scheduler_status(self) -> list[TaskView]:
-        now = to_utc(self._clock())
-        views = []
-        pending = self.pipelines.pending_counts(now)
-        for task in [*self._tasks.values(), *self.pipelines.scheduled_tasks()]:
-            state = self.store.get_task_state(task)
-            views.append(TaskView(
-                kind=task.kind, target=task.target, schedule=task.schedule, enabled=task.enabled,
-                last_run_at=state.last_run_at,
-                next_run_at=state.next_run(task) if task.enabled else None,
-                running=state.running(now), last_status=state.last_status, last_error=state.last_error,
-                pending=pending.get(task.target) if task.kind != 'fetch' else None))
-        return views
-
-    async def _fetch_task(self, spec: SourceSpec, http: HttpPool, *, due_only: bool) -> FetchOutcome | None:
-        async def work(op: RunOperation) -> None:
-            await fetch_source(spec, op, store=self.store, http=http, imap_factory=self._imap_factory,
-                               timezone=self.config.app.timezone, models=self.models)
-
-        result = await self._runs.execute(self._tasks[spec.id], work, due_only=due_only,
-            failure_message=lambda exc: exc.message if isinstance(exc, TentaclesError)
-            else f'fetch failed ({type(exc).__name__})')
-        if result is None:
-            return None
-        # Preserve the fetch adapter's no-model output; durable Run stats always
-        # have the common usage/cost/models shape (including zero-call Runs).
-        stats = result.stats if result.metrics.models else {
-            key: value for key, value in result.stats.items() if key not in {'usage', 'cost', 'models'}}
-        return FetchOutcome(source_id=spec.id, run_id=result.run_id, status=result.status,
-                            new=stats.get('new', 0), dup=stats.get('dup', 0),
-                            error=result.error, stats=stats)
-
-    async def _fetch_batch(self, specs: list[SourceSpec], *, due_only: bool) -> list[FetchOutcome]:
-        sem = asyncio.Semaphore(FETCH_CONCURRENCY)
-        async with HttpPool(self._transport) as http:
-            async def one(spec):
-                async with sem:
-                    return await self._fetch_task(spec, http, due_only=due_only)
-
-            tasks = [asyncio.create_task(one(s)) for s in specs]
-            return [result for result in await gather_draining(tasks) if result is not None]
+        return self.scheduler.status()
 
     # ---- items --------------------------------------------------------------
 

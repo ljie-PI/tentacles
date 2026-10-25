@@ -97,6 +97,8 @@ class PipelineView(BaseModel):
     filter_schedule: str | None = None
     next_run_at: datetime | None = None
     filter_next_run_at: datetime | None = None
+    running: bool = False
+    filter_running: bool = False
     last_run_at: datetime | None
     last_status: str | None
     last_error: str | None

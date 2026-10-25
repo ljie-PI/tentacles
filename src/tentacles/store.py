@@ -223,7 +223,19 @@ def _migrate_v10(conn: sqlite3.Connection) -> None:
     )""")
 
 
-MIGRATIONS: list[Callable[[sqlite3.Connection], None]] = [_migrate_v1, _migrate_v2, _migrate_v3, _migrate_v4, _migrate_v5, _migrate_v6, _migrate_v7, _migrate_v8, _migrate_v9, _migrate_v10]
+def _migrate_v11(conn: sqlite3.Connection) -> None:
+    conn.execute("""CREATE TABLE task_schedule_state (
+        kind TEXT NOT NULL, target TEXT NOT NULL,
+        active INTEGER NOT NULL CHECK (active IN (0, 1)), PRIMARY KEY (kind, target)
+    )""")
+    conn.execute('INSERT INTO task_schedule_state SELECT * FROM pipeline_schedule_state')
+    # Fetch enrollment previously had no activation flag. Preserve its anchor
+    # on upgrade; the next config registration records actual enablement.
+    conn.execute("INSERT INTO task_schedule_state SELECT kind, target, 1 FROM task_state WHERE kind = 'fetch'")
+    conn.execute('DROP TABLE pipeline_schedule_state')
+
+
+MIGRATIONS: list[Callable[[sqlite3.Connection], None]] = [_migrate_v1, _migrate_v2, _migrate_v3, _migrate_v4, _migrate_v5, _migrate_v6, _migrate_v7, _migrate_v8, _migrate_v9, _migrate_v10, _migrate_v11]
 
 _ITEM_COLUMNS = ("id, source_id, kind, external_id, url, title, author, summary, content,"
                  " published, fetched_at, fingerprint, meta, identity_policy")
@@ -485,15 +497,7 @@ class Store:
     # ---- scheduler tasks ---------------------------------------------------
 
     def register_tasks(self, tasks: list[Task], now: datetime) -> None:
-        with self._lock, self._conn:
-            self._conn.executemany(
-                "INSERT OR IGNORE INTO task_state (kind, target, first_seen_at) VALUES (?, ?, ?)",
-                [(task.kind, task.target, to_iso(now)) for task in tasks])
-            for task in tasks:
-                self._reconcile_completed_task(task)
-
-    def sync_pipeline_schedules(self, tasks: list[Task], now: datetime) -> None:
-        """Enroll scheduled pipeline roles without confusing them with manual locks.
+        """Enroll all scheduled roles without confusing them with manual locks.
 
         A never-run cron job begins at first activation, not when its reusable
         manual lock happened to be registered. Executed tasks retain progress.
@@ -507,13 +511,13 @@ class Store:
                 self._conn.execute('INSERT OR IGNORE INTO task_state (kind, target, first_seen_at) VALUES (?, ?, ?)',
                                    (task.kind, task.target, to_iso(now)))
                 state = self._reconcile_completed_task(task)
-                previous = self._conn.execute('SELECT active FROM pipeline_schedule_state WHERE kind = ? AND target = ?',
+                previous = self._conn.execute('SELECT active FROM task_schedule_state WHERE kind = ? AND target = ?',
                                               (task.kind, task.target)).fetchone()
                 was_active = bool(previous['active']) if previous is not None else False
                 if task.enabled and not was_active and state.last_run_at is None and state.token is None:
                     self._conn.execute('UPDATE task_state SET first_seen_at = ? WHERE kind = ? AND target = ?',
                                        (to_iso(now), task.kind, task.target))
-                self._conn.execute('INSERT INTO pipeline_schedule_state VALUES (?, ?, ?)'
+                self._conn.execute('INSERT INTO task_schedule_state VALUES (?, ?, ?)'
                     ' ON CONFLICT (kind, target) DO UPDATE SET active = excluded.active'
                     ' WHERE active != excluded.active', (task.kind, task.target, task.enabled))
 

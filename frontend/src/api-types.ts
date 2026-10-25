@@ -875,6 +875,11 @@ export interface components {
             enabled: boolean;
             /** Filter Next Run At */
             filter_next_run_at?: string | null;
+            /**
+             * Filter Running
+             * @default false
+             */
+            filter_running: boolean;
             /** Filter Schedule */
             filter_schedule?: string | null;
             /** Id */
@@ -895,6 +900,11 @@ export interface components {
             persona: string;
             /** Processor */
             processor: string;
+            /**
+             * Running
+             * @default false
+             */
+            running: boolean;
             /** Schedule */
             schedule: string;
             /** Sources */
@@ -1002,6 +1012,11 @@ export interface components {
             name: string | null;
             /** Next Run At */
             next_run_at?: string | null;
+            /**
+             * Running
+             * @default false
+             */
+            running: boolean;
             /** Schedule */
             schedule: string;
             /** Total Items */
