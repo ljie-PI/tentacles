@@ -272,3 +272,13 @@ def test_display_settings_exposes_only_configured_timezone_with_auth(write_confi
         assert client.get('/api/settings').status_code == 401
         response = client.get('/api/settings', headers={'Authorization': 'Bearer private-browser-token'})
         assert response.status_code == 200 and response.json() == {'timezone': 'America/New_York'}
+
+
+def test_same_origin_proxy_authority_with_frontend_port_can_fetch(write_config, web):
+    path = write_config({'sources': [{'id': 'news', 'type': 'rss', 'url': FEED, 'schedule': '1h'}],
+                         'server': {'scheduler': False}})
+    web.serve(FEED, rss_feed())
+    with local_client(create_app(load_config(path, env={}), transport=web.transport())) as client:
+        response = client.post('/api/sources/news/fetch', headers={
+            'Host': '127.0.0.1:5173', 'Origin': 'http://127.0.0.1:5173'})
+        assert response.status_code == 200 and response.json()['status'] == 'ok'

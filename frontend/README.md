@@ -17,7 +17,7 @@ pnpm install --frozen-lockfile
 pnpm dev
 ```
 
-Vite binds loopback and proxies `/api` to `http://127.0.0.1:8000`, so no CORS configuration is needed.
+Vite binds loopback and proxies `/api` to `http://127.0.0.1:8000` with `changeOrigin: false`, preserving the browser’s Host/Origin pair, so no CORS configuration is needed.
 If the backend requires a token, save it on Settings. It is stored in this browser's localStorage;
 401 redirects there with a notice. Saving a token clears cached queries. Never use an untrusted browser.
 
@@ -26,6 +26,7 @@ If the backend requires a token, save it on Settings. It is stored in this brows
 ```sh
 pnpm generate:api    # exports OpenAPI from an empty config; never opens a DB or calls a provider
 pnpm check:api       # fails if committed src/api-types.ts differs
+pnpm check:dev-proxy # real isolated Vite + Uvicorn; fake source HTTP, checks fetch and hostile-Origin rejection
 pnpm typecheck
 pnpm build
 ```
