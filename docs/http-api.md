@@ -69,6 +69,11 @@ A failed individual fetch's detailed sanitized status is available in run/source
 ## Errors
 
 RSS 原位更新默认关闭，仅支持 RSS/Atom 源的 `update_existing: true`。
+同源稳定外部 ID/别名优先，未命中才以实际观察到的规范化 URL 定位同源唯一标准 Item；
+不使用指纹/标题作为更新身份，不跨源覆盖，不复活抑制/仅观察记录。
+身份与 URL 不一致、同源 URL 多义或更新 URL 碰撞会以 Conflict 使整个源批次回滚；
+批量抓取仍按源返回 `status: "error"`，详细原因见 Run/源状态。别名不改变 Item ID、
+原 external_id 或首次抓取时间；只改外部身份仍计重复，同批每个目标只采用首条有效观察。
 `FetchOutcome` / `TickOutcome` 增加默认 0 的 `updated`，抓取 Run 的统计包含
 `fetched`、`new`、`updated`、`dup`，成功批次满足 `fetched = new + updated + dup`。
 Item 列表/详情的 `updated_at` 可空，`is_updated` 表示是否有内容更新；`fetched_at` 仍为首次抓取时间。
