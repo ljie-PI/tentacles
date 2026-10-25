@@ -222,7 +222,8 @@ class ExtractionPage:
     base_url: str
 
 
-def _extraction_page(html: bytes, content_type: str, base: str, limit: int) -> ExtractionPage:
+def _extraction_page(html: bytes, content_type: str, base: str, limit: int, *,
+                     include_links: bool = False) -> ExtractionPage:
     soup = _document(html, content_type)
     base = _effective_base(soup, base)
     for node in soup.select('script, style, noscript, nav, header, footer, aside, form'):
@@ -235,9 +236,10 @@ def _extraction_page(html: bytes, content_type: str, base: str, limit: int) -> E
             label = html_to_text(str(anchor)) or url
             anchor.replace_with(f'{label} ({url})')
     text = truncate(html_to_text(str(soup)), limit)
-    # Grounding uses the whole cleaned page, including links outside the model's
-    # text window. Such a link changing must invalidate cached descriptions too.
-    effective = json.dumps({'text': text, 'links': sorted(links)}, ensure_ascii=False, sort_keys=True)
+    # Only opted-in descriptors depend on the full grounding link set.
+    # Opt-out retains the original text-only paid-extraction cache.
+    effective = (json.dumps({'text': text, 'links': sorted(links)}, ensure_ascii=False, sort_keys=True)
+                 if include_links else text)
     return ExtractionPage(text, frozenset(links), hashlib.sha256(effective.encode('utf-8')).hexdigest(), base)
 
 
@@ -410,24 +412,27 @@ class WebSource(Source):
             raise UpstreamError('web extraction requires a model registry')
         name = ctx.models.resolve('extract', opts.model)
         page = await run_blocking(_extraction_page, response.content, response.headers.get('content-type', ''),
-                                  str(response.url), opts.max_input_chars)
+                                  str(response.url), opts.max_input_chars, include_links=self.spec.update_existing)
         model_settings = ctx.models.spec(name, kind='chat').model_dump(mode='json', exclude={'api_key', 'timeout', 'retries'})
         model_hash = hashlib.sha256(json.dumps(model_settings, sort_keys=True).encode()).hexdigest()
         identity = {'url': opts.url, 'mode': 'llm', 'model': name, 'model_hash': model_hash,
-                    'max_input_chars': opts.max_input_chars, 'base_url': page.base_url,
-                    'timezone': ctx.timezone, 'protocol_hash': hashlib.sha256(_EXTRACT_SYSTEM.encode()).hexdigest(),
-                    'descriptor_version': 1}
-        legacy_identity = {key: identity[key] for key in ('url', 'mode', 'model', 'model_hash', 'max_input_chars')}
-        if (not self.spec.update_existing and cursor.get('identity') == legacy_identity and
-                cursor.get('input_hash') == hashlib.sha256(page.text.encode('utf-8')).hexdigest()):
-            # Keep opt-out's pre-descriptor extraction cache free on upgrade,
-            # even when a model previously selected only some page links.
-            return FetchResult([], {**cursor, 'identity': identity, 'input_hash': page.digest}, {'not_modified': True})
+                    'max_input_chars': opts.max_input_chars}
+        if self.spec.update_existing:
+            identity.update(base_url=page.base_url, timezone=ctx.timezone,
+                            protocol_hash=hashlib.sha256(_EXTRACT_SYSTEM.encode()).hexdigest(), descriptor_version=1)
+        elif (isinstance(cursor.get('identity'), dict) and
+              all(cursor['identity'].get(key) == value for key, value in identity.items()) and
+              cursor.get('text_hash') == page.digest):
+            # Turning updates off may reuse paid extraction of the same text,
+            # but must discard descriptors so later opt-in validates anew.
+            return FetchResult([], {'url': opts.url, 'identity': identity, 'input_hash': page.digest,
+                                    'seen': _seen_cache(cursor, opts.url, [])}, {'not_modified': True})
         if cursor.get('identity') == identity and cursor.get('input_hash') == page.digest:
             if not self.spec.update_existing:
                 return FetchResult([], cursor, {'not_modified': True})
             previous = await run_blocking(_cached_descriptors, cursor, page)
             if previous is not None:
+                cursor = {**cursor, 'text_hash': hashlib.sha256(page.text.encode('utf-8')).hexdigest()}
                 if not opts.fetch_content:
                     return FetchResult([], cursor, {'not_modified': True})
                 return FetchResult([entry.item(self.spec.id) for entry in previous], cursor,
@@ -437,6 +442,7 @@ class WebSource(Source):
         skipped_cursor: dict[str, Any] = {'url': opts.url, 'identity': identity, 'input_hash': page.digest, 'seen': cached}
         if self.spec.update_existing:
             skipped_cursor['descriptors'] = []
+            skipped_cursor['text_hash'] = hashlib.sha256(page.text.encode('utf-8')).hexdigest()
         if not page.links:
             return FetchResult([], skipped_cursor, {'no_links': True, 'seen_cached': len(cached)})
         links = await self._classify_links(list(page.links), cursor, ctx)
