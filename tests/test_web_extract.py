@@ -448,3 +448,38 @@ def test_hallucinated_row_is_dropped_before_field_validation_and_generated_text_
             await service.aclose()
 
     asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(('base_href', 'expected'), [
+    ('https://archive.example.test/news/', 'https://archive.example.test/news/story.html'),
+    ('/archive/', 'https://news.example.test/archive/story.html'),
+])
+@pytest.mark.parametrize('mode', ['list', 'llm'])
+def test_html_base_href_is_shared_by_conversion_extraction_validation_and_list_links(write_config, web, base_href, expected, mode):
+    html = (f'<html><head><base href="{base_href}"><base href="https://ignored.example.test/"></head><body>'
+            '<div class="entry"><h2>Robotics story</h2><a href="story.html">Read</a></div></body></html>')
+    web.serve(URL, html)
+
+    def respond(request):
+        payload = json.loads(json.loads(request.content)['messages'][1]['content'])
+        assert expected in payload['text']
+        return httpx.Response(200, json=chat_reply(json.dumps({'items': [
+            extracted('Robotics story', expected), extracted('Wrong resolved link', 'https://news.example.test/story.html'),
+            extracted('Duplicate relative link', 'story.html')]})))
+
+    web.handle(CHAT_URL, respond)
+    path = write_config(extraction_config() if mode == 'llm' else web_config())
+
+    async def scenario():
+        service = TentaclesService.open(path, env={}, transport=web.transport(), clock=lambda: NOW)
+        try:
+            [result] = await service.fetch_sources()
+            assert result.status == 'ok' and result.new == 1
+            [item] = service.list_items().items
+            assert item.url == expected and service.get_item(item.id).external_id == expected
+            if mode == 'llm':
+                assert result.stats['dropped_links'] == 1
+        finally:
+            await service.aclose()
+
+    asyncio.run(scenario())

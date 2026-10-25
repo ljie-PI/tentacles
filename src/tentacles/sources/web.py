@@ -9,7 +9,7 @@ import json
 from datetime import datetime
 from http.cookies import SimpleCookie
 from email.message import Message
-from typing import Annotated, Any, ClassVar, Literal, Type, cast
+from typing import Annotated, Any, ClassVar, Iterable, Literal, Type, cast
 from urllib.parse import urljoin
 from zoneinfo import ZoneInfo
 
@@ -184,6 +184,27 @@ def _document(html: bytes, content_type: str) -> BeautifulSoup:
     return BeautifulSoup(html, 'html.parser', from_encoding=header.get_content_charset())
 
 
+def _effective_base(soup: BeautifulSoup, fallback: str) -> str:
+    element = soup.find('base', href=True)
+    if element is None:
+        return fallback
+    try:
+        resolved = httpx.URL(urljoin(fallback, str(element.get('href', ''))))
+    except (ValueError, httpx.InvalidURL):
+        return fallback
+    if resolved.scheme in {'data', 'javascript'}:
+        return fallback
+    return str(resolved)
+
+
+def _seen_cache(cursor: dict[str, Any], url: str, incoming: Iterable[str]) -> list[str]:
+    recent = dict.fromkeys(cursor.get('seen', []) if cursor.get('url') == url else [])
+    for identity in incoming:
+        recent.pop(identity, None)
+        recent[identity] = None
+    return list(recent)[-500:]
+
+
 def _article_body(html: bytes, content_type: str) -> str:
     soup = _document(html, content_type)
     for node in soup.select('script, style, noscript, nav, header, footer, aside, form'):
@@ -201,10 +222,12 @@ class ExtractionPage:
     text: str
     links: frozenset[str]
     digest: str
+    base_url: str
 
 
 def _extraction_page(html: bytes, content_type: str, base: str, limit: int) -> ExtractionPage:
     soup = _document(html, content_type)
+    base = _effective_base(soup, base)
     for node in soup.select('script, style, noscript, nav, header, footer, aside, form'):
         node.decompose()
     links: set[str] = set()
@@ -215,7 +238,7 @@ def _extraction_page(html: bytes, content_type: str, base: str, limit: int) -> E
             label = html_to_text(str(anchor)) or url
             anchor.replace_with(f'{label} ({url})')
     text = truncate(html_to_text(str(soup)), limit)
-    return ExtractionPage(text, frozenset(links), hashlib.sha256(text.encode('utf-8')).hexdigest())
+    return ExtractionPage(text, frozenset(links), hashlib.sha256(text.encode('utf-8')).hexdigest(), base)
 
 
 class ExtractedEntry(BaseModel):
@@ -226,7 +249,7 @@ class ExtractedEntry(BaseModel):
     published: str | None = Field(default=None, max_length=200)
 
 
-def _extract_items(text: str, page: ExtractionPage, base: str, source_id: str, ctx: FetchContext) -> tuple[list[Item], int]:
+def _extract_items(text: str, page: ExtractionPage, source_id: str, ctx: FetchContext) -> tuple[list[Item], int]:
     if len(text) > 1_000_000:
         raise ValueError('web extraction response exceeds size limit')
     def invalid_constant(value: str) -> None:
@@ -238,7 +261,7 @@ def _extract_items(text: str, page: ExtractionPage, base: str, source_id: str, c
     for raw in data['items']:
         if not isinstance(raw, dict) or not isinstance(raw.get('url'), str):
             raise ValueError('invalid web extraction item')
-        url = _link(base, raw['url'])
+        url = _link(page.base_url, raw['url'])
         if url is None or url not in page.links:
             dropped += 1
             continue
@@ -333,7 +356,7 @@ class WebSource(Source):
                     'max_input_chars': opts.max_input_chars}
         if cursor.get('identity') == identity and cursor.get('input_hash') == page.digest:
             return FetchResult([], cursor, {'not_modified': True})
-        cached = list(cursor.get('seen', []))[-500:] if cursor.get('url') == opts.url else []
+        cached = _seen_cache(cursor, opts.url, [])
         skipped_cursor = {'url': opts.url, 'identity': identity, 'input_hash': page.digest, 'seen': cached}
         if not page.links:
             return FetchResult([], skipped_cursor, {'no_links': True, 'seen_cached': len(cached)})
@@ -349,14 +372,10 @@ class WebSource(Source):
         except UpstreamError as exc:
             raise UpstreamError(f'web extraction model failed ({type(exc).__name__})') from None
         try:
-            items, dropped = await run_blocking(_extract_items, result.text, page, str(response.url), self.spec.id, ctx)
+            items, dropped = await run_blocking(_extract_items, result.text, page, self.spec.id, ctx)
         except (ValueError, TypeError, RecursionError, OverflowError):
             raise UpstreamError('web extraction returned invalid JSON or schema') from None
-        recent = dict.fromkeys(cursor.get('seen', []) if cursor.get('url') == opts.url else [])
-        for item in items:
-            recent.pop(item.external_id, None)
-            recent[item.external_id] = None
-        cached = list(recent)[-500:]
+        cached = _seen_cache(cursor, opts.url, (item.external_id for item in items))
         return FetchResult(items, {'url': opts.url, 'identity': identity, 'input_hash': page.digest, 'seen': cached},
             {'entries': len(items), 'dropped_links': dropped, 'seen_cached': len(cached)})
 
@@ -413,6 +432,7 @@ class WebSource(Source):
         summary = Selector.parse(selectors.summary) if selectors.summary else None
         published = Selector.parse(selectors.date) if selectors.date else None
         soup = _document(html, content_type)
+        base = _effective_base(soup, base)
         items, seen = [], set()
         for node in soup.select(selectors.item):
             name = title.value(node).strip()
@@ -424,9 +444,5 @@ class WebSource(Source):
             items.append(Item(source_id=self.spec.id, kind='web', external_id=url, url=url,
                 title=name, summary=excerpt, content=excerpt,
                 published=_published(published.value(node), ctx) if published else None, meta={'web_mode': 'list'}))
-        recent = dict.fromkeys(cursor.get('seen', []) if cursor.get('url') == opts.url else [])
-        for item in items:
-            recent.pop(item.external_id, None)
-            recent[item.external_id] = None
-        cached = list(recent)[-500:]
+        cached = _seen_cache(cursor, opts.url, (item.external_id for item in items))
         return FetchResult(items, {'url': opts.url, 'seen': cached}, {'entries': len(items), 'seen_cached': len(cached)})

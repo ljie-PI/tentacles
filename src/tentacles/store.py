@@ -848,11 +848,8 @@ class Store:
             if run_id is not None and not self._run_is_running(run_id):
                 # Late known fees belong to the expired run, never the replacement
                 # task/cursor. Preserve its original failure reason and other stats.
-                previous = self._conn.execute("SELECT stats FROM runs WHERE id = ? AND status = 'failed'", (run_id,)).fetchone()
-                if previous is not None and stats:
-                    combined = {**json.loads(previous['stats']), **stats}
-                    self._conn.execute('UPDATE runs SET stats = ?, cost = COALESCE(?, cost) WHERE id = ?',
-                                       (json.dumps(combined), cost, run_id))
+                if stats:
+                    self._backfill_failed_run_metrics(run_id, stats, cost, merge=True)
                 return
             self._conn.execute(
                 "INSERT INTO source_state (source_id, last_fetch_at, last_status, last_error)"
@@ -882,11 +879,20 @@ class Store:
             if previous is not None and previous['status'] == status == 'failed' and stats is not None:
                 # A late response may reveal billed usage after lease reclamation.
                 # Update that old run's metrics only, never its status or replacement task.
-                self._conn.execute('UPDATE runs SET stats = ?, cost = COALESCE(?, cost) WHERE id = ?',
-                                   (json.dumps(stats, ensure_ascii=False), cost, run_id))
+                self._backfill_failed_run_metrics(run_id, stats, cost, merge=False)
             actual = self._conn.execute('SELECT status, error FROM runs WHERE id = ?', (run_id,)).fetchone()
             if actual is not None and actual['status'] != 'running':
                 self._complete_task_run(run_id, actual['status'], actual['error'])
+
+    def _backfill_failed_run_metrics(self, run_id: int, stats: dict[str, Any], cost: float | None,
+                                     *, merge: bool) -> None:
+        """Caller holds the transaction; backfill telemetry, not ownership/state."""
+        previous = self._conn.execute("SELECT stats FROM runs WHERE id = ? AND status = 'failed'", (run_id,)).fetchone()
+        if previous is None:
+            return
+        updated = {**json.loads(previous['stats']), **stats} if merge else stats
+        self._conn.execute("UPDATE runs SET stats = ?, cost = COALESCE(?, cost) WHERE id = ? AND status = 'failed'",
+                           (json.dumps(updated, ensure_ascii=False), cost, run_id))
 
     def _run_is_running(self, run_id: int) -> bool:
         row = self._conn.execute("SELECT status FROM runs WHERE id = ?", (run_id,)).fetchone()
