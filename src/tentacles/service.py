@@ -61,9 +61,10 @@ class TentaclesService:
     def open(cls, config_path: Path | str | None = None, *,
              transport: httpx.AsyncBaseTransport | None = None,
              env: Mapping[str, str] | None = None,
-             clock: Callable[[], datetime] = utcnow) -> "TentaclesService":
+             clock: Callable[[], datetime] = utcnow, snapshot: bool = False) -> "TentaclesService":
+        """Open normally, or isolate all initialization and writes in an in-memory snapshot."""
         config = load_config(config_path, env=env)
-        return cls(config, Store(config.db_path), transport=transport, clock=clock)
+        return cls(config, Store(config.db_path, snapshot=snapshot), transport=transport, clock=clock)
 
     async def aclose(self) -> None:
         try:

@@ -18,7 +18,6 @@ from tentacles.personas.tags import parse_tags, tag_messages
 from tentacles.personas.models import PersonaEdit, PersonaProposal, PersonaSeed, PersonaUpdate, PersonaView, persona_name, keywords
 from tentacles.store import Store
 from tentacles.timeutil import parse_duration, to_utc
-from tentacles.schemas import Completion
 
 
 log = logging.getLogger(__name__)
@@ -109,13 +108,8 @@ class PersonaManager:
             edit.run_stats['model'] = model
             system, messages = evolution_messages(current, instruction, feedback, self._update.max_profile_chars)
 
-            def record_usage(result: Completion) -> None:
-                edit.run_stats['usage'] = result.usage.model_dump()
-                edit.run_stats['actual_model'] = result.model
-                edit.cost = result.cost
-
             try:
-                result = await self._models.chat(model).complete(messages, system=system, on_completion=record_usage)
+                result = await self._models.chat(model).complete(messages, system=system, on_completion=edit.record_completion)
             except UpstreamError as exc:
                 raise UpstreamError(f'persona evolution failed ({type(exc).__name__}); persona unchanged') from None
             try:
@@ -191,10 +185,7 @@ class PersonaManager:
         try:
             name = self._models.resolve('persona')
             edit.run_stats['model'] = name
-            def record_usage(result: Completion) -> None:
-                edit.run_stats['usage'] = result.usage.model_dump()
-                edit.cost = result.cost
-            result = await self._models.chat(name).complete(messages, system=system, on_completion=record_usage)
+            result = await self._models.chat(name).complete(messages, system=system, on_completion=edit.record_completion)
             edit.tags = parse_tags(extract_json(result.text), old_tags)
             edit.tag_status = 'ok'
         except Exception as exc:

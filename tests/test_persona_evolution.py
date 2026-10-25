@@ -310,3 +310,34 @@ def test_evolution_upstream_errors_do_not_expose_feedback_or_response(write_conf
         assert service.get_persona('default').version == 1
 
     asyncio.run(scenario())
+
+
+def test_preview_snapshot_sees_live_commits_but_never_changes_original(write_config, web):
+    config = {**pipeline_config(), **model_config()}
+    path = write_config(config)
+    web.serve(FEED, rss_feed({'guid': 'one', 'title': 'Robotics research'}))
+    web.serve(CHAT_URL, json.dumps(chat_reply(json.dumps(evolved_content()))),
+              headers={'content-type': 'application/json'})
+
+    async def scenario():
+        service = TentaclesService.open(path, env={}, transport=web.transport())
+        try:
+            await service.fetch_sources()
+            await service.set_persona('default', profile='Latest live profile', skip_tags=True)
+            item = service.list_items().items[0]
+            service.submit_feedback(item.id, rating=-1)
+            # Keep the original connection open so the snapshot includes live WAL commits.
+            preview = TentaclesService.open(path, env={}, transport=web.transport(), snapshot=True)
+            try:
+                assert preview.get_persona('default').profile == 'Latest live profile'
+                proposal = await preview.evolve_persona('default', dry_run=True)
+                assert proposal.base_version == 2 and proposal.feedback_count == 1
+            finally:
+                await preview.aclose()
+            assert service.get_persona('default').version == 2
+            assert len(service.persona_history('default')) == 2
+            assert len(service.list_runs(kind='persona')) == 1
+        finally:
+            await service.aclose()
+
+    asyncio.run(scenario())

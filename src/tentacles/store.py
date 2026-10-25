@@ -10,6 +10,7 @@ import sqlite3
 import threading
 from time import monotonic, sleep
 from dataclasses import dataclass, field
+from contextlib import closing
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable
@@ -215,12 +216,24 @@ _SORT_TIME = "COALESCE(published, fetched_at)"
 
 
 class Store:
-    def __init__(self, path: str | Path):
+    def __init__(self, path: str | Path, *, snapshot: bool = False):
         self.path = Path(path)
-        self.path.parent.mkdir(parents=True, exist_ok=True)
+        if not snapshot:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
-        self._conn = sqlite3.connect(self.path, check_same_thread=False)
+        self._conn = sqlite3.connect(':memory:' if snapshot else self.path, check_same_thread=False)
         try:
+            if snapshot and self.path.exists():
+                # Copy through SQLite's backup API, including live WAL data. All
+                # migrations/seeds/task initialization then affect memory only.
+                deadline = monotonic() + 5
+
+                def progress(status: int, remaining: int, total: int) -> None:
+                    if monotonic() >= deadline:
+                        raise sqlite3.OperationalError('database snapshot timeout')
+
+                with closing(sqlite3.connect(self.path.resolve().as_uri() + '?mode=ro', uri=True)) as source:
+                    source.backup(self._conn, pages=256, progress=progress)
             self._conn.row_factory = sqlite3.Row
             self._conn.create_function("casefold", 1, str.casefold, deterministic=True)
             self._conn.execute("PRAGMA busy_timeout = 5000")

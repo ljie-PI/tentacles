@@ -10,6 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from tentacles.errors import ConfigError
 from tentacles.timeutil import parse_duration
+from tentacles.llm.types import UsageRecord
 
 PersonaSource = Literal['seed', 'manual', 'llm', 'rollback']
 TagStatus = Literal['ok', 'error', 'skipped', 'unchanged']
@@ -103,6 +104,11 @@ class PersonaEdit:
     expected_version: int | None = None
     run_stats: dict[str, Any] = field(default_factory=dict)
     cost: float | None = None
+
+    def record_completion(self, result: UsageRecord) -> None:
+        self.run_stats['usage'] = result.usage.model_dump()
+        self.run_stats['actual_model'] = result.model
+        self.cost = result.cost
 
 
 class FeedbackView(BaseModel):

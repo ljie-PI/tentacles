@@ -128,14 +128,14 @@ TimeFmt = Callable[[Optional[datetime]], str]
 
 
 def _run(ctx: typer.Context, op: Callable[[TentaclesService], Awaitable[Any] | Any],
-         render: Callable[[Any, Console, TimeFmt], None]) -> None:
+         render: Callable[[Any, Console, TimeFmt], None], *, snapshot: bool = False) -> None:
     """Open the service, run one operation, print its result, map errors to exit codes."""
     state: State = ctx.obj
 
     tz: list[ZoneInfo] = []
 
     async def go() -> Any:
-        svc = TentaclesService.open(state.config, transport=state.transport)
+        svc = TentaclesService.open(state.config, transport=state.transport, snapshot=snapshot)
         tz.append(ZoneInfo(svc.config.app.timezone))  # 人类可读输出按配置的时区展示时间
         try:
             result = op(svc)
@@ -331,7 +331,8 @@ def persona_evolve(ctx: typer.Context, name: str = typer.Argument('default'),
                    instruction: str = typer.Option('', help="一句话指令；也可只使用近期反馈"),
                    dry_run: bool = typer.Option(False, help="只返回提案，不写库；模型调用可能产生费用")) -> None:
     """根据指令和/或反馈改写 persona；默认直接应用，--dry-run 仅预览。"""
-    _run(ctx, lambda s: s.evolve_persona(name, instruction=instruction, dry_run=dry_run), _render_evolution)
+    _run(ctx, lambda s: s.evolve_persona(name, instruction=instruction, dry_run=dry_run),
+         _render_evolution, snapshot=dry_run)
 
 
 @persona_app.command("apply")

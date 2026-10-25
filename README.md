@@ -105,6 +105,8 @@ tentacles pipelines filter daily-tech --reevaluate --since 7d
 `evolve` 的名称默认 `default`，至少需要非空指令或有效反馈之一；不加 `--dry-run` **直接应用**。
 模型使用 `defaults.models.persona`（示例设为 `max`），尊重已有配置，不会擅自升级模型。
 预览仍会调用模型并可能产生费用，但不创建版本、运行记录或任何数据库写入。
+CLI 预览在内存中的数据库快照运行，包括迁移、种子导入和调度初始化也不会写回磁盘；
+没有数据库时同样不会创建数据目录。
 应用不再次调用模型；基准版本已被其他修改替换时返回 `conflict`，请刷新并重新生成提案。
 成功应用追加 `source=llm` 的新版本，备注是变更摘要；无效模型输出不会修改 persona。
 

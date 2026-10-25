@@ -362,3 +362,37 @@ def test_feedback_evolve_preview_apply_pipe_contract(write_config, web, tmp_path
     assert human.exit_code == 0 and 'Strengthen robotics' in human.stdout
     reevaluated = run('pipelines', 'filter', 'daily', '--reevaluate', '--since', '24h')
     assert reevaluated.exit_code == 0 and payload(reevaluated)['stats']['evaluated'] == 1
+
+
+@pytest.mark.parametrize('existing', [False, True])
+def test_evolution_dry_run_never_persists_service_initialization(write_config, web, tmp_path, existing):
+    import asyncio
+    from test_models import CHAT_URL, chat_reply, model_config
+    from test_persona_evolution import evolved_content
+    from tentacles.service import TentaclesService
+
+    original = {**model_config(), 'personas': {'default': {'profile': 'Original'}}}
+    path = write_config(original)
+    if existing:
+        service = TentaclesService.open(path, env={})
+        asyncio.run(service.set_persona('default', profile='Stored version', skip_tags=True))
+        asyncio.run(service.aclose())
+    changed = {**original, 'personas': {**original['personas'], 'new-persona': {'profile': 'New seed'}}}
+    write_config(changed)
+    web.serve(CHAT_URL, json.dumps(chat_reply(json.dumps(evolved_content()))),
+              headers={'content-type': 'application/json'})
+    result = CliRunner().invoke(app, ['-c', str(path), '--json', 'persona', 'evolve', 'default',
+                                      '--instruction', 'Update', '--dry-run'],
+                                obj={'transport': web.transport()}, env={})
+    assert result.exit_code == 0
+    assert payload(result)['base_version'] == (2 if existing else 1)
+    if not existing:
+        assert not (tmp_path / 'data').exists()
+    write_config(original)
+    service = TentaclesService.open(path, env={})
+    try:
+        assert [p.name for p in service.list_personas()] == ['default']
+        assert service.get_persona('default').profile == ('Stored version' if existing else 'Original')
+        assert len(service.persona_history('default')) == (2 if existing else 1)
+    finally:
+        asyncio.run(service.aclose())
