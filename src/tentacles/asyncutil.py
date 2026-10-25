@@ -27,3 +27,30 @@ async def run_store_call(fn: Callable[..., _T], *args: Any, **kwargs: Any) -> _T
                 raise cancellation
             return result
 
+
+
+async def gather_draining(tasks: list[asyncio.Task[_T]]) -> list[_T]:
+    """On cancellation/failure, drain every child before its owner closes resources."""
+    async def collect() -> list[_T]:
+        return list(await asyncio.gather(*tasks))
+
+    # A Task that propagates CancelledError has cancelled state. A gathering
+    # Future stores it as an exception, which shield logs as an error on 3.14.
+    running = asyncio.create_task(collect())
+    try:
+        # Owner cancellation must not first cancel children through gather and
+        # then cancel them again while their asynchronous cleanup is in progress.
+        return list(await asyncio.shield(running))
+    except BaseException:
+        for task in tasks:
+            task.cancel()
+        cleanup = asyncio.gather(*tasks, running, return_exceptions=True)
+        while not cleanup.done():
+            try:
+                await asyncio.shield(cleanup)
+            except asyncio.CancelledError:
+                pass
+        cleanup.result()
+        if running.done() and not running.cancelled():
+            running.exception()  # consume the original aggregate's terminal error
+        raise

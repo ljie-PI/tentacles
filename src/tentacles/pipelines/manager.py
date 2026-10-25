@@ -14,8 +14,8 @@ from tentacles.llm.registry import ModelRegistry
 from tentacles.personas.models import PersonaView
 from tentacles.pipelines.config import PipelineSpec
 from tentacles.pipelines.digest import make_digest
-from tentacles.pipelines.filtering import filter_items
-from tentacles.pipelines.models import PipelineOutcome, PipelineQuery, PipelineView
+from tentacles.pipelines.filtering import filter_items, filter_stats
+from tentacles.pipelines.models import PipelineOutcome, PipelineQuery, PipelineView, FilterBatch
 from tentacles.store import Store
 from tentacles.schemas import Completion
 from tentacles.prompts import load_prompt
@@ -45,6 +45,12 @@ class PipelineManager:
                             config.app.timezone, spec.enabled and (kind != 'filter' or spec.filter_schedule is not None))
                        for kind in ('filter', 'pipeline') for spec in config.pipelines}
         for spec in config.pipelines:
+            for i, stage in enumerate(spec.filters):
+                if stage.type == 'decision':
+                    try:
+                        models.resolve('decision', stage.model)
+                    except (ConfigError, NotFound):
+                        raise ConfigError(f'pipeline {spec.id!r}.filters[{i}].model requires an existing decision model') from None
             if spec.processor.prompt_file is not None:
                 load_prompt(config.resolve(spec.processor.prompt_file))
             if store.get_persona(spec.persona) is None and spec.persona not in config.personas:
@@ -95,17 +101,19 @@ class PipelineManager:
         return PipelineQuery(spec.id, spec.sources, persona.version, now - parse_duration(spec.window), now, limit)
 
     async def _execute(self, spec: PipelineSpec, kind: str,
-                       work: Callable[[_Operation], Awaitable[None]], *, due_only: bool = False) -> PipelineOutcome | None:
+                       work: Callable[[_Operation], Awaitable[None]], *, due_only: bool = False,
+                       on_finished: Callable[[PipelineOutcome], None] | None = None) -> PipelineOutcome | None:
         task = self._tasks[kind, spec.id]
         operation = _Operation(task, uuid4().hex, to_utc(self._clock()),
                                PipelineOutcome(pipeline_id=spec.id, status='ok'))
-        needs_cleanup = True
+        needs_cleanup, not_due = True, False
         try:
             claim = await run_store_call(self._store.claim_task, task, operation.token,
                                          operation.started_at, force=not due_only)
             if claim.status != 'ready':
                 needs_cleanup = False
                 if claim.status == 'not_due':
+                    not_due = True
                     return None
                 operation.outcome.status = 'busy'
             else:
@@ -126,15 +134,19 @@ class PipelineManager:
             if not isinstance(exc, Exception):
                 raise
         finally:
-            if needs_cleanup and not operation.completed:
-                try:
-                    await run_store_call(self._store.finish_task, task, operation.token, to_utc(self._clock()))
-                except Exception as failure:
-                    log.warning('could not release pipeline lease (%s)', type(failure).__name__)
+            try:
+                if needs_cleanup and not operation.completed:
+                    try:
+                        await run_store_call(self._store.finish_task, task, operation.token, to_utc(self._clock()))
+                    except Exception as failure:
+                        log.warning('could not release pipeline lease (%s)', type(failure).__name__)
+            finally:
+                if on_finished is not None and not not_due:
+                    on_finished(operation.outcome)
         return operation.outcome
 
     async def filter(self, pipeline_id: str, *, persona: PersonaView | None = None, reevaluate: bool = False,
-                     due_only: bool = False) -> PipelineOutcome | None:
+                     due_only: bool = False, on_finished: Callable[[PipelineOutcome], None] | None = None) -> PipelineOutcome | None:
         spec = self.spec(pipeline_id)
 
         async def work(op: _Operation) -> None:
@@ -143,20 +155,22 @@ class PipelineManager:
             candidates = await run_store_call(self._store.filter_candidates,
                 self._query(spec, current, op.started_at, spec.max_items),
                 reevaluate=reevaluate, run_id=op.outcome.run_id)
-            op.outcome.stats = {'candidates': len(candidates), 'evaluated': 0, 'stages': []}
-            results, stages = await filter_items(candidates, current, spec, op.started_at)
-            stats = {'candidates': len(candidates), 'evaluated': len(results), 'stages': stages,
-                     'passed': sum(e.passed for e in results), 'rejected': sum(not e.passed for e in results),
-                     'errors': len(candidates) - len(results),
-                     'usage': {key: sum(stage['usage'][key] for stage in stages)
-                               for key in ('input_tokens', 'output_tokens', 'total_tokens')}}
-            op.outcome.stats = stats
+            batch = FilterBatch([], [])
+            try:
+                await filter_items(candidates, current, spec, op.started_at, self._models, batch)
+            finally:
+                stats = filter_stats(batch, len(candidates))
+                op.cost, op.outcome.stats = stats['cost'], stats
+            results = batch.evaluations
+            if batch.error is not None:
+                op.outcome.status, op.outcome.error = 'error', batch.error
 
             def commit() -> None:
-                self._store.save_evaluations(results, op.outcome.run_id, to_utc(self._clock()), stats)
+                self._store.save_evaluations(results, op.outcome.run_id, to_utc(self._clock()), stats, cost=op.cost,
+                                             error=batch.error)
                 op.completed = True
             await run_store_call(commit)
-        return await self._execute(spec, 'filter', work, due_only=due_only)
+        return await self._execute(spec, 'filter', work, due_only=due_only, on_finished=on_finished)
 
     async def run(self, pipeline_id: str, *, due_only: bool = False) -> PipelineOutcome | None:
         spec = self.spec(pipeline_id)
@@ -164,9 +178,12 @@ class PipelineManager:
         async def work(op: _Operation) -> None:
             persona = await run_store_call(self._store.get_persona, spec.persona)
             assert persona is not None
-            filtered = await self.filter(pipeline_id, persona=persona)
+            def record_filter(outcome: PipelineOutcome) -> None:
+                op.outcome.stats = {**outcome.stats, 'filter_status': outcome.status,
+                                    'filter_run_id': outcome.run_id}
+                op.cost = outcome.stats.get('cost')
+            filtered = await self.filter(pipeline_id, persona=persona, on_finished=record_filter)
             assert filtered is not None
-            op.outcome.stats = {**filtered.stats, 'filter_status': filtered.status}
             if filtered.status == 'error':
                 raise UpstreamError('pipeline filter failed')
             selected = await run_store_call(self._store.pending_items,
@@ -177,7 +194,7 @@ class PipelineManager:
                 op.outcome.stats['no_new'] = True
 
                 def finish_empty() -> None:
-                    self._store.consume_without_report([], op.outcome.run_id, to_utc(self._clock()), op.outcome.stats)
+                    self._store.consume_without_report([], op.outcome.run_id, to_utc(self._clock()), op.outcome.stats, cost=op.cost)
                     op.completed = True
                 await run_store_call(finish_empty)
                 return
@@ -187,21 +204,25 @@ class PipelineManager:
                 def consume() -> None:
                     success = {**op.outcome.stats, 'consumed': len(selected)}
                     self._store.consume_without_report(evaluations, op.outcome.run_id,
-                                                       to_utc(self._clock()), success)
+                                                       to_utc(self._clock()), success, cost=op.cost)
                     op.outcome.stats = success
                     op.completed = True
                 await run_store_call(consume)
                 return
             def record_completion(result: Completion) -> None:
-                op.cost = result.cost
-                op.outcome.stats['usage'] = result.usage.model_dump()
+                if result.cost is not None:
+                    op.cost = (op.cost or 0) + result.cost
+                previous = op.outcome.stats.get('usage', {})
+                op.outcome.stats['usage'] = {key: previous.get(key, 0) + value
+                                            for key, value in result.usage.model_dump().items()}
+                op.outcome.stats['cost'] = op.cost
                 op.outcome.stats['model'] = result.model
             report = await make_digest(self._config, spec, persona, selected, self._models,
                                        self._clock, record_completion)
 
             def publish() -> None:
                 success = {**op.outcome.stats, 'consumed': len(selected)}
-                self._store.save_report(report, evaluations, op.outcome.run_id, success)
+                self._store.save_report(report, evaluations, op.outcome.run_id, success, cost=op.cost)
                 op.outcome.stats = success
                 op.outcome.report_id = report.id
                 op.completed = True
