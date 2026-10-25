@@ -263,7 +263,8 @@ def test_a_lease_acquisition_failure_does_not_abort_other_sources(write_config):
         try:
             outcomes = {r.source_id: r for r in await service.tick()}
             assert outcomes['n0'].status == 'error'
-            assert 'test acquisition failure' in outcomes['n0'].error
+            assert 'IntegrityError' in outcomes['n0'].error
+            assert 'test acquisition failure' not in outcomes['n0'].error
             assert outcomes['n1'].status == 'ok'
         finally:
             connection.close()
