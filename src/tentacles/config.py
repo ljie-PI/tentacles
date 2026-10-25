@@ -19,6 +19,7 @@ from dotenv import dotenv_values
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, ValidationError, field_validator
 
 from tentacles.errors import ConfigError, NotFound
+from tentacles.server_config import ServerSpec
 from tentacles.schedule import Schedule
 from tentacles.llm.config import Defaults, ModelSpec, STAGES
 from tentacles.personas.models import PersonaSeed, PersonaUpdate, persona_name
@@ -78,6 +79,7 @@ class AppConfig(BaseModel):
     personas: dict[str, PersonaSeed] = Field(default_factory=dict)
     pipelines: list[PipelineSpec] = Field(default_factory=list)
     persona_update: PersonaUpdate = Field(default_factory=PersonaUpdate)
+    server: ServerSpec = Field(default_factory=ServerSpec)
 
     _path: Path = PrivateAttr(default=Path(DEFAULT_CONFIG))
 

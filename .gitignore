@@ -19,3 +19,7 @@ reports/
 .idea/
 *.swp
 .DS_Store
+
+# Frontend
+node_modules/
+*.tsbuildinfo

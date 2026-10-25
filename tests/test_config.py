@@ -138,3 +138,13 @@ def test_simultaneous_first_opens_can_enable_wal_and_initialize_the_database(wri
 
         with ThreadPoolExecutor(max_workers=12) as executor:
             assert all(executor.map(open_once, range(12)))
+
+
+@pytest.mark.parametrize('server', [
+    {'token': 'space in token'}, {'token': 'not\nascii'}, {'token': '非ASCII'},
+    {'cors_origins': ['*']}, {'cors_origins': ['http://localhost:5173/path']},
+    {'host': ' '}, {'port': 0}, {'poll_interval': 0}, {'poll_interval': float('inf')},
+])
+def test_server_options_reject_unusable_or_unsafe_values(write_config, open_service, server):
+    with pytest.raises(ConfigError):
+        open_service(write_config({'server': server}))

@@ -231,3 +231,13 @@ pipelines:
       language: zh-CN
       max_items: 50
       instructions: 仅提取邮件明确要求的待办，无法确定截止日期时留空。
+
+# REST API / 网页（tentacles serve）。默认只监听本机；对外访问需 token + HTTPS 代理。
+server:
+  host: 127.0.0.1
+  port: 8000
+  token: ${TENTACLES_SERVER_TOKEN:-}
+  cors_origins: []          # 仅允许明确列出的 origin，如 http://localhost:5173；默认同源
+  scheduler: true
+  poll_interval: 30         # 秒；单轮出错后继续，关闭时等待当前轮结束
+  static_dir: ../frontend/dist  # pnpm build 的产物；相对本 YAML
