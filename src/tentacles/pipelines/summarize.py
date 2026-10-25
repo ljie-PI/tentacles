@@ -8,7 +8,6 @@ import re
 from datetime import date, datetime, time, timezone
 from typing import Annotated, Any, Callable
 from urllib.parse import quote, urlsplit
-from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, TypeAdapter, field_validator
@@ -24,6 +23,7 @@ from tentacles.personas.models import PersonaView
 from tentacles.personas.render import render_persona
 from tentacles.pipelines.config import PipelineSpec
 from tentacles.pipelines.models import Evaluation, ReportView
+from tentacles.pipelines.report_path import new_report_location
 from tentacles.schemas import Completion
 from tentacles.prompts import load_prompt, MAX_PROMPT_CHARS
 from tentacles.text import truncate
@@ -198,13 +198,7 @@ async def make_summarize(config: AppConfig, spec: PipelineSpec, persona: Persona
     sections = [f'# {_literal(title)}']
     for heading, entries in [('需要处理', actions), ('仅供参考', information), ('未能解析', unparsed)]:
         sections.append(f'## {heading}\n\n' + ('\n\n'.join(_entry(item, parsed.get(item.id), zone, models.redact) for item in entries) or '（无）'))
-    report_id = uuid4().hex
-    slug = re.sub(r'[^\w-]', '-', title).strip('-')[:60] or 'summarize'
-    root = config.reports_dir.resolve()
-    folder = (root / spec.id).resolve()
-    if not folder.is_relative_to(root):
-        raise UpstreamError('pipeline report folder escapes reports_dir')
-    path = folder / f'{now:%Y%m%d-%H%M%S-%f}-summarize-{slug}-{report_id}.md'
+    report_id, path = new_report_location(config, spec.id, 'summarize', title, now)
     return ReportView(id=report_id, pipeline_id=spec.id, persona_version=persona.version, kind='summarize',
                       title=title, markdown='\n\n'.join(sections) + '\n',
                       item_ids=[item.id for item, _ in selected], model=', '.join(metrics.models) or None,
