@@ -71,10 +71,10 @@ tentacles items list --since 24h  # 查看最近 24 小时的条目
 
 所有命令都支持 `--json`：stdout 只输出一个 JSON 值，日志写到 stderr，退出码按错误类型区分。给 agent 用的完整说明见 [docs/agent-cli.md](docs/agent-cli.md)。
 
-## RSS / Atom 与 Web list 原位更新（可选）
+## RSS / Atom 与 Web list / llm 原位更新（可选）
 
 每个源默认 `update_existing: false`，省略时保持原有去重、网络请求和模型调用行为。
-目前支持 RSS / Atom 和 Web `mode: list`；Web llm / page 及 IMAP 设为 true 会明确报配置错误。
+目前支持 RSS / Atom 和 Web `mode: list` / `llm`；Web page 及 IMAP 设为 true 会明确报配置错误。
 
 ```yaml
 sources:
@@ -98,12 +98,16 @@ RSS 开启后，仅 Feed 本轮再次提供、未被 `max_age_days` 排除的条
 只保留最新状态，不保存正文快照。关闭更新时沿用原有去重，IMAP/page 不参与此身份回退。
 条件 GET、304 和发布时间上限不变，不额外请求详情、评论或主动重访历史条目。
 
-Web list 同样在源级设置 `update_existing: true`，只刷新**本轮列表再次发现**的本源标准 Item，
+Web list / llm 同样在源级设置 `update_existing: true`，只刷新**本轮列表再次发现**的本源标准 Item，
 不遍历历史、不新增独立监控任务，也不清空已见缓存。被抑制、仅有观察身份而没有本源 Item、
 或其他源已保存的文章继续跳过，包括详情请求；页面版本身份不参与普通文章 URL 判重。
 `fetch_content: true` 每轮会为再次发现的可更新条目**额外请求详情**，即使列表文本不变，
 也比较完整正文（包括摘要截断之后的变化）。`fetch_content: false` 仅更新实际提供的列表字段：
 缺少摘要/日期保留旧值，不以列表摘录覆盖旧全文。任一详情失败则整轮不写条目或游标，可稳定重试。
+Web llm 缓存当前已校验的有界条目描述，不缓存详情全文；首次开启或旧游标升级可能付费抽取一次。
+有效输入、完整有效链接集合及模型/抽取配置不变时，后续额外抽取调用为零；仅 API key 轮换不失效。
+缓存命中且开启详情仍会请求本轮存在的可刷新详情；不开详情则跳过写入，不刷新时间或重新评分。
+链接移除后不再重访；源没有再次提供内容时无法更新，模型未抽取的链接也不会凭历史记录补猜。
 开启/关闭方法、空值规则与详情并发/凭据隔离见 [Web 信息源协议](docs/web-sources.md)。
 
 内容变化后，条目保留 ID、首次 `fetched_at` 和消费关系，设置 `updated_at` 并使旧评分失效。
