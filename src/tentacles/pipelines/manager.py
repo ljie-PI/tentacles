@@ -9,9 +9,8 @@ from uuid import uuid4
 
 from tentacles.asyncutil import run_store_call
 from tentacles.config import AppConfig
-from tentacles.errors import ConfigError, NotFound, UpstreamError
+from tentacles.errors import NotFound, UpstreamError
 from tentacles.llm.registry import ModelRegistry
-from tentacles.llm.config import Stage
 from tentacles.personas.models import PersonaView
 from tentacles.pipelines.config import PipelineSpec
 from tentacles.pipelines.digest import make_digest
@@ -21,7 +20,6 @@ from tentacles.pipelines.filtering import filter_items, filter_stats
 from tentacles.pipelines.models import PipelineOutcome, PipelineQuery, PipelineView, FilterBatch
 from tentacles.store import Store
 from tentacles.schemas import Completion
-from tentacles.prompts import load_prompt
 from tentacles.tasks import Task
 from tentacles.timeutil import parse_duration, to_utc
 
@@ -47,24 +45,6 @@ class PipelineManager:
                             spec.filter_schedule if kind == 'filter' and spec.filter_schedule else spec.schedule,
                             config.app.timezone, spec.enabled and (kind != 'filter' or spec.filter_schedule is not None))
                        for kind in ('filter', 'pipeline') for spec in config.pipelines}
-        for spec in config.pipelines:
-            for i, stage in enumerate(spec.filters):
-                if stage.type in {'decision', 'llm'}:
-                    phase: Stage = 'decision' if stage.type == 'decision' else 'filter'
-                    kind = 'decision' if stage.type == 'decision' else 'chat'
-                    try:
-                        models.resolve(phase, stage.model)
-                    except (ConfigError, NotFound):
-                        raise ConfigError(f'pipeline {spec.id!r}.filters[{i}].model requires an existing {kind} model') from None
-            if spec.processor.prompt_file is not None:
-                load_prompt(config.resolve(spec.processor.prompt_file))
-            if store.get_persona(spec.persona) is None and spec.persona not in config.personas:
-                raise ConfigError(f'pipeline {spec.id!r}: unknown persona {spec.persona!r}')
-            if spec.processor.type != 'none' or spec.processor.model is not None:
-                try:
-                    models.resolve('process', spec.processor.model)
-                except (ConfigError, NotFound):
-                    raise ConfigError(f'pipeline {spec.id!r}: processor requires an existing chat model') from None
 
     def initialize(self) -> None:
         self._store.sync_pipeline_schedules(list(self._tasks.values()), to_utc(self._clock()))

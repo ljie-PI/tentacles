@@ -12,7 +12,7 @@ import json
 import logging
 import os
 import sys
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Optional
@@ -31,7 +31,7 @@ except ImportError:  # pragma: no cover
     from click.exceptions import ClickException, UsageError  # type: ignore[assignment,no-redef]
 from typer.core import TyperGroup
 
-from tentacles.errors import ConfigError, TentaclesError, exit_code
+from tentacles.errors import ConfigError, ConfigIssue, ConfigValidationError, TentaclesError, exit_code
 from tentacles.service import TentaclesService
 from tentacles.personas.models import PersonaProposal
 from tentacles.sources.imap_client import ImapFactory, connect_imap
@@ -150,6 +150,8 @@ def _run(ctx: typer.Context, op: Callable[[TentaclesService], Awaitable[Any] | A
     out = Console(soft_wrap=True)
     try:
         result = asyncio.run(go())
+    except ConfigValidationError as exc:
+        _fail(state, exc.code, exc.message, errors=exc.errors)
     except TentaclesError as exc:
         _fail(state, exc.code, exc.message)
     except KeyboardInterrupt:
@@ -163,9 +165,12 @@ def _run(ctx: typer.Context, op: Callable[[TentaclesService], Awaitable[Any] | A
         render(result, out, lambda dt: _time(dt, tz[0]))
 
 
-def _fail(state: State, code: str, message: str) -> None:
+def _fail(state: State, code: str, message: str, *, errors: list[ConfigIssue] | None = None) -> None:
     if state.json:
-        typer.echo(json.dumps({"error": {"code": code, "message": message}}, ensure_ascii=False))
+        error: dict[str, Any] = {"code": code, "message": message}
+        if errors is not None:
+            error["errors"] = [asdict(item) for item in errors]
+        typer.echo(json.dumps({"error": error}, ensure_ascii=False))
     else:
         Console(stderr=True).print(f"[red]error[/red] ({code}): {escape(message)}")
     raise typer.Exit(exit_code(code))
@@ -189,8 +194,26 @@ def _time(dt: Optional[datetime], tz: ZoneInfo) -> str:
 @config_app.command("check")
 def config_check(ctx: typer.Context) -> None:
     """校验配置文件。"""
-    _run(ctx, lambda s: s.check_config(),
-         lambda r, out, when: out.print(f"[green]ok[/green] {escape(r.path)}（{r.sources} 个信息源）"))
+    from tentacles.config import load_config
+    from tentacles.schemas import ConfigCheck
+
+    state: State = ctx.obj
+    try:
+        config = load_config(state.config)
+        result = ConfigCheck(ok=True, path=str(config.path), sources=len(config.sources))
+    except ConfigValidationError as exc:
+        _fail(state, exc.code, exc.message, errors=exc.errors)
+    except TentaclesError as exc:
+        _fail(state, exc.code, exc.message)
+    except KeyboardInterrupt:
+        _fail(state, 'aborted', 'interrupted')
+    except Exception as exc:
+        logging.getLogger(__name__).error("unexpected config check failure (%s)", type(exc).__name__)
+        _fail(state, 'error', f'operation failed ({type(exc).__name__})')
+    if state.json:
+        typer.echo(result.model_dump_json())
+    else:
+        Console(soft_wrap=True).print(f"[green]ok[/green] {escape(result.path)}（{result.sources} 个信息源）")
 
 
 # ---- pipelines and reports --------------------------------------------------
@@ -538,6 +561,8 @@ def serve(
         warn_if_exposed(config)
         uvicorn.run(create_app(config, transport=state.transport, imap_factory=state.imap_factory),
                     host=config.server.host, port=config.server.port, access_log=False, log_level='warning')
+    except ConfigValidationError as exc:
+        _fail(state, exc.code, exc.message, errors=exc.errors)
     except TentaclesError as exc:
         _fail(state, exc.code, exc.message)
     except (KeyboardInterrupt, asyncio.CancelledError):

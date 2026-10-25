@@ -14,7 +14,8 @@ from uuid import uuid4
 import httpx
 
 from tentacles.config import AppConfig, SourceSpec, load_config
-from tentacles.errors import ConfigError, NotFound, UpstreamError
+from tentacles.config_validation import validate_config
+from tentacles.errors import ConfigError, ConfigValidationError, NotFound, UpstreamError
 from tentacles.net import HttpPool
 from tentacles.llm.registry import ModelRegistry
 from tentacles.llm.config import Stage
@@ -40,6 +41,13 @@ class TentaclesService:
     def __init__(self, config: AppConfig, store: Store, *,
                  transport: httpx.AsyncBaseTransport | None = None,
                  clock: Callable[[], datetime] = utcnow, imap_factory: ImapFactory = connect_imap):
+        try:
+            errors = validate_config(config, {persona.name for persona in store.list_personas()})
+            if errors:
+                raise ConfigValidationError(errors)
+        except BaseException:
+            store.close()
+            raise
         self.config = config
         self.store = store
         self._transport = transport
@@ -79,7 +87,9 @@ class TentaclesService:
     # ---- config -------------------------------------------------------------
 
     def check_config(self) -> ConfigCheck:
-        # 能打开 Service 就说明配置已通过全部校验
+        errors = validate_config(self.config, {persona.name for persona in self.store.list_personas()})
+        if errors:
+            raise ConfigValidationError(errors)
         return ConfigCheck(ok=True, path=str(self.config.path), sources=len(self.config.sources))
 
     # ---- pipelines ----------------------------------------------------------
