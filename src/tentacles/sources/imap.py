@@ -9,6 +9,8 @@ from datetime import timedelta
 from email import policy
 from email.parser import BytesParser
 from email.message import MIMEPart
+from email.headerregistry import Address
+from email.errors import HeaderParseError
 from email.utils import getaddresses, parsedate_to_datetime
 from typing import Any, ClassVar, Type, cast
 
@@ -163,13 +165,17 @@ def _attribution_writer(value: str, *, allow_name: bool) -> bool:
         return allow_name and _attribution_name(value, capitalized=True)
     try:
         addresses = getaddresses([value])
-    except (ValueError, IndexError):
+    except (ValueError, IndexError, RecursionError):
         return False
     if len(addresses) != 1:
         return False
     name, address = addresses[0]
     local, separator, domain = address.rpartition('@')
     if not separator or not local or not domain or _has_controls(address):
+        return False
+    try:
+        Address(addr_spec=address)
+    except (ValueError, HeaderParseError, RecursionError):
         return False
     # Verify the complete mailbox was consumed; don't accept address fragments
     # recovered from ordinary prose. No ambiguous repeated-scanning regex.

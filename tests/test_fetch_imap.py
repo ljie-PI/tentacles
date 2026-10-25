@@ -677,3 +677,46 @@ def test_oversized_reply_like_line_preserves_body_without_blocking_rss_or_heartb
         assert max(gaps, default=0) < 1, 'blocking mail work must not stall the event loop'
 
     asyncio.run(scenario())
+
+
+@pytest.mark.parametrize('attribution_like_prose', [
+    'On 2026-10-25 I noted that alice@example.test wrote:',
+    'On 2026-10-25 I noted that\nalice@example.test wrote:',
+    'On 2026-10-25 we noted that bob@example.test wrote:',
+])
+def test_reply_cleanup_rejects_prose_misparsed_as_an_addr_spec(write_config, attribution_like_prose):
+    text = f'Fresh update\n\n{attribution_like_prose}\nNew technical findings'
+    fake = FakeIMAP({'"INBOX"': Mailbox(messages={1: mail(body=text)})})
+    path = write_config(imap_config())
+
+    async def scenario():
+        service = TentaclesService.open(path, env={'MAIL_PASSWORD': 'secret-app-password'},
+                                        imap_factory=fake.factory, clock=lambda: NOW)
+        try:
+            assert (await service.fetch_sources())[0].new == 1
+            item = service.get_item(service.list_items().items[0].id)
+            assert item.content == text
+        finally:
+            await service.aclose()
+
+    asyncio.run(scenario())
+
+
+def test_reply_mailbox_validation_keeps_legal_quoted_local_parts(write_config):
+    from email.utils import formataddr
+    writer = formataddr(('Local User', '"a b"@example.test'))
+    fake = FakeIMAP({'"INBOX"': Mailbox(messages={1: mail(
+        body=f'Fresh update\n\nOn 2026-10-25 {writer} wrote:\nOld quoted reply body')})})
+    path = write_config(imap_config())
+
+    async def scenario():
+        service = TentaclesService.open(path, env={'MAIL_PASSWORD': 'secret-app-password'},
+                                        imap_factory=fake.factory, clock=lambda: NOW)
+        try:
+            assert (await service.fetch_sources())[0].new == 1
+            item = service.get_item(service.list_items().items[0].id)
+            assert item.content == item.summary == 'Fresh update'
+        finally:
+            await service.aclose()
+
+    asyncio.run(scenario())
