@@ -160,7 +160,7 @@ def _source_options(data: Mapping[str, Any], where: str) -> tuple[BaseModel | No
         updates = TypeAdapter(bool).validate_python(data.get('update_existing', False))
     except ValidationError:
         updates = False  # common schema already reports invalid booleans
-    supports_updates = cls.supports_updates and (source_type != 'web' or options.get('mode', 'list') == 'list')
+    supports_updates = cls.supports_updates and (source_type != 'web' or options.get('mode', 'list') in ('list', 'llm'))
     if updates and not supports_updates:
         errors.append(ConfigIssue(f'{where}.update_existing', 'updates are not supported for this source type/mode'))
     # Independent cross-field rules must still run when another option (or

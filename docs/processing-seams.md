@@ -37,7 +37,7 @@ publication is not crash-atomic.
 Source adapters may return typed `ItemObservation` values alongside Items.
 Only fields explicitly set on an observation may overwrite stored fields;
 explicit null clears, unset preserves. Stable external identity is declared,
-not inferred from a fallback URL/fingerprint. Opted-in RSS and Web list emit
+not inferred from a fallback URL/fingerprint. Opted-in RSS and Web list/llm emit
 these observations. Store owns target resolution, full downstream-field
 comparison, content revision and evaluation invalidation in its write transaction.
 Feed format determines body provenance: Atom summaries never replace missing
@@ -75,11 +75,19 @@ source's stored standard external identity; suppression wins, observations alone
 and other sources' article URLs are `skip`, otherwise `new`. Refresh outranks the
 bounded seen cache, but a cache entry alone never authorizes refresh. These reads
 only avoid unnecessary HTTP requests; Store still resolves writes under its
-fence. Web llm's update flag remains rejected pending its descriptor-cache slice.
+fence. Web llm reuses that same classification and detail path on descriptor-cache hits.
 Selectors preserve node/attribute presence in `ItemObservation`; list excerpts
 are never body observations. Only a successful detail parse supplies full
-`content`, and all details finish before publication. No descriptor or full-body
-cache is added here, and no historical URLs are revisited.
+`content`, and all details finish before publication. Web llm caches bounded,
+validated current list descriptors in the same fenced source cursor, never full
+detail bodies or historical guesses. Its key covers effective text, the full
+grounding link set and model/extraction identity (not API credentials). Missing
+and explicit-empty observations survive serialization; relative dates are
+resolved only when descriptors are built. Cache hits with details disabled do
+not deliver Items; with details enabled they reclassify current descriptors and
+refresh eligible details without another extraction. Old cursors may need one
+paid build; failed builds/details never advance the cache. No historical URLs
+are revisited.
 
 Schema 13 adds source-scoped alias mappings without changing existing identities;
 schema 12 preserves existing rows with revision 1 and null content-update time.

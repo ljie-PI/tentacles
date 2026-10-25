@@ -68,13 +68,15 @@ A failed individual fetch's detailed sanitized status is available in run/source
 
 ## Errors
 
-原位更新默认关闭，支持 RSS/Atom 与 Web list 源的 `update_existing: true`。
+原位更新默认关闭，支持 RSS/Atom 与 Web list/llm 源的 `update_existing: true`；IMAP/page 仍报错。
 同源稳定外部 ID/别名优先，未命中才以实际观察到的规范化 URL 定位同源唯一标准 Item；
 不使用指纹/标题作为更新身份，不跨源覆盖，不复活抑制/仅观察记录。
 身份与 URL 不一致、同源 URL 多义或更新 URL 碰撞会以 Conflict 使整个源批次回滚；
 批量抓取仍按源返回 `status: "error"`，详细原因见 Run/源状态。别名不改变 Item ID、
 原 external_id 或首次抓取时间；只改外部身份仍计重复，同批每个目标只采用首条有效观察。
-Web list 只刷新本轮再发现的本源标准 Item，fetch_content 控制是否重新请求详情，详见 Web 信息源协议。
+Web list/llm 只刷新本轮再发现的本源标准 Item，fetch_content 控制是否重新请求详情。
+llm 首次可能付费建描述缓存；有效输入、完整链接集合及模型/抽取配置不变时不再抽取（密钥轮换不失效），
+但开启详情仍有请求，内容变化仍可能付费重评。无详情的缓存命中不写内容；移除链接不重访，详见 Web 信息源协议。
 `FetchOutcome` / `TickOutcome` 增加默认 0 的 `updated`，抓取 Run 的统计包含
 `fetched`、`new`、`updated`、`dup`，成功批次满足 `fetched = new + updated + dup`。
 Item 列表/详情的 `updated_at` 可空，`is_updated` 表示是否有内容更新；`fetched_at` 仍为首次抓取时间。
