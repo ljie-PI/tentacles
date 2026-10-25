@@ -37,6 +37,22 @@ this repo or point `server.static_dir` at it. `tentacles serve` serves that dire
 unknown `/api` paths stay JSON errors. A standalone Python wheel does not bundle the frontend: deploy
 its separately built assets and configure `static_dir`.
 
+Use `api` from `src/api.ts` with a generated path template and method. The generated `paths`
+select the required path/query parameters, JSON request body and successful response type:
+
+```ts
+api('/api/items/{item_id}', 'get', { path: { item_id: id } })
+api('/api/items', 'get', { query: { sources: [source], limit: 20, passed: false }, signal })
+api('/api/items/{item_id}/feedback', 'post', {
+  path: { item_id: id }, body: { persona, rating: 1, note: '' },
+})
+```
+
+Pass plain typed values, not interpolated URLs, manually stringified bodies or response generics.
+The client encodes path segments, repeats array query keys and omits null/undefined query values.
+It preserves fetch options (including abort signals), token injection and `ApiError` handling.
+Component props and cache snapshots may still use schema aliases; request results must be inferred.
+
 Feed filters and selected detail ID are URL state. Pagination uses the API's offset/limit; query changes
 start a new page sequence. Details render content as text (not raw HTML). Sources supports manual fetch
 and invalidates source/feed/run/scheduler caches after success or failure. Themes are persisted per browser.

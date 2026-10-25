@@ -1,13 +1,11 @@
 import { useQuery } from '@tanstack/react-query'
 import { useMemo } from 'react'
 import { api } from './api'
-import type { components } from './api-types'
 
-type DisplaySettings = components['schemas']['DisplaySettings']
 export type TimeFormatter = (value: string | null | undefined) => string
 
 export function useDisplayTime() {
-  const query = useQuery({ queryKey: ['display-settings'], queryFn: () => api<DisplaySettings>('/settings') })
+  const query = useQuery({ queryKey: ['display-settings'], queryFn: () => api('/api/settings', 'get') })
   const timezone = query.data?.timezone
   const formatter = useMemo(() => {
     if (!timezone) return null

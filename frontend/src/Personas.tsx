@@ -10,7 +10,6 @@ type Draft = { profile: string; include: string; exclude: string; note: string; 
 const lines = (value: string) => value.split(/\r?\n/).map(line => line.trim()).filter(Boolean)
 const draftOf = (persona?: Persona): Draft => ({ profile: persona?.profile || '', include: (persona?.include || []).join('\n'), exclude: (persona?.exclude || []).join('\n'), note: '', updateTags: true })
 const isConflict = (error: Error | null) => error instanceof ApiError && error.status === 409
-const personaUrl = (name: string, version?: number) => `/personas/current?${new URLSearchParams({ name, ...(version ? { version: String(version) } : {}) })}`
 
 function ProfileInputs({ value, change, disabled }: { value: Draft; change: (value: Draft) => void; disabled: boolean }) {
   return <>
@@ -42,7 +41,7 @@ function CreatePersona({ created, activityChanged }: { created: (value: Persona)
   const client = useQueryClient()
   const [name, setName] = useState('')
   const [draft, setDraft] = useState<Draft>(() => draftOf())
-  const create = useMutation({ mutationFn: () => api<Persona>('/personas', { method: 'PATCH', body: JSON.stringify({ name: name.trim(), expected_version: 0, profile: draft.profile, include_add: lines(draft.include), exclude_add: lines(draft.exclude), skip_tags: !draft.updateTags, note: draft.note }) }), onSuccess: value => { client.setQueryData(['persona', value.name, 'current'], value); client.setQueryData<Persona[]>(['personas'], old => [...(old || []).filter(row => row.name !== value.name), value]); void client.invalidateQueries({ queryKey: ['personas'] }) } })
+  const create = useMutation({ mutationFn: () => api('/api/personas', 'patch', { body: { name: name.trim(), expected_version: 0, profile: draft.profile, include_add: lines(draft.include), exclude_add: lines(draft.exclude), skip_tags: !draft.updateTags, note: draft.note } }), onSuccess: value => { client.setQueryData(['persona', value.name, 'current'], value); client.setQueryData<Persona[]>(['personas'], old => [...(old || []).filter(row => row.name !== value.name), value]); void client.invalidateQueries({ queryKey: ['personas'] }) } })
   useEffect(() => { activityChanged(create.isPending); return () => activityChanged(false) }, [create.isPending, activityChanged])
   return <section className="persona-panel"><h2>新建 Persona</h2><form className="persona-form" onSubmit={event => { event.preventDefault(); create.mutate(undefined, { onSuccess: created }) }}><label>名称<input name="persona-name" value={name} disabled={create.isPending} onChange={event => setName(event.target.value)} required /></label><ProfileInputs value={draft} change={setDraft} disabled={create.isPending} /><button className="primary" disabled={create.isPending || !name.trim()}>{create.isPending ? '保存中…' : '创建画像'}</button></form>{create.error && <Notice error>{isConflict(create.error) ? '该名称已有画像，请刷新列表后查看。' : create.error.message}</Notice>}</section>
 }
@@ -60,20 +59,20 @@ function PersonaEditor({ persona, workChanged }: { persona: Persona; workChanged
   const [rollbackVersion, setRollbackVersion] = useState<number | null>(null)
   const [message, setMessage] = useState('')
   const { formatTime, error: displayError } = useDisplayTime()
-  const history = useQuery({ queryKey: ['persona', persona.name, 'history'], queryFn: () => api<Persona[]>(`/personas/history?${new URLSearchParams({ name: persona.name })}`) })
+  const history = useQuery({ queryKey: ['persona', persona.name, 'history'], queryFn: () => api('/api/personas/history', 'get', { query: { name: persona.name } }) })
   const dirty = draft.profile !== base.profile || lines(draft.include).join('\n') !== (base.include || []).join('\n') || lines(draft.exclude).join('\n') !== (base.exclude || []).join('\n') || !!draft.note.trim()
   const refresh = async () => { await Promise.all(['personas', 'persona', 'pipelines', 'items', 'item', 'runs'].map(key => client.invalidateQueries({ queryKey: [key] }))) }
   const accept = (value: Persona, notice: string, discardEvolution = false) => { setBase(value); setDraft(draftOf(value)); setPreview(null); setRollbackVersion(null); if (discardEvolution) { setInstruction(''); setUseFeedback(true) }; setMessage(notice); void refresh() }
-  const save = useMutation({ mutationFn: () => api<Persona>('/personas', { method: 'PATCH', body: JSON.stringify({ name: base.name, expected_version: base.version, profile: draft.profile, include_add: lines(draft.include), include_remove: base.include || [], exclude_add: lines(draft.exclude), exclude_remove: base.exclude || [], skip_tags: !draft.updateTags, note: draft.note }) }), onSuccess: value => accept(value, `已保存为版本 ${value.version}`) })
-  const evolve = useMutation({ mutationFn: (snapshot: Persona) => api<PersonaProposal>('/personas/evolve', { method: 'POST', body: JSON.stringify({ name: snapshot.name, expected_version: snapshot.version, instruction, use_feedback: useFeedback }) }), onMutate: () => setPreview(null), onSuccess: (proposal, snapshot) => { setPreview({ base: snapshot, proposal }); setMessage('提案已生成，尚未修改画像。') } })
-  const apply = useMutation({ mutationFn: (proposal: PersonaProposal) => api<Persona>('/personas/apply', { method: 'POST', body: JSON.stringify(proposal) }), onSuccess: value => accept(value, `提案已应用，当前版本 ${value.version}`, true) })
-  const rollback = useMutation({ mutationFn: (version: number) => api<Persona>('/personas/rollback', { method: 'POST', body: JSON.stringify({ name: base.name, expected_version: base.version, version }) }), onSuccess: value => accept(value, `已回滚，创建了新版本 ${value.version}`, true) })
+  const save = useMutation({ mutationFn: () => api('/api/personas', 'patch', { body: { name: base.name, expected_version: base.version, profile: draft.profile, include_add: lines(draft.include), include_remove: base.include || [], exclude_add: lines(draft.exclude), exclude_remove: base.exclude || [], skip_tags: !draft.updateTags, note: draft.note } }), onSuccess: value => accept(value, `已保存为版本 ${value.version}`) })
+  const evolve = useMutation({ mutationFn: (snapshot: Persona) => api('/api/personas/evolve', 'post', { body: { name: snapshot.name, expected_version: snapshot.version, instruction, use_feedback: useFeedback } }), onMutate: () => setPreview(null), onSuccess: (proposal, snapshot) => { setPreview({ base: snapshot, proposal }); setMessage('提案已生成，尚未修改画像。') } })
+  const apply = useMutation({ mutationFn: (proposal: PersonaProposal) => api('/api/personas/apply', 'post', { body: proposal }), onSuccess: value => accept(value, `提案已应用，当前版本 ${value.version}`, true) })
+  const rollback = useMutation({ mutationFn: (version: number) => api('/api/personas/rollback', 'post', { body: { name: base.name, expected_version: base.version, version } }), onSuccess: value => accept(value, `已回滚，创建了新版本 ${value.version}`, true) })
   const busy = save.isPending || evolve.isPending || apply.isPending || rollback.isPending
   const errors = [save.error, evolve.error, apply.error, rollback.error].filter((value): value is Error => !!value)
   const conflict = errors.some(isConflict)
   const historical = history.data?.find(value => value.version === viewVersion)
   async function discardAndRefresh() {
-    const value = await api<Persona>(personaUrl(base.name))
+    const value = await api('/api/personas/current', 'get', { query: { name: base.name } })
     accept(value, '已放弃草稿和演化输入，载入服务器最新版本。', true)
     save.reset(); evolve.reset(); apply.reset(); rollback.reset()
   }
@@ -107,10 +106,10 @@ export default function Personas() {
   const [hasWork, setHasWork] = useState(false)
   const [createBusy, setCreateBusy] = useState(false)
   const [switchTo, setSwitchTo] = useState<string | null>(null)
-  const list = useQuery({ queryKey: ['personas'], queryFn: () => api<Persona[]>('/personas') })
+  const list = useQuery({ queryKey: ['personas'], queryFn: () => api('/api/personas', 'get') })
   const name = params.get('name') || (list.data?.some(value => value.name === 'default') ? 'default' : list.data?.[0]?.name || '')
   const creating = showCreate || list.data?.length === 0
-  const current = useQuery({ queryKey: ['persona', name, 'current'], queryFn: () => api<Persona>(personaUrl(name)), enabled: !!name && !creating })
+  const current = useQuery({ queryKey: ['persona', name, 'current'], queryFn: () => api('/api/personas/current', 'get', { query: { name } }), enabled: !!name && !creating })
   return <>
     <header className="page-heading"><div><p className="eyebrow">A PROFILE THAT GROWS WITH YOU</p><h1>Persona<span className="accent">.</span></h1><p className="muted">把兴趣写清楚，把改变留有余地。</p></div>{!!list.data?.length && <button disabled={createBusy || (hasWork && !showCreate)} onClick={() => setShowCreate(!showCreate)}>{showCreate ? '放弃新建' : '新建画像'}</button>}</header>
     {list.error && <Notice error>{list.error.message}</Notice>}{list.isPending && <Notice>正在读取画像…</Notice>}

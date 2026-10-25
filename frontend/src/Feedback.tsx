@@ -1,5 +1,5 @@
 import { useIsMutating, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { api, type Feedback } from './api'
+import { api } from './api'
 
 // Cache only the display state: optimistic votes do not fabricate server IDs
 // or timestamps. Mutation context owns the old persona key across selection changes.
@@ -11,10 +11,10 @@ export default function FeedbackButtons({ itemId, persona, disabled = false }: {
   const client = useQueryClient()
   const key = feedbackKey(itemId, persona)
   const query = useQuery({ queryKey: key, enabled: !!persona && !disabled,
-    queryFn: async () => { const value = await api<Feedback | null>(`/items/${encodeURIComponent(itemId)}/feedback?${new URLSearchParams({ persona })}`); return { rating: value?.rating ?? null } as FeedbackState } })
+    queryFn: async () => { const value = await api('/api/items/{item_id}/feedback', 'get', { path: { item_id: itemId }, query: { persona } }); return { rating: value?.rating ?? null } } })
   const active = useIsMutating({ mutationKey: key }) > 0
   const vote = useMutation({ mutationKey: key, retry: false,
-    mutationFn: (value: Vote) => api<Feedback>(`/items/${encodeURIComponent(value.itemId)}/feedback`, { method: 'POST', body: JSON.stringify({ persona: value.persona, rating: value.rating }) }),
+    mutationFn: (value: Vote) => api('/api/items/{item_id}/feedback', 'post', { path: { item_id: value.itemId }, body: { persona: value.persona, rating: value.rating, note: '' } }),
     onMutate: async value => {
       const target = feedbackKey(value.itemId, value.persona)
       await client.cancelQueries({ queryKey: target, exact: true })
