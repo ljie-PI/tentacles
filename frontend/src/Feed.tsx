@@ -6,14 +6,19 @@ import { Drawer, Notice, ScoreBadge } from './shared'
 import FeedbackButtons from './Feedback'
 import { useDisplayTime, type TimeFormatter } from './display-time'
 
+function MatchPoints({ points }: { points: string[] | undefined }) {
+  if (!points || points.length === 0) return null
+  return <ul className="match-points">{points.map(point => <li key={point}>{point}</li>)}</ul>
+}
+
 function ItemCard({ item, open, formatTime, persona, feedbackDisabled }: { item: Item; open: () => void; formatTime: TimeFormatter; persona: string; feedbackDisabled: boolean }) {
   return <article className="item-card">
     <div className="item-meta"><span className="source-dot" />{item.source_id}<span>·</span>{formatTime(item.published || item.fetched_at)}<span className="kind">{item.kind}</span></div>
     {item.updated_at && <p className="muted small"><span className="tag">已更新</span> {formatTime(item.updated_at)}</p>}
     <h2><button className="text-button item-title" onClick={open}>{item.title}</button></h2>
     <p className="summary">{item.summary || '暂无摘要，打开详情阅读正文。'}</p>
-    <footer className="card-footer"><div className="tags">{item.score != null && <ScoreBadge score={item.score} />}{(item.tags || []).map(tag => <span className="tag" key={tag}>{tag}</span>)}{item.stage && <span className="tag">阶段：{item.stage}</span>}{item.passed != null && <span className="tag">{item.passed ? '通过' : '未通过'}</span>}</div><button className="text-button read-link" onClick={open}>阅读详情 <span aria-hidden="true">↗</span></button></footer>
-    {item.reason && <p className="muted small">{item.reason}</p>}
+    <footer className="card-footer"><div className="tags">{item.match_score != null && <ScoreBadge score={item.match_score} />}{(item.topics || []).map(tag => <span className="tag" key={tag}>{tag}</span>)}{item.match_level !== 'unscored' && <span className="tag">分档：{item.match_level}</span>}{item.stage && <span className="tag">阶段：{item.stage}</span>}{item.passed != null && <span className="tag">{item.passed ? '通过' : '未通过'}</span>}</div><button className="text-button read-link" onClick={open}>阅读详情 <span aria-hidden="true">↗</span></button></footer>
+    <MatchPoints points={item.match_points} />
     <FeedbackButtons itemId={item.id} persona={persona} disabled={feedbackDisabled} />
   </article>
 }
@@ -35,7 +40,8 @@ function Detail({ id, close, persona, feedbackDisabled }: { id: string; close: (
       <FeedbackButtons itemId={item.id} persona={persona} disabled={feedbackDisabled} />
       {item.content_truncated && <Notice>正文已截断至 1000 字/词，完整内容请打开原站链接阅读。</Notice>}
       <div className="item-content">{item.content || item.summary || '此条目没有正文。'}</div>
-      {(item.evaluations || []).length > 0 && <section className="evaluations"><h3>Pipeline 评估</h3>{(item.evaluations || []).map(e => <div key={`${e.pipeline_id}-${e.persona_version}`}><strong>{e.pipeline_id}</strong><ScoreBadge score={e.score} /><span className="tag">{e.stage} · {e.passed ? '通过' : '未通过'}</span><p>{e.reason}</p></div>)}</section>}
+      {(item.match_points || []).length > 0 && <section className="evaluations"><h3>匹配点</h3><MatchPoints points={item.match_points} /></section>}
+      {(item.evaluations || []).length > 0 && <section className="evaluations"><h3>Pipeline 评估</h3>{(item.evaluations || []).map(e => <div key={`${e.pipeline_id}-${e.persona_version}`}><strong>{e.pipeline_id}</strong><ScoreBadge score={e.score} /><span className="tag">{e.stage} · {e.passed ? '通过' : '未通过'}</span>{(e.tags || []).map(tag => <span className="tag" key={tag}>{tag}</span>)}<MatchPoints points={e.match_points} /></div>)}</section>}
     </>}
   </Drawer>
 }
