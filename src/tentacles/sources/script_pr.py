@@ -247,14 +247,19 @@ async def _open_pr(repo: Path, branch: str) -> _OpenPr | None:
 
 
 async def _gh_pr_create(repo: Path, *, spec: BrowserPrSpec, branch: str, source_id: str,
-                        body_file: Path) -> str | None:
+                        body_file: Path) -> str:
+    """The pull request URL `gh pr create` printed; no URL is a step we cannot report."""
     argv = ["pr", "create", "--base", spec.base_branch, "--head", branch,
             "--title", _pr_title(source_id), "--body-file", str(body_file)]
     for label in spec.labels:
         argv += ["--label", label]
     result = await _gh(repo, *argv)
-    match = _PR_URL.search(result.out + "\n" + result.err)
-    return match.group(0) if match else None
+    # `gh` prints the new pull request URL last on stdout; warnings may precede it.
+    urls = _PR_URL.findall(result.out) or _PR_URL.findall(result.err)
+    if not urls:
+        raise ScriptPrError(
+            f"gh pr create printed no pull request URL: {_reason(result)}")
+    return urls[-1]
 
 
 async def _remove_worktree(repo: Path, worktree: Path, parent: Path) -> None:
