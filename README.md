@@ -2,7 +2,7 @@
 
 个人信息与新闻管理系统：从多种信息源抓取内容，按个人 persona 过滤，再用 LLM 加工成日报、深度报道或邮件简报。
 
-> 已支持配置驱动的 RSS、IMAP、网页与有界面 Chrome 浏览器抓取、去重入库、持久化调度、命名模型、版本化 Persona 与反馈演化，以及 keyword/decision/llm 级联过滤和 digest/deep/summarize/none 处理器。Web 端已提供 Feed、Sources、Pipelines、Reports、Runs、Settings 和 Persona 管理；文档见 [用户手册](docs/manual/user/README.md) 与 [Agent CLI 手册](docs/manual/agent-cli/README.md)，实现与验证范围见 [规格核对](docs/agents/spec-18-audit.md)。
+> 已支持配置驱动的 RSS、IMAP、网页与有界面 Chrome 浏览器抓取、去重入库、持久化调度、命名模型、版本化 Persona 与反馈演化，以及 keyword 与统一 semantic 级联过滤和 digest/deep/summarize/none 处理器。Web 端已提供 Feed、Sources、Pipelines、Reports、Runs、Settings 和 Persona 管理；文档见 [用户手册](docs/manual/user/README.md) 与 [Agent CLI 手册](docs/manual/agent-cli/README.md)，实现与验证范围见 [规格核对](docs/agents/spec-18-audit.md)。
 
 ## 网页与 REST API
 
@@ -391,43 +391,45 @@ pipeline 的频率自动运行；手动命名调用不受开关限制。确认�
 
 批次关联规则、截止日期排序、提示词格式和费用语义见 [画像、过滤与报告流水线](docs/manual/user/pipelines-and-personas.md)。
 
-## Decision（JEV）过滤
+## 语义过滤（`type: semantic`）
 
-可以在 pipeline.filters 中加入 OpenRouter Decisions 阶段：
-
-```yaml
-- type: decision
-  model: decision          # 可省略，使用 defaults.models.decision
-  relevance_type: noul     # 或 score：四级有序量表
-  reject_below: 0.3
-  accept_above: 0.8
-```
-
-每条候选内容分别判断“用户是否想读”；Persona 有兴趣标签时同时选择一个标签（或 other）。
-score 的原始分数按量表最大值归一化，保存原分数、概率/置信度及实际返回的模型名。
-模型的 `concurrency` 控制固定 worker 池；结果保持输入对应关系，429 对同一批所有 worker 共享暂停点。
-401/403/非瞬时 402 会停止新派发，等待在途请求完成，再将本批记为失败；400/413 只影响该条目。
-已完成的最终评估仍缓存，重试不会为它们重复请求；取消也会保留已返回的已知用量和成本。
-
-默认要求服务方不收集数据，额外 provider 路由偏好不会移除这个默认值；只有显式 `data_collection: allow` 才放宽。
-示例配置中的阶段保持注释，启用后会实际调用模型并产生费用。`models test decision` 可先用固定 noul 题探测。
-
-## LLM 批量过滤
-
-对前面阶段拿不准的条目，可追加一层聊天模型批量分类：
+Chat 模型与 OpenRouter Decisions（JEV）共用同一个配置块；**跑哪条链路由模型自身的 `kind` 决定**，不必改配置结构。
+旧的 `type: llm` / `type: decision` 写法仍然合法，只会影响省略 `model` 时取哪个默认值。
 
 ```yaml
-- type: llm
-  model: fast             # 可省略，默认 defaults.models.filter
-  batch_size: 20          # 1–100
+- type: semantic
+  model: fast               # 可省略：semantic/llm 用 defaults.models.filter，decision 用 defaults.models.decision
+  batch_size: 20            # 每次 20 条一个 batch，也是增量落库检查点（1–100）
+  summary_chars: 160        # 每条附带的短摘要上限，0 表示只发标题（0–1000）
   reject_below: 0.5
+  accept_above: 0.85
+  # 仅当所选模型 kind 为 decision（JEV）时生效：
+  relevance_type: noul              # 或 score：四级有序量表归一化
+  jev_batch_mode: packed_questions  # 或 windowed_pool：逐条并发
 ```
 
-请求包含有序兴趣标签、画像和编号标题列表；每条最多一个标签和一句短理由。
-未返回的编号按 0 分处理，未知编号忽略。脏 JSON 会先由共享提取器恢复；无法可靠解析的批次仅拆成两半各重试一次，
-失败半批不会被误存成“无关”，而是交给下一阶段或留待重试。重试仍计入已知用量/成本。
+**Chat 链路**：每批最多 20 条，请求包含有序兴趣标签、画像与编号条目（含 `summary[:summary_chars]`）。
+每条可返回多个 `tag_ids` 与多条具体 `match_points`（兼容旧的单 `tag_id` / 单 `reason`）。
+未返回的编号按 0 分处理，未知编号忽略。脏 JSON 先由共享提取器恢复；无法可靠解析的批次仅拆成两半各重试一次，
+失败半批不会被误存成“无关”，而是写入故障账本（`llm_batch_parse_error`）并交给下一阶段或留待重试。重试仍计入已知用量/成本。
 无兴趣标签时，使用 profile 中非空条目行作为有序兴趣单元；空画像不盲目生成负面评估。
-默认示例仍不自动启用此付费阶段，确认模型和费用后可取消对应配置注释。
+
+**JEV 链路**：利用 `/alpha/decisions` 在同一 `state` 上同时回答多道命名题的能力做两步打包，20 条共享同一份 Persona：
+先问 `r_1..r_20` 相关性，只为过线幸存项补问 `t_<编号>` 兴趣标签，Persona 的重复传输从 20 份降到 2 份。
+端点以 HTTP 400/413 拒绝打包体时，该批自动对半重试一次；对半后仍被拒则剩余批次回退 `windowed_pool`
+（固定 `min(concurrency, batch_size)` 个 worker 逐条并发），429 暂停点与 401/403/非瞬时 402 终止信号对整批共享。
+匹配点不再硬编码 `decision relevance`，而是生成可读文本，例如
+`JEV 相关性 0.91，命中优先兴趣「AI与广告算法」（推荐系统、CTR预估与机器学习论文）`；`score` 模式还会写明量表档位。
+默认要求服务方不收集数据，额外 provider 路由偏好不会移除这个默认值；只有显式 `data_collection: allow` 才放宽。
+
+**跨阶段汇总**：最终评估合并条目走过所有阶段的正向证据 —— `topics` / `tags` 与 `match_points` 按阶段顺序去重
+（匹配点最多保留 5 条），兼容字段 `reason` 取首条匹配点。Web `Feed` 与 `items list/show` 展示同一份数据。
+
+**每批增量落库**：候选按 `batch_size` 分块推进（纯 `keyword` 流水线按 100 条一块），每完成一块立即在 Run 租约与
+`input_revision` 围栏下写入 `evaluations`。中途取消、断网或崩溃保留已完成分块的结论与已知用量/成本，
+重跑只评估剩余未评条目。
+
+默认示例仍把该阶段保持注释，确认模型和费用后可取消配置注释。`models test decision` 可先用固定 noul 题探测连通性。
 
 ## 自动抓取
 
