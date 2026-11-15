@@ -192,8 +192,11 @@ app:
 **归档不变量**
 
 1. **去重墓碑永久留在热库**：条目迁出时，热库只保留极窄的 `archived_identities`
-   （`source_id`、`external_id`、`url`、`fingerprint`、归档年份），`source_seen_ids` 一并保留，因此归档之后
-   任何信息源再抓到旧文章都不会被当成 `new`：按外部身份、原文链接与内容指纹三条规则都会判为重复。
+   （`source_id`、`external_id`、`url`、`fingerprint`、原条目的 `kind`、`identity_policy`、归档年份），
+   `source_seen_ids` 一并保留，因此归档之后任何信息源再抓到旧文章都不会被当成 `new`。墓碑走的是与热行
+   **完全相同**的三条去重规则：外部身份总是判重；原文链接只在原条目为 `standard` 策略时判重；
+   内容指纹只在原条目为 `standard` 且非 email 时判重。所以 `revision` 链接、邮件指纹在归档前后
+   都不会压制新条目（schema 19 之前写入的旧墓碑按最保守的 `standard`、非 email 继续参与三条规则）。
 2. **活跃关联自动豁免**：仍有未决错误（`errors list --unresolved`）、处于 `persona_update.feedback_window`
    活跃反馈窗口内、或最近 30 天还有更新活动的条目一律留在热库，不会产生悬空引用。
 3. **报告自洽**：`reports` 自带完整 `markdown`，其 `item_ids` 指向已归档条目时仍可通过

@@ -458,9 +458,11 @@ tentacles --json storage archive --before 2025-01-01
 
 ### 语义与安全边界
 
-- **去重墓碑让旧文不复活**：迁出的条目在热库留下 `archived_identities`（含源内外部身份、原文链接、内容指纹），
-  并且 `source_seen_ids` 永不清理。归档后再抓同一个源，旧文章既不会变成 `new`，也不会重新生成条目。
-  需要正文时用 `items show <ID> --include-archive`。
+- **去重墓碑让旧文不复活**：迁出的条目在热库留下 `archived_identities`（含源内外部身份、原文链接、内容指纹，
+  以及原条目的 `kind` 与 `identity_policy`），并且 `source_seen_ids` 永不清理。归档后再抓同一个源，旧文章既不会
+  变成 `new`，也不会重新生成条目。墓碑按与热行相同的三条规则判重：外部身份总是判重，原文链接只在原条目为
+  `standard` 策略时判重，内容指纹只在原条目为 `standard` 且非 email 时判重。需要正文时用
+  `items show <ID> --include-archive`。
 - **两阶段、可重跑**：先写冷库并校验其 `items_fts`，再在单个热库写事务里写墓碑并删除冷行。中途被打断时热库
   要么全有要么全无；重跑幂等（不会重复计数），已完成的部分直接跳过。
 - **不动的数据**：`reports`（自带完整 markdown）永远留在热库；`pipeline_consumption` 与 `feedback` 行保留，

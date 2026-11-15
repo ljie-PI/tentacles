@@ -398,7 +398,21 @@ def _migrate_v18(conn: sqlite3.Connection) -> None:
                  " WHERE fingerprint != ''")
 
 
-MIGRATIONS: list[Callable[[sqlite3.Connection], None]] = [_migrate_v1, _migrate_v2, _migrate_v3, _migrate_v4, _migrate_v5, _migrate_v6, _migrate_v7, _migrate_v8, _migrate_v9, _migrate_v10, _migrate_v11, _migrate_v12, _migrate_v13, _migrate_v14, _migrate_v15, _migrate_v16, _migrate_v17, _migrate_v18]
+def _migrate_v19(conn: sqlite3.Connection) -> None:
+    # 墓碑要按与热行相同的身份规则去重，因此记住原条目的 kind 与 identity_policy；
+    # 旧库里的墓碑没有这两列，按最保守的 standard 加非 email 继续参与全部三条规则。
+    conn.execute("ALTER TABLE archived_identities ADD COLUMN kind TEXT NOT NULL DEFAULT 'rss'")
+    conn.execute("ALTER TABLE archived_identities ADD COLUMN identity_policy TEXT NOT NULL DEFAULT 'standard'")
+    # 守卫条件进了查询，部分索引必须带同样的条件才能继续被选中
+    conn.execute('DROP INDEX IF EXISTS idx_archived_identities_url')
+    conn.execute("CREATE INDEX idx_archived_identities_url ON archived_identities (url)"
+                 " WHERE url != '' AND identity_policy = 'standard'")
+    conn.execute('DROP INDEX IF EXISTS idx_archived_identities_fp')
+    conn.execute('CREATE INDEX idx_archived_identities_fp ON archived_identities (fingerprint)'
+                 " WHERE fingerprint != '' AND identity_policy = 'standard' AND kind != 'email'")
+
+
+MIGRATIONS: list[Callable[[sqlite3.Connection], None]] = [_migrate_v1, _migrate_v2, _migrate_v3, _migrate_v4, _migrate_v5, _migrate_v6, _migrate_v7, _migrate_v8, _migrate_v9, _migrate_v10, _migrate_v11, _migrate_v12, _migrate_v13, _migrate_v14, _migrate_v15, _migrate_v16, _migrate_v17, _migrate_v18, _migrate_v19]
 
 _ITEM_COLUMNS = ("id, source_id, kind, external_id, url, page_url, title, author, summary, content,"
                  " content_truncated, published, fetched_at, fingerprint, meta, identity_policy,"
@@ -873,10 +887,11 @@ class Store:
                 rows = self._conn.execute(f"SELECT url FROM items WHERE identity_policy = 'standard'"
                     f" AND url != '' AND url IN ({placeholders})", chunk).fetchall()
                 known.update(row[0] for row in rows)
-                # 已归档条目的原文链接同样是旧链接：URL 级身份从不分来源
+                # 已归档条目的原文链接同样是旧链接：URL 级身份从不分来源，
+                # 但只在原条目按 standard 策略参与 URL 去重时才成立
                 rows = self._conn.execute(
-                    f"SELECT url FROM archived_identities WHERE url != '' AND url IN ({placeholders})",
-                    chunk).fetchall()
+                    f"SELECT url FROM archived_identities WHERE url != '' AND identity_policy = 'standard'"
+                    f" AND url IN ({placeholders})", chunk).fetchall()
                 known.update(row[0] for row in rows)
         return known
 
@@ -1083,15 +1098,19 @@ class Store:
              it.fingerprint, json.dumps(it.meta, ensure_ascii=False), it.identity_policy, None, 1))
 
     # 三条规则各走自己的索引；合成一个 OR 查询会退化为全表扫描
-    # 已归档条目的墓碑参与同样三条规则，旧文因此不会以 new 重新入库
+    # 墓碑参与同样三条规则，且带上与热行完全一致的守卫条件：URL 只压制 standard，
+    # 指纹只压制 standard 且非 email，旧文因此不会以 new 重新入库
     _SUPPRESSED = "SELECT 1 FROM suppressed_items WHERE source_id = ? AND external_id = ?"
     _DUP_BY_ID = ("SELECT 1 FROM items WHERE source_id = ? AND external_id = ?"
                   " UNION ALL SELECT 1 FROM archived_identities WHERE source_id = ? AND external_id = ?")
     _DUP_BY_URL = ("SELECT 1 FROM items WHERE url = ? AND url != '' AND identity_policy = 'standard'"
-                   " UNION ALL SELECT 1 FROM archived_identities WHERE url = ? AND url != ''")
+                   " UNION ALL SELECT 1 FROM archived_identities"
+                   " WHERE url = ? AND url != '' AND identity_policy = 'standard'")
     _DUP_BY_FP = ("SELECT 1 FROM items WHERE fingerprint = ? AND kind != 'email'"
                   " AND identity_policy = 'standard'"
-                  " UNION ALL SELECT 1 FROM archived_identities WHERE fingerprint = ? AND fingerprint != ''")
+                  " UNION ALL SELECT 1 FROM archived_identities"
+                  " WHERE fingerprint = ? AND fingerprint != '' AND kind != 'email'"
+                  " AND identity_policy = 'standard'")
 
     def _is_duplicate(self, it: Item) -> bool:
         c = self._conn
@@ -1260,9 +1279,11 @@ class Store:
                     identities.setdefault(alias['source_id'], []).append(alias['external_id'])
                 self._conn.executemany(
                     'INSERT OR REPLACE INTO archived_identities'
-                    ' (source_id, external_id, url, fingerprint, archive_year, archived_at)'
-                    ' VALUES (?, ?, ?, ?, ?, ?)',
-                    [(source_id, external_id, it.url, it.fingerprint, year, stamp)
+                    ' (source_id, external_id, url, fingerprint, kind, identity_policy,'
+                    ' archive_year, archived_at)'
+                    ' VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+                    [(source_id, external_id, it.url, it.fingerprint, it.kind,
+                      it.identity_policy, year, stamp)
                      for source_id, external_ids in identities.items()
                      for external_id in dict.fromkeys(external_ids)])
                 self._conn.execute('DELETE FROM source_item_aliases WHERE item_id = ?', (it.id,))

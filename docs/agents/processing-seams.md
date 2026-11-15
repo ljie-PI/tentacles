@@ -166,9 +166,13 @@ rows and index before `Store.archive_move` tombstones identities and deletes the
 rows in one transaction. Cold databases are sealed out of WAL mode so a plain
 read-only `Store(read_only=True)` never creates side files. `--include-archive`
 queries each database separately and merges in memory, which keeps cross-year reads
-independent of SQLite's ten-database `ATTACH` limit. Dedup reads `archived_identities`
-through the same identity rules as live rows, so an archived article can never return
-as `new`.
+independent of SQLite's ten-database `ATTACH` limit. Schema 19 adds
+`archived_identities.kind` and `identity_policy` so a tombstone is read through the
+exact identity rules of the row it replaced: external identity always suppresses,
+URL only for `standard`, fingerprint only for `standard` non-email. An archived
+`revision` URL and an archived email fingerprint therefore stay as unsuppressing as
+they were while hot; `Store.seen_links` applies the same URL guard. Tombstones
+written before schema 19 keep the conservative `standard`/non-email defaults.
 Pipeline activity is `COALESCE(updated_at, fetched_at)` with expression indexes;
 the Feed deliberately retains `COALESCE(published, fetched_at)`. Filter captures
 the input revision before scoring, and evaluation/report publication validates it
