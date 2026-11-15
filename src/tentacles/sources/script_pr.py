@@ -5,9 +5,16 @@ reaches the base branch only through human review. This module owns that
 hand-off: a throwaway `git worktree` outside the repository commits exactly
 `<scripts_dir>/<source_id>.py`, pushes it to the stable
 `auto/browser-source-<source_id>` branch and opens — or comments on — a GitHub
-PR with the configured labels. It never pushes to the base branch, never
-force-pushes, never stages a second file and never touches the user's working
-tree or index; the worktree and its scratch directory are removed on every path.
+PR with the configured labels. The base branch is never a push destination, no
+second file is ever staged and the user's working tree and index are never
+touched; the worktree and its scratch directory are removed on every path.
+
+With an open PR the review branch is fast-forwarded from its own fetched head.
+Without one the commit starts from a freshly fetched base and replaces the
+same-named remote branch that a squash-merged or abandoned publish left behind:
+that single update uses `--force-with-lease` pinned to the sha inspected right
+before the push, and any computed branch that would land on the base branch is
+refused outright.
 
 A `git`/`gh` failure is a result, not an exception: the script is already
 installed and the fetched items still belong in the Store, so the caller records
@@ -106,6 +113,7 @@ async def publish_script(script: Path, *, source_id: str, spec: BrowserPrSpec, r
             "error", branch,
             detail="refusing to publish credential-like content: " + ", ".join(sorted(set(findings))))
     try:
+        _review_refspec(branch, base=spec.base_branch)
         repo = await _repo_root(script)
         relative = _relative_script(repo, script)
         if not spec.enabled:
@@ -159,8 +167,8 @@ async def _stage_one(worktree: Path, relative: str, text: str) -> bool:
 async def _publish(repo: Path, relative: str, text: str, body: str, *, branch: str,
                    spec: BrowserPrSpec, source_id: str, reason: str) -> ScriptPublication:
     """The worktree lifecycle: one file, one commit, one push, one PR action."""
-    open_pr = await _open_pr(repo, branch)
     remote = await _remote(repo)
+    open_pr = await _open_pr(repo, branch)
     start = await _start_ref(repo, remote=remote, branch=branch if open_pr else None,
                              base=spec.base_branch)
     parent = Path(tempfile.mkdtemp(prefix="tentacles-script-pr-"))
@@ -173,9 +181,8 @@ async def _publish(repo: Path, relative: str, text: str, body: str, *, branch: s
             return ScriptPublication("unchanged", branch, pr_url=open_pr.url if open_pr else None,
                                      detail=f"{relative} already matches {start}")
         await _git(worktree, "commit", "--no-verify", "-m", _commit_message(source_id, reason))
-        # A plain refspec push: the base branch is never the destination and no
-        # forced update is ever requested.
-        await _git(worktree, "push", "--no-verify", remote, f"HEAD:refs/heads/{branch}")
+        await _push_review_branch(worktree, remote=remote, branch=branch,
+                                  base=spec.base_branch, append=open_pr is not None)
         if open_pr is not None:
             await _gh(repo, "pr", "comment", str(open_pr.number), "--body-file", str(body_file))
             return ScriptPublication("updated", branch, pr_url=open_pr.url,
@@ -216,17 +223,63 @@ async def _remote(repo: Path) -> str:
 
 
 async def _start_ref(repo: Path, *, remote: str, branch: str | None, base: str) -> str:
-    """The commit the worktree starts from: the existing PR branch, else the base."""
+    """The commit the worktree starts from: the fetched PR branch, else a fetched base."""
     if branch is not None:
+        await _fetch(repo, remote, branch)
         for ref in (f"{remote}/{branch}", branch):
             if await _git_ok(repo, "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}"):
                 return ref
-        await _git(repo, "fetch", "--no-tags", remote, branch)
-        return f"{remote}/{branch}"
+        raise ScriptPrError(f"neither {remote}/{branch} nor {branch} exists")
+    await _fetch(repo, remote, base)
     for ref in (f"{remote}/{base}", base):
         if await _git_ok(repo, "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}"):
             return ref
     raise ScriptPrError(f"neither {remote}/{base} nor {base} exists")
+
+
+async def _fetch(repo: Path, remote: str, ref: str) -> None:
+    """Refresh one remote-tracking ref; an unreachable remote falls back to what we have."""
+    result = await _run(["git", "-C", str(repo), "fetch", "--no-tags", remote, ref])
+    if result.code != 0:
+        log.warning("browser: cannot fetch %s/%s (%s)", remote, ref, _reason(result))
+
+
+def _review_refspec(branch: str, *, base: str) -> str:
+    """The only push destination this module allows, and never the base branch."""
+    destination = f"refs/heads/{branch}"
+    if branch == base or destination == f"refs/heads/{base}":
+        raise ScriptPrError(
+            f"refusing to push {destination}: it is the base branch {base!r}")
+    return destination
+
+
+async def _push_review_branch(worktree: Path, *, remote: str, branch: str, base: str,
+                              append: bool) -> None:
+    """Fast-forward an open PR's branch, else replace the stale same-named branch.
+
+    The replacement is a `--force-with-lease` pinned to the sha inspected just
+    before the push, so a branch somebody else moved in between still fails.
+    """
+    destination = _review_refspec(branch, base=base)
+    if append:
+        await _git(worktree, "push", "--no-verify", remote, f"HEAD:{destination}")
+        return
+    previous = await _remote_branch_sha(worktree, remote=remote, branch=branch)
+    lease = f"--force-with-lease={destination}:{previous or ''}"
+    await _git(worktree, "push", "--no-verify", lease, remote, f"HEAD:{destination}")
+
+
+async def _remote_branch_sha(repo: Path, *, remote: str, branch: str) -> str | None:
+    """The commit the remote review branch points at now; None when it is absent."""
+    ref = f"refs/heads/{branch}"
+    result = await _run(["git", "-C", str(repo), "ls-remote", "--heads", remote, ref])
+    if result.code != 0:
+        raise ScriptPrError(f"cannot inspect {remote}/{branch}: {_reason(result)}")
+    for line in result.out.splitlines():
+        sha, _, found = line.partition("\t")
+        if found.strip() == ref and sha.strip():
+            return sha.strip()
+    return None
 
 
 async def _open_pr(repo: Path, branch: str) -> _OpenPr | None:
