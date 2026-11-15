@@ -191,8 +191,8 @@ async def _publish(repo: Path, relative: str, text: str, body: str, *, branch: s
     parent = Path(tempfile.mkdtemp(prefix="tentacles-script-pr-"))
     worktree = parent / "worktree"
     body_file = parent / "pr-body.md"
-    body_file.write_text(body, encoding="utf-8")
     try:
+        body_file.write_text(body, encoding="utf-8")
         await _git(repo, "worktree", "add", "--detach", str(worktree), start)
         if await _stage_one(worktree, relative, text):
             return ScriptPublication("unchanged", branch, pr_url=open_pr.url if open_pr else None,
