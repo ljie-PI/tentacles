@@ -93,6 +93,27 @@ refresh eligible details without another extraction. Old cursors may need one
 paid build; failed builds/details never advance the cache. No historical URLs
 are revisited.
 
+`WebOptions.on_detail_error` decides what one failed detail page costs.
+`fail_batch` (the default) keeps the atomic batch: it records every failure of
+that round first and then raises, so the rollback still leaves one ledger row per
+broken target. `record_and_skip` drops only the failed pages from `items` and
+`observations` and removes their identities from the cursor's `seen` list; it
+never touches `source_seen_ids`, because a skipped page never reaches
+`upsert_items`. Both properties are what makes the next fetch classify the
+skipped target as `new` again and lets its later success resolve the rows. A
+failed target must therefore never be added to `seen` or to the descriptor cache
+by any other path.
+
+Sources and pipelines report per-target failures through callbacks, not the
+ledger: `FetchContext.record_error`, `FilterBatch.record_error` and the
+`record_error` argument of `Processor.process` all point at the owning
+`RunOperation`. An adapter that records a failure itself raises
+`sources.base.DiagnosedError`, which `fetch_source` recognises
+(`exc.diagnosed`) so one failure never produces both a concrete row and a generic
+whole-source row. `filtering.filter_items` records an item error only where the
+cascade finally gives up on that item: `score=None` on the last stage, or any
+stage that aborts the batch.
+
 Schema 13 adds source-scoped alias mappings without changing existing identities;
 schema 12 preserves existing rows with revision 1 and null content-update time.
 Schema 14 adds `items.page_url`, `items.content_truncated` and
