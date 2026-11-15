@@ -136,6 +136,8 @@ class ItemView(BaseModel):
             self.match_score = self.score
         if not self.match_points and self.reason:
             self.match_points = [self.reason]
+        if not self.reason and self.match_points:
+            self.reason = self.match_points[0]
         return self
 
     @computed_field
