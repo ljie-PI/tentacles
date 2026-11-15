@@ -21,6 +21,10 @@ class SemanticStage:
 
     models = (ModelRequirement('filter', None),)
 
+    def batch_size(self, stage: StageSpec) -> int | None:
+        assert isinstance(stage, SemanticSpec)
+        return stage.batch_size
+
     def item_error_code(self, scored: StageScore) -> str:
         return 'llm_batch_parse_error' if scored.details.get('executor') == 'chat' else 'decision_item_error'
 

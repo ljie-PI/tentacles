@@ -74,6 +74,9 @@ def _keyword(item: Item, persona: PersonaView, stage: KeywordSpec, index: int) -
 class KeywordStage:
     models: tuple[ModelRequirement, ...] = ()
 
+    def batch_size(self, stage: StageSpec) -> int | None:
+        return None  # Scored one item at a time; there is no paid request to size.
+
     def item_error_code(self, scored: StageScore) -> str:
         return 'regex_timeout' if scored.error in {'TimeoutError', 'Timeout'} else 'unexpected_exception'
 

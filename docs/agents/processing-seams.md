@@ -41,8 +41,9 @@ dispatch branches to the cascade, manager, or configuration validation.
   it receives the evaluations of one completed chunk and the manager publishes
   them through `RunOperation.checkpoint` → `Store.checkpoint_run`, under the same
   lease fence and `input_revision` check as the final commit but without ending
-  the Run. Chunks follow the semantic `batch_size` (100 for a keyword-only
-  cascade), which is why `batch_size` is also the paid request size. A cancelled
+  the Run. Chunks follow the largest `Stage.batch_size` the stage's own adapter
+  declares (100 when nothing declares one, as in a keyword-only cascade), which is
+  why a semantic `batch_size` is also the paid request size. A cancelled
   or failed Run keeps every checkpointed chunk, and the next run's candidate
   query skips those items by itself.
 - A Processor returns location-free `ReportDraft` values, possibly empty, and

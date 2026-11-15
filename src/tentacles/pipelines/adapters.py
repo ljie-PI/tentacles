@@ -36,6 +36,14 @@ class Stage(Protocol):
     @property
     def models(self) -> tuple[ModelRequirement, ...]: ...
 
+    def batch_size(self, stage: StageSpec) -> int | None:
+        """The paid request size this stage wants for one configured stage.
+
+        None: the stage makes no paid requests, so it does not constrain how
+        many items the cascade finishes before it persists a chunk.
+        """
+        ...
+
     def item_error_code(self, scored: StageScore) -> str:
         """The shared vocabulary code for an item this stage could not score."""
         ...

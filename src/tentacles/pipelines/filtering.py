@@ -8,19 +8,19 @@ from tentacles.diagnostics import DiagnosticEvent
 from tentacles.models import Item
 from tentacles.personas.models import PersonaView
 from tentacles.pipelines.adapters import Stage
-from tentacles.pipelines.config import PipelineSpec, SemanticSpec, StageSpec
+from tentacles.pipelines.config import PipelineSpec, StageSpec
 from tentacles.llm.registry import ModelRegistry
 from tentacles.pipelines.registry import STAGES
 from tentacles.pipelines.models import MAX_MATCH_POINTS, Evaluation, StageScore, StageBatch, FilterBatch
 
-# 纯 keyword 级联没有付费请求，仍按大块推进以免频繁写库。
-CHUNK_WITHOUT_SEMANTIC = 100
+# 没有任何付费批次的级联仍按大块推进，避免频繁写库与检查点。
+CHUNK_WITHOUT_BATCH = 100
 
 
 def _chunk_size(spec: PipelineSpec) -> int:
     """Finished chunks are persisted, so the paid batch size is also the checkpoint unit."""
-    return max((stage.batch_size for stage in spec.filters if isinstance(stage, SemanticSpec)),
-               default=CHUNK_WITHOUT_SEMANTIC)
+    sizes = (STAGES[stage.type].batch_size(stage) for stage in spec.filters)
+    return max((size for size in sizes if size is not None), default=CHUNK_WITHOUT_BATCH)
 
 
 def _evidence(traces: list[StageScore]) -> tuple[list[str], list[str]]:
