@@ -126,7 +126,7 @@ browser:
     reasoning_level: high                 # off | minimal | low | medium | high | xhigh | max
     timeout: 300
   pr:                                     # 提炼/自愈脚本的评审分支与 PR（#83）
-    enabled: true                         # false 时只保存本地脚本，不跑 git/gh
+    enabled: true                         # false 时仍提交本机评审分支，只跳过 push 与 gh
     base_branch: master                   # PR 目标分支（绝不直接推它）
     branch_prefix: auto/browser-source-   # 最终分支：<prefix><source_id>
     labels: [ready-for-human]             # gh pr create --label，至少一个
@@ -154,7 +154,12 @@ browser:
 `<scripts_dir>/<source_id>.py` 一个文件，推送到 `pr.branch_prefix + <source_id>`，再 `gh pr create`（已有开放 PR 时
 改为追加 commit + `gh pr comment`）。前置条件是本机 `git` 有可写远端且 `gh auth status` 已登录；
 `enabled: false` 时跳过 push 与 `gh`，但仍把该提交落到本机同名评审分支。
+已合并（或上次推送失败）留下的同名评审分支不会被卡住：没有开放 PR 时提交从最新 `origin/<base_branch>` 切出，
+该同名分支以 `--force-with-lease` 覆盖（租约锁定推送前刚检查到的远端 commit）；`base_branch` 永远不是推送目标，
+与它撞名的分支名会直接拒绝发布。
 发布失败只软降级（脚本与当轮条目照常保留，`stats.pr_status = "error"` 并记 `git_or_pr_failed`）。
+脚本本身命中凭据扫描（Cookie、Bearer Token、邮箱、本机用户路径、硬编码密钥，或 `?api_key=…` 这类查询串）会直接中止发布；
+PR 正文（含 `reason` / `detail` 文本）则先过全局脱敏，配置里的密钥会被替换为 `[REDACTED]` 后才会写入。
 隔离 worktree 与临时文件无论成功、失败还是取消都会在 `finally` 删除，从不触碰你的工作区与 index。
 
 `pi` 只在**尚无固化脚本的冷启动**、**重放故障自愈**与显式 `tentacles sources distill <ID>` 里使用：

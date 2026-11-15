@@ -269,8 +269,8 @@ sources:
 
 - 在系统临时目录创建一次性的 `git worktree`（**不在**你的工作区、不碰你的 index），从 `origin/<base_branch>`
   或已存在的评审分支切出，**只 `git add` `<scripts_dir>/<source_id>.py` 这一个文件**（`data/` 下的轨迹与 `*.meta.json` 永不入库），提交后推送到 `auto/browser-source-<source_id>`，最后在 `finally` 中删除 worktree。
-- 同一源只有一个活跃评审分支：`gh pr list --state open --head auto/browser-source-<id>` 命中则在该分支追加 commit 并 `gh pr comment` 说明本次自愈，否则 `gh pr create --base <base_branch> --label <labels>` 新建。**绝不强推、绝不直接推 base 分支、绝不为同一源刷多个 PR**。
-- PR 标题/正文明确标注 **machine-generated，需人工 review**；提交前还会扫描脚本与正文，若出现 Cookie、Bearer Token、邮箱或本机用户路径则中止推送并记账。
+- 同一源只有一个活跃评审分支：`gh pr list --state open --head auto/browser-source-<id>` 命中则在该分支追加 commit 并 `gh pr comment` 说明本次自愈，否则从最新 `origin/<base_branch>` 切出、用 `--force-with-lease`（租约锁定推送前刚检查到的远端 commit）覆盖已合并或上次失败留下的同名分支，再 `gh pr create --base <base_branch> --label <labels>` 新建。**绝不直接推 base 分支、绝不为同一源刷多个 PR**。
+- PR 标题/正文明确标注 **machine-generated，需人工 review**；脚本本身命中凭据扫描（Cookie、Bearer Token、邮箱、本机用户路径、硬编码密钥、`?api_key=…` 这类查询串）则中止推送并记账（正文先过全局脱敏，配置密钥替换为 `[REDACTED]`）。
 - 前置条件：本机 `git` 有可写远端，`gh` 已登录（`gh auth status`）。软降级：`gh` 未登录、离线或无推送权限时不影响脚本保存与当轮入库，
   `stats.pr_status = "error"` 且写入 `run_errors`（`phase: script_pr`, `severity: warning`, `error_code: git_or_pr_failed`），可稍后手工补提。
 - `stats.pr_status` 取值：`created`（新建 PR）、`updated`（在已开放 PR 追加）、`unchanged`（脚本与评审分支完全一致，不重复提交）、`disabled`（`browser.pr.enabled: false`：只提交到本机评审分支，不 push、不开 PR）、`error`（软降级）；成功时另有 `stats.pr_url` 与 `stats.pr_branch`。

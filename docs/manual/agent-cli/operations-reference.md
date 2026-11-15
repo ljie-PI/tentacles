@@ -237,6 +237,8 @@ tentacles --json runs show 8
 
 重放失败（报错、超时或返回 0 条）后会自动跑一次 `pi` 自愈会话；通过则本轮 `stats.browser_mode = "heal"`
 并额外报告 `heal_attempts`、`trajectory_path`、`script_path` 与 `pr_status` / `pr_url` / `pr_branch`。
+自愈没通过时本轮 `status = error`，`stats` 带 `browser_heal_failed: true` 与 `trajectory_path`
+（对应的 `browser_distill_failed: true` 是冷启动失败的形状），拒绝原因看 `browser_heal` 阶段的账本。
 
 | `error_code` | 含义与处理建议 |
 | :--- | :--- |
