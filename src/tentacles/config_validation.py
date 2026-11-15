@@ -50,7 +50,7 @@ def _schema_errors(exc: ValidationError, prefix: Sequence[str | int] = ()) -> li
             message = f"invalid {loc[-1]}"
         if error['type'] == 'union_tag_invalid':
             loc = (*loc, 'type')
-            message = 'unknown filter stage type (expected keyword, decision or llm)'
+            message = 'unknown filter stage type (expected keyword, llm, decision or semantic)'
         errors.append(ConfigIssue(format_loc(loc), message))
     return errors
 
@@ -132,6 +132,17 @@ def _model_error(models: Mapping[str, ModelSpec], defaults: Mapping[str, Any],
     return None
 
 
+def _any_kind_model_error(models: Mapping[str, ModelSpec], defaults: Mapping[str, Any],
+                          stage: str, override: Any, where: str) -> ConfigIssue | None:
+    """An adaptive stage accepts either kind; any existing default satisfies it."""
+    if override is not None and not isinstance(override, str):
+        return None
+    name = override if override is not None else defaults.get(stage)
+    if isinstance(name, str) and name in models:
+        return None
+    return ConfigIssue(where, f'requires an existing model or {stage}-stage default')
+
+
 def _adapter_model_errors(requirements: tuple[ModelRequirement, ...], data: Mapping[str, Any],
                           models: Mapping[str, ModelSpec], defaults: Mapping[str, Any],
                           where: str) -> list[ConfigIssue]:
@@ -140,8 +151,11 @@ def _adapter_model_errors(requirements: tuple[ModelRequirement, ...], data: Mapp
         override = data.get('model')
         if requirement.optional and override is None:
             continue
-        error = _model_error(models, defaults, requirement.stage, override, f'{where}.model',
-                             kind=requirement.kind)
+        if requirement.kind is None:
+            error = _any_kind_model_error(models, defaults, requirement.stage, override, f'{where}.model')
+        else:
+            error = _model_error(models, defaults, requirement.stage, override, f'{where}.model',
+                                 kind=requirement.kind)
         if error is not None:
             errors.append(error)
     return errors

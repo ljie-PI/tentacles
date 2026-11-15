@@ -33,6 +33,17 @@ class DecisionBatchError(UpstreamError):
         super().__init__(f'model {name!r}: decision batch aborted ({detail})')
 
 
+async def decide_packed(model: DecisionModel, state: str | dict[str, Any] | list[Any],
+                        questions: dict[str, Any], metrics: UsageTotals,
+                        gate: RequestGate | None = None) -> DecisionCompletion:
+    """One shared-state request that answers several named questions at once.
+
+    Packing exists to send a persona once per batch instead of once per item;
+    splitting a refused payload is the caller's decision, not a retry policy here.
+    """
+    return await model.decide(state, questions, on_completion=metrics.record, gate=gate)
+
+
 async def decide_many(model: DecisionModel, requests: list[DecisionInput], metrics: UsageTotals) -> DecisionBatch:
     batch = DecisionBatch([None] * len(requests), metrics)
     pending = iter(enumerate(requests))
