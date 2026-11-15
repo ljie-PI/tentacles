@@ -8,7 +8,7 @@ from fastapi import APIRouter, Query, Request
 from tentacles.api.models import DisplaySettings, SchedulerLoopView, SourceFetch
 from tentacles.models import ItemKind
 from tentacles.errors import Busy, UpstreamError
-from tentacles.schemas import FetchOutcome, ItemDetail, ItemView, Page, RunView, SourceView, TaskView, TickOutcome
+from tentacles.schemas import ErrorEventDetail, ErrorEventView, FetchOutcome, ItemDetail, ItemView, Page, RunDetail, RunView, SourceView, TaskView, TickOutcome
 from tentacles.api.dependencies import Service
 
 
@@ -54,6 +54,26 @@ def item(item_id: str, svc: Service):
 @router.get('/runs', response_model=list[RunView])
 def runs(svc: Service, kind: str | None = None, target: str | None = None, limit: int = 50):
     return svc.list_runs(kind=kind, target=target, limit=limit)
+
+
+@router.get('/runs/{run_id}', response_model=RunDetail)
+def run_detail(run_id: int, svc: Service):
+    return svc.get_run(run_id)
+
+
+@router.get('/errors', response_model=Page[ErrorEventView])
+def errors(svc: Service, unresolved: bool = False, source: str | None = None,
+           pipeline: str | None = None, phase: str | None = None, error_code: str | None = None,
+           run_id: int | None = None, since: str | None = None, until: str | None = None,
+           limit: int = 50, offset: int = 0):
+    return svc.list_errors(unresolved=unresolved, source=source, pipeline=pipeline, phase=phase,
+                           error_code=error_code, run_id=run_id, since=since, until=until,
+                           limit=limit, offset=offset)
+
+
+@router.get('/errors/{error_id}', response_model=ErrorEventDetail)
+def error_detail(error_id: int, svc: Service):
+    return svc.get_error(error_id)
 
 
 @router.get('/scheduler', response_model=list[TaskView])

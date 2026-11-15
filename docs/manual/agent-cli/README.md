@@ -17,6 +17,7 @@
 3. **[触发采集、流水线与运维状态速查](operations-reference.md)**
    - 手动抓取信息源（`sources fetch`）、触发过滤/成稿（`pipelines filter/run`）、执行周期 `tick`
    - 检查配置（`config check`）、调度进度（`scheduler status`）与运行计费账本（`runs list`）
+   - 回滚安全的故障账本（`errors list --unresolved`、`errors show`、`runs show`）、`error_code` 速查表与 `failed_targets` 排障工作流
 
 ---
 

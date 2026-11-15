@@ -2,12 +2,13 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Awaitable, Callable, Literal
+from typing import Any, Awaitable, Callable, Iterable, Literal, Sequence
 from uuid import uuid4
 
 from tentacles.asyncutil import run_store_call
+from tentacles.diagnostics import DiagnosticEvent, FailedTargetRef
 from tentacles.llm.types import UsageTotals
 from tentacles.store import RunWriter, Store
 from tentacles.tasks import Task
@@ -23,6 +24,11 @@ class RunResult:
     stats: dict[str, Any]
     metrics: UsageTotals
     error: str | None
+    failed_targets: list[FailedTargetRef] = field(default_factory=list)
+
+    @property
+    def error_count(self) -> int:
+        return len(self.failed_targets)
 
 
 class RunOperation:
@@ -32,8 +38,10 @@ class RunOperation:
     use its RunWriter, not open another transaction or perform asynchronous IO.
     """
 
-    def __init__(self, store: Store, clock: Callable[[], datetime]) -> None:
+    def __init__(self, store: Store, clock: Callable[[], datetime], *,
+                 secrets: Sequence[str] = ()) -> None:
         self._store, self._clock = store, clock
+        self._secrets = list(secrets)
         self.started_at = to_utc(clock())
         self.run_id = 0
         self.stats: dict[str, Any] = {}
@@ -41,13 +49,32 @@ class RunOperation:
         self._status: Literal['ok', 'busy', 'error'] = 'ok'
         self._error: str | None = None
         self._committed = False
+        self._errors: list[DiagnosticEvent] = []
+        self._failed_targets: list[FailedTargetRef] = []
+
+    def record_error(self, event: DiagnosticEvent) -> None:
+        """Collect one diagnostic; both the commit and the cleanup path persist it.
+
+        Nothing here depends on the business transaction succeeding: a Run that
+        rolls back entirely still lands every collected event in the ledger.
+        """
+        self._errors.append(event.redacted(self._secrets))
+
+    @property
+    def errors(self) -> list[DiagnosticEvent]:
+        return list(self._errors)
+
+    def persisted(self, refs: list[FailedTargetRef]) -> None:
+        """Adopt the ledger rows this Run now owns; later paths never resend them."""
+        self._failed_targets = refs
+        self._errors = []
 
     def _result(self, stats: dict[str, Any] | None = None) -> RunResult:
         metrics = UsageTotals(self.metrics.usage.model_copy(), self.metrics.cost, list(self.metrics.models))
         combined = {**self.stats, **(stats or {})}
         if self.run_id:
             combined.update(usage=metrics.usage.model_dump(), cost=metrics.cost, models=list(metrics.models))
-        return RunResult(self.run_id, self._status, combined, metrics, self._error)
+        return RunResult(self.run_id, self._status, combined, metrics, self._error, list(self._failed_targets))
 
     async def commit(self, write: Callable[[RunWriter], None], *, stats: dict[str, Any] | None = None,
                      error: str | None = None, status: Literal['ok', 'failed'] | None = None) -> None:
@@ -68,12 +95,13 @@ class RunOperation:
                 final_stats.update(self._result(stats).stats)
 
             terminal_status = status or ('failed' if error is not None else 'ok')
-            self._store.commit_run(self.run_id, persist, now=to_utc(self._clock()),
-                                   stats=final_stats, cost=self.metrics.cost, error=error,
-                                   status=terminal_status)
+            refs = self._store.commit_run(self.run_id, persist, now=to_utc(self._clock()),
+                                          stats=final_stats, cost=self.metrics.cost, error=error,
+                                          status=terminal_status, errors=self._errors)
             # Set in the worker: cancellation while draining a committed write
             # must not turn its durable success into a reported failure.
             self._committed = True
+            self.persisted(refs)
             self.stats.update(stats or {})
             self._status = 'error' if terminal_status == 'failed' else 'ok'
             self._error = error
@@ -82,8 +110,10 @@ class RunOperation:
 
 
 class RunLifecycle:
-    def __init__(self, store: Store, clock: Callable[[], datetime]) -> None:
+    def __init__(self, store: Store, clock: Callable[[], datetime], *,
+                 secrets: Iterable[str] = ()) -> None:
         self._store, self._clock = store, clock
+        self._secrets = list(secrets)
 
     async def execute(self, task: Task | tuple[str, str], work: Callable[[RunOperation], Awaitable[None]], *,
                       due_only: bool = False,
@@ -101,7 +131,7 @@ class RunLifecycle:
         """
         if due_only and not isinstance(task, Task):
             raise ValueError('unleased runs have no due check')
-        operation = RunOperation(self._store, self._clock)
+        operation = RunOperation(self._store, self._clock, secrets=self._secrets)
         token = uuid4().hex
         not_due = False
 
@@ -126,8 +156,10 @@ class RunLifecycle:
             if operation.run_id:
                 try:
                     result = operation._result()
-                    self._store.finish_run(operation.run_id, status='failed', now=to_utc(self._clock()),
-                                           error=result.error, stats=result.stats, cost=result.metrics.cost)
+                    operation.persisted(self._store.finish_run(
+                        operation.run_id, status='failed', now=to_utc(self._clock()),
+                        error=result.error, stats=result.stats, cost=result.metrics.cost,
+                        errors=operation.errors))
                 except Exception as failure:
                     log.warning('could not finish run (%s)', type(failure).__name__)
             if isinstance(task, Task):

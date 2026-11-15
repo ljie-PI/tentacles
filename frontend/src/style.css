@@ -214,3 +214,9 @@ textarea { font: inherit; width: 100%; min-height: 85px; border: 1px solid var(-
   .persona-panel { padding: 20px; }
   .keyword-grid { grid-template-columns: minmax(0, 1fr); }
 }
+
+.tag.bad { color: var(--danger); background: var(--danger-bg); }
+.run-error { border-top: 1px solid var(--border); padding: 16px 0; overflow-wrap: anywhere; }
+.run-error-head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; font-size: 13px; }
+.run-error .error-text { max-width: none; }
+.debug-context { max-width: 100%; max-height: 320px; }

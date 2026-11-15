@@ -17,8 +17,8 @@ from tentacles.net import HttpPool
 from tentacles.llm.registry import ModelRegistry
 from tentacles.llm.config import Stage
 from tentacles.llm.json import extract_json
-from tentacles.schemas import ConfigCheck, FetchOutcome, ItemDetail, ItemView, Page, RunView, SourceView, TaskView, ModelView, Completion, ModelTest, TickOutcome
-from tentacles.store import ItemQuery, Store
+from tentacles.schemas import ConfigCheck, ErrorEventDetail, ErrorEventView, FetchOutcome, ItemDetail, ItemView, Page, RunDetail, RunView, SourceView, TaskView, ModelView, Completion, ModelTest, TickOutcome
+from tentacles.store import ItemQuery, RunErrorQuery, Store
 from tentacles.personas.manager import PersonaManager
 from tentacles.personas.models import FeedbackView, PersonaProposal, PersonaView
 from tentacles.pipelines.models import PipelineOutcome, ReportView, PipelineView
@@ -267,8 +267,40 @@ class TentaclesService:
                   limit: int = 50) -> list[RunView]:
         if not 1 <= limit <= 500:
             raise ConfigError("limit must be between 1 and 500")
-        return [RunView.model_validate(r, from_attributes=True)
-                for r in self.store.list_runs(kind, target, limit)]
+        return [RunView.of(record) for record in self.store.list_runs(kind, target, limit)]
+
+    def get_run(self, run_id: int) -> RunDetail:
+        record = self.store.get_run(run_id)
+        if record is None:
+            raise NotFound(f'unknown run {run_id}')
+        errors, _ = self.store.list_run_errors(RunErrorQuery(run_id=run_id, limit=500))
+        return RunDetail(**RunView.of(record).model_dump(),
+                         errors=[ErrorEventView.of(error) for error in errors])
+
+    # ---- diagnostics ledger -------------------------------------------------
+
+    def list_errors(self, *, unresolved: bool = False, source: str | None = None,
+                    pipeline: str | None = None, phase: str | None = None,
+                    error_code: str | None = None, run_id: int | None = None,
+                    since: str | datetime | None = None, until: str | datetime | None = None,
+                    limit: int = 50, offset: int = 0) -> Page[ErrorEventView]:
+        if not 1 <= limit <= 500:
+            raise ConfigError("limit must be between 1 and 500")
+        if not 0 <= offset <= 2**63 - 1:
+            raise ConfigError("offset must be between 0 and 9223372036854775807")
+        q = RunErrorQuery(unresolved=unresolved, source_id=source, pipeline_id=pipeline, phase=phase,
+                          error_code=error_code, run_id=run_id, since=self._time(since),
+                          until=self._time(until), limit=limit, offset=offset)
+        records, total = self.store.list_run_errors(q)
+        return Page[ErrorEventView](items=[ErrorEventView.of(record) for record in records],
+                                    total=total, limit=limit, offset=offset)
+
+    def get_error(self, error_id: int) -> ErrorEventDetail:
+        record = self.store.get_run_error(error_id)
+        if record is None:
+            raise NotFound(f'unknown error {error_id}')
+        return ErrorEventDetail(**ErrorEventView.of(record).model_dump(),
+                                debug_context=record.debug_context)
 
     def _time(self, value: str | datetime | None) -> datetime | None:
         if value is None:

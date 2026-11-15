@@ -8,6 +8,8 @@ from typing import TYPE_CHECKING
 
 from tentacles.asyncutil import run_store_call
 from tentacles.config import SourceSpec
+from tentacles.diagnostics import DiagnosticEvent, classify_failure, stack_frames
+from tentacles.errors import TentaclesError
 from tentacles.models import has_original_url
 from tentacles.net import HttpPool
 from tentacles.runs import RunOperation
@@ -24,6 +26,21 @@ log = logging.getLogger(__name__)
 CROSS_SOURCE_WINDOW = timedelta(hours=48)
 
 
+def _page_url(spec: SourceSpec) -> str | None:
+    """The configured entry address a top-level source failure points at."""
+    url = spec.options.get('url')
+    return url if isinstance(url, str) and url else None
+
+
+def _fetch_failure(spec: SourceSpec, exc: Exception) -> DiagnosticEvent:
+    """Record what a whole-source failure could not classify any further."""
+    error_code, retryable = classify_failure(exc)
+    message = exc.message if isinstance(exc, TentaclesError) else f'source fetch failed ({type(exc).__name__})'
+    return DiagnosticEvent(phase='fetch_page', error_code=error_code, message=message, retryable=retryable,
+                           source_id=spec.id, page_url=_page_url(spec), exception_type=type(exc).__name__,
+                           debug_context={'exception': stack_frames(exc)})
+
+
 async def fetch_source(spec: SourceSpec, operation: RunOperation, *, store: Store, http: HttpPool,
                        imap_factory: ImapFactory = connect_imap, timezone: str = 'UTC',
                        models: ModelRegistry | None = None) -> None:
@@ -38,7 +55,13 @@ async def fetch_source(spec: SourceSpec, operation: RunOperation, *, store: Stor
                        classify_links=lambda urls: store.classify_links(spec.id, urls))
     state = await run_store_call(store.get_source_state, spec.id)
     source = build_source(spec)
-    result = await source.fetch(state.cursor, ctx)
+    try:
+        result = await source.fetch(state.cursor, ctx)
+    except Exception as exc:
+        # The Run's ledger outlives this batch: the event is collected before
+        # the failure reaches RunLifecycle's rollback-and-cleanup path.
+        operation.record_error(_fetch_failure(spec, exc))
+        raise
     # 非邮件条目必须留有原文详情或入口页链接，否则无法回溯未截断全文。
     reachable = [index for index, item in enumerate(result.items)
                  if item.kind == 'email' or has_original_url(item.url, item.page_url)]

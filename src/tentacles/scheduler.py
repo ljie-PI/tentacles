@@ -13,6 +13,7 @@ import httpx
 
 from tentacles.asyncutil import gather_draining
 from tentacles.config import AppConfig, SourceSpec
+from tentacles.diagnostics import configured_secrets
 from tentacles.errors import TentaclesError
 from tentacles.llm.registry import ModelRegistry
 from tentacles.net import HttpPool
@@ -36,7 +37,7 @@ class Scheduler:
                  imap_factory: ImapFactory = connect_imap):
         self._config, self._store, self._models, self._clock = config, store, models, clock
         self._transport, self._imap_factory = transport, imap_factory
-        self._runs = RunLifecycle(store, clock)
+        self._runs = RunLifecycle(store, clock, secrets=configured_secrets(config))
         tasks = [Task('fetch', s.id, s.schedule, config.app.timezone, s.enabled) for s in config.sources]
         tasks.extend(Task(kind, spec.id,
                           spec.filter_schedule if kind == 'filter' and spec.filter_schedule else spec.schedule,
@@ -144,7 +145,8 @@ class Scheduler:
             key: value for key, value in result.stats.items() if key not in {'usage', 'cost', 'models'}}
         return FetchOutcome(source_id=spec.id, run_id=result.run_id, status=result.status,
                             new=stats.get('new', 0), updated=stats.get('updated', 0), dup=stats.get('dup', 0),
-                            error=result.error, stats=stats)
+                            error=result.error, stats=stats, error_count=result.error_count,
+                            failed_targets=result.failed_targets)
 
     async def _fetch_batch(self, specs: list[SourceSpec], *, due_only: bool) -> list[FetchOutcome]:
         sem = asyncio.Semaphore(FETCH_CONCURRENCY)

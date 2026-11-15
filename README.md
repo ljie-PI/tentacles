@@ -68,6 +68,9 @@ tentacles items list --since 24h  # 查看最近 24 小时的条目
 | `tentacles pipelines list/filter/run ID` | 查看 pipeline、只过滤或生成报告 |
 | `tentacles reports list/show ID` | 查看报告列表和全文 |
 | `tentacles runs list` | 查看运行记录 |
+| `tentacles runs show RUN_ID` | 查看单次运行的统计与本次记录的故障列表 |
+| `tentacles errors list` | 检索故障账本，支持 `--unresolved`、`--source`、`--pipeline`、`--phase`、`--error-code`、`--run-id`、`--since/--until` 与分页 |
+| `tentacles errors show ID` | 查看一条故障的完整描述与已脱敏的排障现场 |
 
 所有命令都支持 `--json`：stdout 只输出一个 JSON 值，日志写到 stderr，退出码按错误类型区分。给 agent 用的完整说明见 [Agent CLI 手册](docs/manual/agent-cli/README.md)。
 

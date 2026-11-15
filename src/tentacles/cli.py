@@ -85,8 +85,10 @@ models_app = typer.Typer(help="命名模型", no_args_is_help=True, cls=_JsonErr
 persona_app = typer.Typer(help="Persona 与版本管理", no_args_is_help=True, cls=_JsonErrorsGroup)
 pipelines_app = typer.Typer(help="Pipeline 过滤与运行", no_args_is_help=True, cls=_JsonErrorsGroup)
 reports_app = typer.Typer(help="报告", no_args_is_help=True, cls=_JsonErrorsGroup)
+errors_app = typer.Typer(help="故障诊断账本", no_args_is_help=True, cls=_JsonErrorsGroup)
 app.add_typer(pipelines_app, name="pipelines")
 app.add_typer(reports_app, name="reports")
+app.add_typer(errors_app, name="errors")
 app.add_typer(persona_app, name="persona")
 app.add_typer(models_app, name="models")
 app.add_typer(scheduler_app, name="scheduler")
@@ -546,6 +548,68 @@ def runs_list(ctx: typer.Context,
         "Runs", ["id", "kind", "target", "status", "started", "stats", "error"],
         [[r.id, r.kind, r.target, r.status, when(r.started_at), json.dumps(r.stats, ensure_ascii=False),
           r.error] for r in rows])))
+
+
+@runs_app.command("show")
+def runs_show(ctx: typer.Context, run_id: int = typer.Argument(..., help="运行 id")) -> None:
+    """查看单次运行的完整统计与本次运行记录的故障事件。"""
+    def render(detail, out: Console, when: TimeFmt) -> None:
+        out.print(Text(f"run #{detail.id} {detail.kind} {detail.target} · {detail.status}", style="bold"))
+        out.print(f"started: {when(detail.started_at)} · finished: {when(detail.finished_at)}", markup=False)
+        out.print(f"cost: {detail.cost}", markup=False)
+        if detail.error:
+            out.print(Text(detail.error, style="red"))
+        out.print(Text(json.dumps(detail.stats, ensure_ascii=False, indent=2)))
+        out.print(_table("Run errors", ["id", "occurred", "phase", "code", "target", "resolved", "message"],
+            [[e.id, when(e.occurred_at), e.phase, e.error_code, e.target_url or e.external_id,
+              when(e.resolved_at), e.message] for e in detail.errors]))
+    _run(ctx, lambda s: s.get_run(run_id), render)
+
+
+# ---- errors -----------------------------------------------------------------
+
+def _render_errors(page, out: Console, when: TimeFmt) -> None:
+    out.print(_table(f"Errors ({page.offset + 1}-{page.offset + len(page.items)} / {page.total})",
+        ["id", "occurred", "run", "phase", "code", "retryable", "source", "pipeline", "target", "resolved"],
+        [[e.id, when(e.occurred_at), e.run_id, e.phase, e.error_code, e.retryable, e.source_id, e.pipeline_id,
+          e.target_url or e.external_id, when(e.resolved_at)] for e in page.items]))
+
+
+@errors_app.command("list")
+def errors_list(
+    ctx: typer.Context,
+    unresolved: bool = typer.Option(False, "--unresolved", help="只看尚未自动消警的故障"),
+    source: Optional[str] = typer.Option(None, "--source", help="按信息源筛选"),
+    pipeline: Optional[str] = typer.Option(None, "--pipeline", help="按 pipeline 筛选"),
+    phase: Optional[str] = typer.Option(None, "--phase", help="按阶段筛选，如 fetch_page"),
+    error_code: Optional[str] = typer.Option(None, "--error-code", help="按机器错误码筛选"),
+    run_id: Optional[int] = typer.Option(None, "--run-id", help="按运行 id 筛选"),
+    since: Optional[str] = typer.Option(None, help="起始时间：时长（如 24h）或 ISO 时间"),
+    until: Optional[str] = typer.Option(None, help="截止时间：时长或 ISO 时间"),
+    limit: int = typer.Option(50, help="每页条数（1–500）"),
+    offset: int = typer.Option(0, help="偏移量"),
+) -> None:
+    """列出故障账本（不含体积较大的排障现场）。"""
+    _run(ctx, lambda s: s.list_errors(unresolved=unresolved, source=source, pipeline=pipeline,
+                                      phase=phase, error_code=error_code, run_id=run_id, since=since,
+                                      until=until, limit=limit, offset=offset), _render_errors)
+
+
+@errors_app.command("show")
+def errors_show(ctx: typer.Context, error_id: int = typer.Argument(..., help="故障 id")) -> None:
+    """查看一条故障的完整描述与已脱敏的排障现场。"""
+    def render(detail, out: Console, when: TimeFmt) -> None:
+        out.print(Text(f"error #{detail.id} · run #{detail.run_id} · {detail.phase} · {detail.error_code}",
+                       style="bold"))
+        out.print(f"occurred: {when(detail.occurred_at)} · retryable: {detail.retryable} · "
+                  f"resolved: {when(detail.resolved_at)}", markup=False)
+        out.print(f"source: {detail.source_id} · pipeline: {detail.pipeline_id} · "
+                  f"page: {detail.page_url}", markup=False)
+        out.print(f"target: {detail.target_url} · external: {detail.external_id} · item: {detail.item_id}",
+                  markup=False)
+        out.print(Text(detail.message))
+        out.print(Text(json.dumps(detail.debug_context, ensure_ascii=False, indent=2)))
+    _run(ctx, lambda s: s.get_error(error_id), render)
 
 
 @app.command('serve')

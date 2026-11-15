@@ -13,14 +13,15 @@ from dataclasses import dataclass, field
 from contextlib import closing
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, Callable, Literal
+from typing import Any, Callable, Literal, Sequence
 
 from tentacles.dedup import split_similar
+from tentacles.diagnostics import DiagnosticEvent, FailedTargetRef, RunErrorDetail, RunErrorRecord
 from tentacles.models import CONTENT_UNITS, Item, ItemObservation, LinkDisposition, item_id, normalize_url
 from tentacles.text import truncate_content_units
 from tentacles.errors import Conflict
 from tentacles.personas.models import FeedbackView, PersonaEdit, PersonaView, edit_keywords, keywords
-from tentacles.timeutil import from_iso, to_iso, to_utc
+from tentacles.timeutil import from_iso, to_iso, to_utc, utcnow
 from tentacles.tasks import Claim, Task, TaskState
 from tentacles.pipelines.models import Evaluation, PipelineQuery, ReportDraft, ReportView
 from tentacles.pipelines.report_path import new_report_location
@@ -66,6 +67,22 @@ class ItemQuery:
     passed: bool | None = None
     min_score: float | None = None
     topic: str | None = None
+
+
+@dataclass
+class RunErrorQuery:
+    """Filters over the diagnostics ledger, newest first."""
+
+    unresolved: bool = False
+    source_id: str | None = None
+    pipeline_id: str | None = None
+    phase: str | None = None
+    error_code: str | None = None
+    run_id: int | None = None
+    since: datetime | None = None
+    until: datetime | None = None
+    limit: int = 50
+    offset: int = 0
 
 
 _V1 = """
@@ -270,7 +287,35 @@ def _migrate_v14(conn: sqlite3.Connection) -> None:
                          (content, row['id']))
 
 
-MIGRATIONS: list[Callable[[sqlite3.Connection], None]] = [_migrate_v1, _migrate_v2, _migrate_v3, _migrate_v4, _migrate_v5, _migrate_v6, _migrate_v7, _migrate_v8, _migrate_v9, _migrate_v10, _migrate_v11, _migrate_v12, _migrate_v13, _migrate_v14]
+def _migrate_v15(conn: sqlite3.Connection) -> None:
+    # The diagnostics ledger is independent of business writes: a run records a
+    # failed target here even when its item/report transaction never commits.
+    conn.execute("""CREATE TABLE run_errors (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        run_id INTEGER NOT NULL REFERENCES runs(id),
+        occurred_at TEXT NOT NULL,
+        phase TEXT NOT NULL,
+        severity TEXT NOT NULL DEFAULT 'error',
+        source_id TEXT,
+        pipeline_id TEXT,
+        page_url TEXT,
+        target_url TEXT,
+        item_id TEXT,
+        external_id TEXT,
+        error_code TEXT NOT NULL,
+        http_status INTEGER,
+        exception_type TEXT,
+        message TEXT NOT NULL,
+        retryable INTEGER NOT NULL DEFAULT 1,
+        resolved_at TEXT,
+        debug_context TEXT NOT NULL DEFAULT '{}'
+    )""")
+    conn.execute('CREATE INDEX idx_run_errors_run ON run_errors (run_id)')
+    conn.execute('CREATE INDEX idx_run_errors_unresolved ON run_errors (source_id, resolved_at, occurred_at DESC)')
+    conn.execute('CREATE INDEX idx_run_errors_target ON run_errors (target_url)')
+
+
+MIGRATIONS: list[Callable[[sqlite3.Connection], None]] = [_migrate_v1, _migrate_v2, _migrate_v3, _migrate_v4, _migrate_v5, _migrate_v6, _migrate_v7, _migrate_v8, _migrate_v9, _migrate_v10, _migrate_v11, _migrate_v12, _migrate_v13, _migrate_v14, _migrate_v15]
 
 _ITEM_COLUMNS = ("id, source_id, kind, external_id, url, page_url, title, author, summary, content,"
                  " content_truncated, published, fetched_at, fingerprint, meta, identity_policy,"
@@ -284,6 +329,11 @@ _ACTIVITY_TIME = "COALESCE(updated_at, fetched_at)"
 _CONTENT_FIELDS = ('title', 'summary', 'content', 'author', 'url', 'page_url', 'published')
 # 与正文一样参与更新比较的元数据：邮件收件人影响摘要生成，全文哈希感知截断外更新
 _CONTENT_META_FIELDS = ('to', 'cc', 'full_content_sha1')
+# 单条 UPDATE 的参数上限远高于此；分块只是让超大批次不会碰到它
+_RESOLVE_CHUNK = 400
+_RUN_ERROR_COLUMNS = ("id, run_id, occurred_at, phase, severity, source_id, pipeline_id, page_url,"
+                      " target_url, item_id, external_id, error_code, http_status, exception_type,"
+                      " message, retryable, resolved_at")
 
 # 精确关联某个 pipeline 当前最新 Persona 版本的评估
 _PIPELINE_EVAL_JOIN = (
@@ -761,6 +811,8 @@ class Store:
             (source_id, len(new)))
         self._conn.executemany("INSERT OR IGNORE INTO suppressed_items VALUES (?, ?)",
                               [(it.source_id, it.external_id) for it in suppressed])
+        self._resolve_source_errors(source_id, urls=[it.url for it in items],
+                                    external_ids=[it.external_id for it in items], now=now or utcnow())
         return ItemWriteResult(new, 0, fetched - len(new))
 
     def _observation_target(self, it: Item, observation: ItemObservation) -> Item | Literal['suppressed'] | None:
@@ -876,6 +928,8 @@ class Store:
             "INSERT INTO source_state (source_id, total_items) VALUES (?, ?)"
             " ON CONFLICT (source_id) DO UPDATE SET total_items = total_items + excluded.total_items",
             (source_id, len(new)))
+        self._resolve_source_errors(source_id, urls=[it.url for it in items],
+                                    external_ids=[it.external_id for it in items], now=now or utcnow())
         return ItemWriteResult(new, updated, len(items) - len(new) - updated)
 
     def _insert_item(self, it: Item) -> None:
@@ -990,12 +1044,16 @@ class Store:
 
     def commit_run(self, run_id: int, write: Callable[[RunWriter], None], *, now: datetime,
                    stats: dict[str, Any], cost: float | None = None, error: str | None = None,
-                   status: Literal['ok', 'failed'] | None = None) -> None:
+                   status: Literal['ok', 'failed'] | None = None,
+                   errors: Sequence[DiagnosticEvent] = ()) -> list[FailedTargetRef]:
         """Fence domain writes, Run completion and task progress in one transaction.
 
         File rollback is best effort on an observed failure, not crash atomicity.
         Only newly created files are removed, including on a later SQL/commit
         failure. Callers must drain worker IO before closing Store.
+
+        Collected diagnostics ride the same transaction, after `write`, so a
+        batch cannot resolve an error it has just recorded.
         """
         writer = RunWriter(self, now)
         try:
@@ -1003,6 +1061,7 @@ class Store:
                 self._conn.execute('BEGIN IMMEDIATE')
                 self._require_running(run_id)
                 write(writer)
+                refs = self._save_run_errors(run_id, errors, now)
                 status = status or ('failed' if error is not None else 'ok')
                 self._finish_run(run_id, status=status, now=now, stats=stats, cost=cost, error=error)
                 self._complete_task_run(run_id, status, error)
@@ -1013,6 +1072,7 @@ class Store:
                 except OSError as cleanup_error:
                     log.warning('could not remove uncommitted report file (%s)', type(cleanup_error).__name__)
             raise
+        return refs
 
     def start_run(self, kind: str, target: str, now: datetime) -> int:
         """Create an unleased Run; RunLifecycle owns its terminal cleanup."""
@@ -1024,9 +1084,12 @@ class Store:
         return cur.lastrowid
 
     def finish_run(self, run_id: int, *, status: str, now: datetime, error: str | None = None,
-                   stats: dict[str, Any] | None = None, cost: float | None = None) -> None:
+                   stats: dict[str, Any] | None = None, cost: float | None = None,
+                   errors: Sequence[DiagnosticEvent] = ()) -> list[FailedTargetRef]:
+        """Terminate a Run, persisting diagnostics a rollback would otherwise lose."""
         with self._lock, self._conn:
             self._conn.execute('BEGIN IMMEDIATE')
+            refs = self._save_run_errors(run_id, errors, now)
             previous = self._conn.execute(
                 'SELECT status, kind, target, started_at FROM runs WHERE id = ?', (run_id,)).fetchone()
             if previous is not None and previous['status'] == 'running' and status == 'failed' and previous['kind'] == 'fetch':
@@ -1042,6 +1105,7 @@ class Store:
             actual = self._conn.execute('SELECT status, error FROM runs WHERE id = ?', (run_id,)).fetchone()
             if actual is not None and actual['status'] != 'running':
                 self._complete_task_run(run_id, actual['status'], actual['error'])
+        return refs
 
     def _backfill_failed_run_metrics(self, run_id: int, stats: dict[str, Any], cost: float | None) -> None:
         """Caller holds the transaction; backfill telemetry, not ownership/state."""
@@ -1082,6 +1146,85 @@ class Store:
         return [RunRecord(r["id"], r["kind"], r["target"], r["status"], from_iso(r["started_at"]),
                           from_iso(r["finished_at"]), json.loads(r["stats"]), r["cost"], r["error"])
                 for r in rows]
+
+    def get_run(self, run_id: int) -> RunRecord | None:
+        with self._lock:
+            row = self._conn.execute('SELECT * FROM runs WHERE id = ?', (run_id,)).fetchone()
+        if row is None:
+            return None
+        return RunRecord(row['id'], row['kind'], row['target'], row['status'], from_iso(row['started_at']),
+                         from_iso(row['finished_at']), json.loads(row['stats']), row['cost'], row['error'])
+
+    # ---- diagnostics ledger -------------------------------------------------
+
+    def _save_run_errors(self, run_id: int, events: Sequence[DiagnosticEvent],
+                         now: datetime) -> list[FailedTargetRef]:
+        """Caller holds the transaction; the ledger never joins business writes."""
+        refs: list[FailedTargetRef] = []
+        for event in events:
+            cursor = self._conn.execute(
+                'INSERT INTO run_errors (run_id, occurred_at, phase, severity, source_id, pipeline_id,'
+                ' page_url, target_url, item_id, external_id, error_code, http_status, exception_type,'
+                ' message, retryable, debug_context) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+                (run_id, to_iso(event.occurred_at or now), event.phase, event.severity, event.source_id,
+                 event.pipeline_id, event.page_url, event.target_url, event.item_id, event.external_id,
+                 event.error_code, event.http_status, event.exception_type, event.message,
+                 int(event.retryable), json.dumps(event.debug_context, ensure_ascii=False)))
+            assert cursor.lastrowid is not None
+            refs.append(FailedTargetRef(error_id=cursor.lastrowid, target_url=event.target_url,
+                                        external_id=event.external_id, error_code=event.error_code))
+        return refs
+
+    def list_run_errors(self, q: RunErrorQuery) -> tuple[list[RunErrorRecord], int]:
+        """Page the ledger without its debug contexts, so scanning stays dense."""
+        where, args = ['1 = 1'], []
+        if q.unresolved:
+            where.append('resolved_at IS NULL')
+        for column, value in (('source_id', q.source_id), ('pipeline_id', q.pipeline_id),
+                              ('phase', q.phase), ('error_code', q.error_code), ('run_id', q.run_id)):
+            if value is not None:
+                where.append(f'{column} = ?')
+                args.append(value)
+        if q.since is not None:
+            where.append('occurred_at >= ?')
+            args.append(to_iso(q.since))
+        if q.until is not None:
+            where.append('occurred_at <= ?')
+            args.append(to_iso(q.until))
+        condition = ' AND '.join(where)
+        with self._lock:
+            total = self._conn.execute(f'SELECT COUNT(*) FROM run_errors WHERE {condition}', args).fetchone()[0]
+            rows = self._conn.execute(
+                f'SELECT {_RUN_ERROR_COLUMNS} FROM run_errors WHERE {condition}'
+                ' ORDER BY occurred_at DESC, id DESC LIMIT ? OFFSET ?', [*args, q.limit, q.offset]).fetchall()
+        return [_row_to_run_error(row) for row in rows], total
+
+    def get_run_error(self, error_id: int) -> RunErrorDetail | None:
+        with self._lock:
+            row = self._conn.execute('SELECT * FROM run_errors WHERE id = ?', (error_id,)).fetchone()
+        if row is None:
+            return None
+        return RunErrorDetail(**_run_error_fields(row), debug_context=json.loads(row['debug_context']))
+
+    def _resolve_source_errors(self, source_id: str, *, urls: Sequence[str],
+                               external_ids: Sequence[str], now: datetime) -> None:
+        """A stored batch means those targets were fetched successfully this time."""
+        stamp = to_iso(now)
+        for column, values in (('target_url', urls), ('external_id', external_ids)):
+            unique = list(dict.fromkeys(values))
+            for start in range(0, len(unique), _RESOLVE_CHUNK):
+                chunk = unique[start:start + _RESOLVE_CHUNK]
+                placeholders = ','.join('?' for _ in chunk)
+                self._conn.execute(
+                    f'UPDATE run_errors SET resolved_at = ? WHERE resolved_at IS NULL AND source_id = ?'
+                    f' AND {column} IN ({placeholders})', (stamp, source_id, *chunk))
+
+    def _resolve_evaluation_errors(self, evaluations: Sequence[Evaluation], now: datetime) -> None:
+        """A stored evaluation resolves that pipeline's earlier per-item failures."""
+        self._conn.executemany(
+            'UPDATE run_errors SET resolved_at = ? WHERE resolved_at IS NULL'
+            " AND phase = 'filter_stage' AND pipeline_id = ? AND item_id = ?",
+            [(to_iso(now), evaluation.pipeline_id, evaluation.item_id) for evaluation in evaluations])
 
 
 class RunWriter:
@@ -1147,6 +1290,7 @@ class RunWriter:
                  json.dumps([s.model_dump() for s in evaluation.stage_scores], ensure_ascii=False),
                  to_iso(evaluation.evaluated_at), evaluation.pipeline_id, evaluation.item_id,
                  evaluation.input_revision, json.dumps(evaluation.match_points, ensure_ascii=False)))
+        self._store._resolve_evaluation_errors(evaluations, self._now)
 
     def save_reports(self, drafts: list[ReportDraft], evaluations: list[Evaluation], *,
                      reports_dir: Path) -> list[ReportView]:
@@ -1175,6 +1319,20 @@ class RunWriter:
             reports.append(report)
         self._store._consume(evaluations, self._now, reports)
         return reports
+
+
+def _row_to_run_error(row: sqlite3.Row) -> RunErrorRecord:
+    return RunErrorRecord(**_run_error_fields(row))
+
+
+def _run_error_fields(row: sqlite3.Row) -> dict[str, Any]:
+    return dict(
+        id=row['id'], run_id=row['run_id'], occurred_at=from_iso(row['occurred_at']), phase=row['phase'],
+        severity=row['severity'], source_id=row['source_id'], pipeline_id=row['pipeline_id'],
+        page_url=row['page_url'], target_url=row['target_url'], item_id=row['item_id'],
+        external_id=row['external_id'], error_code=row['error_code'], http_status=row['http_status'],
+        exception_type=row['exception_type'], message=row['message'], retryable=bool(row['retryable']),
+        resolved_at=from_iso(row['resolved_at']))
 
 
 def _row_to_item(r: sqlite3.Row) -> Item:
