@@ -230,7 +230,7 @@ sources:
 | `chrome_profile` | 源级 Chrome Profile 目录名（如 `Profile 1`），缺省用 `browser.default_profile` |
 | `script_path` | 固化脚本路径，相对 YAML 解析；**必须**落在 `browser.scripts_dir` 内且以 `.py` 结尾 |
 | `update_existing` | 开启后本轮再次出现的本源条目按规范化 URL 原位更新（与 Web `list` 一致） |
-| `on_detail_error` | `record_and_skip`（默认）只记账并返回空批次；`fail_batch` 让该源整批失败 |
+| `on_detail_error` | 冷启动失败时 `record_and_skip`（默认）只记账并返回空批次；`fail_batch` 让该源整批失败。重放失败一律先尝试自愈，自愈耗尽后本轮判为 `failed`，与该项无关 |
 | `max_items` | 单轮最多入库条目数，`1..200`，默认 `25` |
 | `timeout` | 单次重放的整体超时秒数（默认 `60`），同时作为脚本单步 `goto`/`wait_for_selector` 的上限 |
 | `headless` | 只允许 `false` 或缺省；`true` 直接报配置错误 |
@@ -249,6 +249,43 @@ sources:
   - `script_assertion_failed`：断言失败、返回值不合契约、脚本被门禁拦截或返回 0 条（0 条记为 `warning`）；
   - `debug_context` 带 `current_url`、`page_title`、精简 A11y 快照与脚本栈帧；`target_url` 指向失败瞬间的页面地址。
   排障命令见 [Agent CLI 运维速查](../agent-cli/operations-reference.md) 第 5 节。
+
+### 重放故障自愈（Replay → Heal）
+
+脚本报错、超时或本轮返回 **0 条**都会先记账，再唤醒**一次**受控 `pi --mode rpc` 自愈会话（同一个 `browser.pi` 模型与 `browser.pi.timeout`，Token 与费用照常计入当轮 Run）：
+
+1. 会话输入：旧 `<id>.py` 原文、失败栈与实时页面现场（`current_url` / `page_title` / 精简 A11y 快照）、
+   本地 `data/browser_sources/<id>.meta.json` 的选择器摘要（**不含**本机绝对轨迹路径），并在真实工作 Tab 上打开入口页供 Agent 用 `browser_snapshot` / `browser_evaluate` 现场探测。
+2. 每次回答都必须通过与冷启动**完全相同**的 AST 静态门禁与真实工作 Tab 独立试跑（最多 2 个候选脚本）；试跑失败会把报错与页面现场反馈给同一会话修正。
+3. 试跑通过才原子覆盖本地 `scripts/browser_sources/<id>.py`、更新 `data/browser_sources/<id>.meta.json`，
+   本轮条目正常入库：`stats.browser_mode = "heal"`、`stats.heal_attempts`、`stats.trajectory_path`、`stats.script_path`。
+4. 两个候选都没通过则**熔断**：旧脚本与旧 meta 一个字节都不改、不提 PR，写入 `run_errors`
+   （`phase: browser_heal`, `error_code: pi_heal_exhausted`，`debug_context.last_failure` 是最后一次拒绝原因），
+   本轮 Run 记为 `failed` 并保留已消耗的 `pi` 费用。旧游标不变，修好脚本后下一轮自动回填 `resolved_at`。
+
+### 隔离 Worktree 自动提交与 GitHub PR
+
+首次提炼或自愈产出的脚本都已在本地生效（不阻塞当轮采集），同时会**尝试**交给人工评审：
+
+- 在系统临时目录创建一次性的 `git worktree`（**不在**你的工作区、不碰你的 index），从 `origin/<base_branch>`
+  或已存在的评审分支切出，**只 `git add` `<scripts_dir>/<source_id>.py` 这一个文件**（`data/` 下的轨迹与 `*.meta.json` 永不入库），提交后推送到 `auto/browser-source-<source_id>`，最后在 `finally` 中删除 worktree。
+- 同一源只有一个活跃评审分支：`gh pr list --state open --head auto/browser-source-<id>` 命中则在该分支追加 commit 并 `gh pr comment` 说明本次自愈，否则 `gh pr create --base <base_branch> --label <labels>` 新建。**绝不强推、绝不直接推 base 分支、绝不为同一源刷多个 PR**。
+- PR 标题/正文明确标注 **machine-generated，需人工 review**；提交前还会扫描脚本与正文，若出现 Cookie、Bearer Token、邮箱或本机用户路径则中止推送并记账。
+- 前置条件：本机 `git` 有可写远端，`gh` 已登录（`gh auth status`）。软降级：`gh` 未登录、离线或无推送权限时不影响脚本保存与当轮入库，
+  `stats.pr_status = "error"` 且写入 `run_errors`（`phase: script_pr`, `severity: warning`, `error_code: git_or_pr_failed`），可稍后手工补提。
+- `stats.pr_status` 取值：`created`（新建 PR）、`updated`（在已开放 PR 追加）、`unchanged`（脚本与评审分支完全一致，不重复提交）、`disabled`（`browser.pr.enabled: false`）、`error`（软降级）；成功时另有 `stats.pr_url` 与 `stats.pr_branch`。
+
+### 显式重提炼（`sources distill`）
+
+页面结构大改但旧脚本尚未报错时，可以主动刷新：
+
+```bash
+tentacles --json sources distill reddit-localllama   # 等价管理 API：POST /api/sources/reddit-localllama/distill
+```
+
+它跳过“脚本已存在就重放”的判断，强制再走一次探索 → 提炼 → 双门禁 → 本地覆盖 → `browser.pr` 提交流程；
+`enabled: false` 的源同样可显式执行。门禁未通过时旧脚本保持不变，失败记入 `browser_distill`；
+内容与评审分支一致时 `pr_status` 为 `unchanged`，因此重复执行是幂等的。
 
 ### 冷启动：首次探索、轨迹录制与脚本提炼
 
@@ -270,7 +307,9 @@ sources:
 4. **落盘边界**：两门禁都通过才写入 `scripts/browser_sources/<id>.py`，并在本地
    `data/browser_sources/<id>.meta.json` 写下轨迹路径、脚本选用的选择器、试跑耗时与样本条数
    （**只写本地 `data/`，绝不入库、绝不含 Cookie / 账号名 / 正文**）；本轮条目正常入库，
-   `stats.browser_mode = "distill"` 并带 `stats.trajectory_path`、`stats.script_path`。
+   `stats.browser_mode = "distill"` 并带 `stats.trajectory_path`、`stats.script_path`，
+   随后按 [`browser.pr`](configuration-and-models.md#4-有界面浏览器运行时browser) 尝试提交评审分支与 PR
+   （`stats.pr_status` / `stats.pr_url`；失败只降级不阻断）。
    未通过则**不写脚本**，失败栈与 `trajectory_path` 记入 `run_errors`（`phase: browser_distill`），
    下一轮仍从冷启动重试（旧游标保持不变）。
 
@@ -293,6 +332,8 @@ sources:
 # 首次验证：先手动启动带调试端口的 Chrome 并登录，再显式抓取（enabled: false 也会执行）
 tentacles sources fetch reddit-localllama
 # 冷启动：本轮会花 Token 探索并提炼脚本，之后脚本已存在则零 Token 重放
-tentacles --json sources fetch reddit-localllama | jq '.[0].stats | {browser_mode, trajectory_path, script_path}'
+tentacles --json sources fetch reddit-localllama | jq '.[0].stats | {browser_mode, trajectory_path, script_path, pr_status, pr_url}'
+# 页面大改但旧脚本没报错时，主动重提炼（幂等；同一评审分支上追加或复用 PR）
+tentacles --json sources distill reddit-localllama | jq '{status, new, pr: .stats.pr_status, url: .stats.pr_url}'
 tentacles items list --source reddit-localllama
 ```

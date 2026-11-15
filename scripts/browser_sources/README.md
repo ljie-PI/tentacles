@@ -9,7 +9,17 @@
 **提炼出的脚本必须先通过同一套静态门禁、且在真实工作 Tab 上独立试跑成功**才会出现在本目录；
 未通过则本目录不会新增文件，失败现场记入 `run_errors` 的 `browser_distill` 阶段（详见
 [信息源手册](../../docs/manual/user/sources.md#5-有界面浏览器源type-browser)）。
+
+重放报错、超时或返回 0 条时，会自动唤醒**一次**同一模型的 `pi` 自愈会话：旧脚本 + 失败栈 + 本地 meta 选择器摘要 +
+实时页面快照，修出的候选脚本同样要过静态门禁与真实试跑（最多 2 个候选）。通过才覆写本目录的脚本；
+两个都没过则旧脚本字节不变，记 `browser_heal` / `pi_heal_exhausted` 并把本轮判为 `failed`。
+
+脚本在本地生效后还会在系统临时目录的一次性 `git worktree` 中**只提交本目录的这一个 `.py` 文件**到
+`auto/browser-source-<id>` 分支并开/更新 GitHub PR（`browser.pr` 配置）。同一源的已开放 PR 会追加 commit +
+评论，不会重复开单；`gh` 未登录或无推送权限时只软降级（`script_pr` / `git_or_pr_failed`），不影响采集。
 自动生成的脚本同样是需要评审的仓库代码：它由 Agent 写出，合入前请人工过一遍选择器与字段映射。
+
+页面结构大改但旧脚本尚未报错时，用 `tentacles --json sources distill <ID>` 主动重提炼（幂等）。
 
 ## 唯一契约
 
@@ -33,8 +43,10 @@ async def extract(page: Page, *, page_url: str, max_items: int,
 - 运行时用 `page_url` 的源级 `timeout`（秒）整体限时；`timeout_ms` 传给脚本作为单步
   `goto`/`wait_for_selector` 的上限。超时会记为 `playwright_selector_timeout`。
 - 返回 `0` 条、抛出异常或返回值不合契约时记为 `script_assertion_failed`，
-  `debug_context` 中带失败瞬间的 `current_url`、`page_title`、精简 A11y 快照与栈帧。
-- `on_detail_error: fail_batch` 时该源整批失败；`record_and_skip`（默认）只记账并返回空批次。
+  `debug_context` 中带失败瞬间的 `current_url`、`page_title`、精简 A11y 快照与栈帧，
+  随后自动进入一次 `pi` 自愈；自愈耗尽则本轮 `failed`。
+- `on_detail_error: fail_batch` 只影响冷启动提炼失败（整批失败）；`record_and_skip`（默认）只记账并返回空批次。
+  重放失败（含 0 条）不适用它：一律先自愈，自愈失败就把该源本轮判为失败。
 
 ## 静态门禁
 
@@ -93,4 +105,4 @@ async def extract(page: Page, *, page_url: str, max_items: int,
   通过 CDP 附着已登录的 Chrome 后抓取 r/LocalLLaMA 的 New 列表。
 - 本地验证：先手动启动带调试端口的 Chrome
   `"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" --remote-debugging-port=9222 --profile-directory="Default"`，
-  再 `tentacles sources fetch reddit-localllama`。
+  再 `tentacles sources fetch reddit-localllama`；需要重新提炼或补提 PR 时用 `tentacles --json sources distill reddit-localllama`。

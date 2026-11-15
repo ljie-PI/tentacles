@@ -225,3 +225,25 @@ when an Agent wrote it, so it is written only after the same static gate and a s
 trial on a fresh real `BrowserContext`, with one corrective turn; otherwise the failure
 lands as `browser_distill` and no script exists for the next round to replay. The search
 for a script is a filesystem check (`<scripts_dir>/<id>.py`), never a database flag.
+
+A replay that raises, times out or returns no entries is not a dead end either: one
+`sources/browser_heal.py` session sells the same controlled `pi` process the old script, the
+failure site and the local meta selectors, gives every turn the real work tab for live
+probing, and gates each candidate (at most two) through `distiller.verify_candidate` — the
+same static gate and standalone trial, so healing cannot install what a cold start would
+reject. Only a passing candidate reaches `distiller.install_script`; a session that exhausts
+its candidates writes `pi_heal_exhausted` under `browser_heal`, leaves the old script and
+meta byte-identical, opens no PR and fails the Run (the consumed `pi` cost stays on it).
+`browser.pr.enabled` is therefore a real switch, not a schema field.
+
+`sources/script_pr.py` owns the only code path that touches git: a throwaway `git worktree`
+outside the repository starts from `origin/<base_branch>` (or the existing review branch),
+stages exactly the one relative script path, commits, pushes `HEAD:refs/heads/<prefix><id>`
+without ever forcing, and then `gh pr create` or `gh pr comment` when that branch already has
+an open PR. The worktree and its scratch directory are removed in `finally` on every path,
+`git`/`gh` failures become `git_or_pr_failed` (`script_pr`, warning) instead of exceptions,
+and a script that already matches the branch is reported as `unchanged` rather than
+re-committed. `FetchOutcome.stats` carries `pr_status`, `pr_url` and `pr_branch`; the base
+branch is only ever read. `sources distill <ID>` is the explicit refresh: `FetchContext.distill`
+skips the "a script exists, so replay it" decision and re-runs the cold-start policy, PR
+publication included.

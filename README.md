@@ -2,7 +2,7 @@
 
 个人信息与新闻管理系统：从多种信息源抓取内容，按个人 persona 过滤，再用 LLM 加工成日报、深度报道或邮件简报。
 
-> 已支持配置驱动的 RSS、IMAP、网页与有界面 Chrome 浏览器抓取、去重入库、持久化调度、命名模型、版本化 Persona 与反馈演化，以及 keyword 与统一 semantic 级联过滤和 digest/deep/summarize/none 处理器。Web 端已提供 Feed、Sources、Pipelines、Reports、Runs、Settings 和 Persona 管理；文档见 [用户手册](docs/manual/user/README.md) 与 [Agent CLI 手册](docs/manual/agent-cli/README.md)，实现与验证范围见 [规格核对](docs/agents/spec-18-audit.md)。
+> 已支持配置驱动的 RSS、IMAP、网页与有界面 Chrome 浏览器抓取（含 `pi` 冷启动提炼、重放故障自愈与隔离 worktree 自动评审 PR）、去重入库、持久化调度、命名模型、版本化 Persona 与反馈演化，以及 keyword 与统一 semantic 级联过滤和 digest/deep/summarize/none 处理器。Web 端已提供 Feed、Sources、Pipelines、Reports、Runs、Settings 和 Persona 管理；文档见 [用户手册](docs/manual/user/README.md) 与 [Agent CLI 手册](docs/manual/agent-cli/README.md)，实现与验证范围见 [规格核对](docs/agents/spec-18-audit.md)。
 
 ## 网页与 REST API
 
@@ -35,6 +35,7 @@ pip install -e ".[dev]"
 cp .env.example .env              # 可选：存放配置中 ${VAR} 引用的密钥
 tentacles config check            # 校验 config/tentacles.yaml
 tentacles sources fetch           # 抓取全部启用的信息源
+tentacles sources distill ID      # 强制重提炼某个有界面浏览器源的固化脚本
 tentacles items list --since 24h  # 查看最近 24 小时的条目
 ```
 
@@ -61,6 +62,7 @@ tentacles items list --since 24h  # 查看最近 24 小时的条目
 | `tentacles persona rollback NAME VERSION` | 复制旧内容为新版本，不删除历史 |
 | `tentacles sources list` | 列出信息源及其抓取状态 |
 | `tentacles sources fetch [ID...]` | 立即抓取信息源，不写 ID 时抓取全部启用的源 |
+| `tentacles sources distill ID` | 显式重提炼一个 `type: browser` 源的固化脚本（幂等；按 `browser.pr` 提 PR） |
 | `tentacles items list` | 列出条目（含截断正文、`page_url` 与最新评估），可按来源、时间、关键词、`--persona`、`--min-score`、`--topic` 筛选，支持分页与 `--sort time\|relevance` |
 | `tentacles items search QUERY` | 全文检索条目：默认按 BM25 相关性排序（标题权重最高），返回 `bm25_rank` 与命中高亮 `snippet`；支持与 `items list` 一致的筛选与分页 |
 | `tentacles items show ID` | 查看条目详情（正文、来源元数据与各 Pipeline 最新评估） |
@@ -244,11 +246,16 @@ browser:
   auto_launch: false                      # 端口无人监听时是否自动拉起有界面 Chrome
   default_profile: Default                # 默认 Chrome Profile，源级 chrome_profile 可覆盖
   scripts_dir: ../scripts/browser_sources # 固化脚本目录（相对本文件）
-  pi:                                     # 冷启动探索与提炼的 Agent 模型
+  pi:                                     # 冷启动探索、提炼与重放自愈的 Agent 模型
     binary: pi
     model: anthropic/claude-sonnet-4-6
     reasoning_level: high
     timeout: 300
+  pr:                                     # 提炼/自愈脚本的评审分支与 PR
+    enabled: true
+    base_branch: master
+    branch_prefix: auto/browser-source-
+    labels: [ready-for-human]
 
 sources:
   - id: reddit-localllama
@@ -276,7 +283,18 @@ sources:
   同一套 AST 门禁**且在真实工作 Tab 上独立试跑成功**（最多一次修正）才会写入仓库，选择器摘要写到
   `data/browser_sources/<id>.meta.json`。`stats.browser_mode = "distill"` 时报告 `trajectory_path` /
   `script_path`，Token 与费用归入当轮 Run；未通过则不写脚本并在 `run_errors` 的 `browser_distill` 阶段留现场。
-- 脚本报错自愈与自动提 PR 属于后续工单（`browser.pr` 目前只做 schema 校验）。
+- **重放故障自愈**：报错、超时或返回 0 条时，自动唤醒**一次**受控 `pi --mode rpc` 自愈会话（旧脚本 + 报错栈 +
+  本地 meta 选择器摘要 + 实时页面快照，可在真实工作 Tab 上现场探测），修复后的脚本必须先通过同一套 AST 门禁
+  **且在真实工作 Tab 上独立试跑成功**（最多 2 个候选）；通过则原子覆盖本地脚本、本轮条目正常入库
+  （`stats.browser_mode = "heal"`），否则**熔断**：旧脚本一字不改、不提 PR，记 `run_errors`
+  （`phase: browser_heal`, `error_code: pi_heal_exhausted`）并把本轮 Run 记为 `failed`，已花的 `pi` 费用照旧保留。
+- **隔离 worktree 自动提 PR**：首次提炼或自愈通过的脚本在本地生效后，还会在系统临时目录的一次性 `git worktree` 中
+  **只提交 `<scripts_dir>/<source_id>.py` 这一个文件**到 `auto/browser-source-<id>`，再 `gh pr create`（已有开放 PR 则追加
+  commit + `gh pr comment`）。PR 固定打上 `ready-for-human` 等配置标签且正文声明“机器生成、需人工 review”；
+  绝不强推、绝不直接推 `base_branch`、绝不提交 `data/` 下的轨迹与 meta。`gh` 未登录/离线时只软降级：
+  脚本与条目照常保留，`stats.pr_status = "error"` 并记 `git_or_pr_failed`（成功时报告 `pr_status` / `pr_url`）。
+- **主动重提炼**：`tentacles --json sources distill <ID>`（等价 `POST /api/sources/<id>/distill`）跳过“脚本已存在就重放”，
+  强制再探索一遍；与评审分支内容一致时为 `pr_status = "unchanged"`，因此重复执行幂等。
 - 完整字段说明见[信息源配置手册](docs/manual/user/sources.md#5-有界面浏览器源type-browser)与
   [脚本契约](scripts/browser_sources/README.md)，排障见 [Agent CLI 运维速查](docs/manual/agent-cli/operations-reference.md)。
 

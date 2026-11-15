@@ -125,11 +125,11 @@ browser:
     model: anthropic/claude-sonnet-4-6
     reasoning_level: high                 # off | minimal | low | medium | high | xhigh | max
     timeout: 300
-  pr:                                     # 预留：#83 脚本自愈后自动提 PR
-    enabled: true
-    base_branch: master
-    branch_prefix: auto/browser-source-
-    labels: [ready-for-human]
+  pr:                                     # 提炼/自愈脚本的评审分支与 PR（#83）
+    enabled: true                         # false 时只保存本地脚本，不跑 git/gh
+    base_branch: master                   # PR 目标分支（绝不直接推它）
+    branch_prefix: auto/browser-source-   # 最终分支：<prefix><source_id>
+    labels: [ready-for-human]             # gh pr create --label，至少一个
 ```
 
 | 字段 | 含义与默认值 |
@@ -144,10 +144,20 @@ browser:
 | `pi.binary` | `pi` 可执行文件，默认走 `PATH` 上的 `pi`；源级 `pi.binary` 可覆盖 |
 | `pi.model` | 首次探索与脚本提炼使用的模型（`provider/id` 形式），源级 `pi.model` 可覆盖 |
 | `pi.reasoning_level` | 映射为 `pi --thinking`，取值 `off`/`minimal`/`low`/`medium`/`high`/`xhigh`/`max` |
-| `pi.timeout` | 单轮探索或提炼回合的超时秒数（默认 300）；超时会中止该回合并杀掉子进程 |
-| `pr` | #83 的预留配置块，当前**只做 schema 校验**，不影响抓取行为 |
+| `pi.timeout` | 单轮探索、提炼或自愈回合的超时秒数（默认 300）；超时会中止该回合并杀掉子进程 |
+| `pr.enabled` | 默认 `true`。为 `false` 时只把脚本保存在本地并按配置入库，跳过 `git worktree` / `gh`（`stats.pr_status = "disabled"`），适合未配置 `gh` 的环境 |
+| `pr.base_branch` | PR 目标分支（默认 `master`），也是临时 worktree 的起点；**永远不会直接向它 push** |
+| `pr.branch_prefix` | 评审分支前缀，默认 `auto/browser-source-`；最终分支为 `<prefix><source_id>`，同一源复用一个分支 |
+| `pr.labels` | `gh pr create --label` 列表，默认 `[ready-for-human]`；不能为空（可重复项会自动去重） |
 
-`pi` 只在**尚无固化脚本的冷启动**里使用：探索、提炼与试跑都消耗真实模型 Token 与费用，
+`pr` 在**首次提炼成功**或**自愈重新通过试跑门禁**时生效：在系统临时目录的隔离 `git worktree` 中只提交
+`<scripts_dir>/<source_id>.py` 一个文件，推送到 `pr.branch_prefix + <source_id>`，再 `gh pr create`（已有开放 PR 时
+改为追加 commit + `gh pr comment`）。前置条件是本机 `git` 有可写远端且 `gh auth status` 已登录；
+失败只软降级（脚本与当轮条目照常保留，`stats.pr_status = "error"` 并记 `git_or_pr_failed`）。
+隔离 worktree 与临时文件无论成功、失败还是取消都会在 `finally` 删除，从不触碰你的工作区与 index。
+
+`pi` 只在**尚无固化脚本的冷启动**、**重放故障自愈**与显式 `tentacles sources distill <ID>` 里使用：
+探索、提炼、自愈与试跑都消耗真实模型 Token 与费用，
 完整流程与计费说明见 [信息源 → 有界面浏览器源](sources.md#5-有界面浏览器源type-browser)。
 
 **硬性安全边界**
