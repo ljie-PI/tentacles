@@ -168,7 +168,7 @@ tentacles --json runs show 8
 | `--unresolved` | 仅返回 `resolved_at IS NULL`（当前仍未消警）的记录 |
 | `--source ID` | 按信息源筛选（定位某个源漏抓了哪些条目） |
 | `--pipeline ID` | 按 Pipeline 筛选（过滤/成稿阶段故障） |
-| `--phase P` | 按阶段筛选：`fetch_page`、`parse_entry`、`fetch_detail`、`imap_fetch`、`browser_replay`、`browser_heal`、`llm_extract`、`filter_stage`、`report_process`、`script_pr` |
+| `--phase P` | 按阶段筛选：`fetch_page`、`parse_entry`、`fetch_detail`、`imap_fetch`、`browser_replay`、`browser_heal`、`browser_distill`、`llm_extract`、`filter_stage`、`report_process`、`script_pr` |
 | `--error-code CODE` | 按机器错误码筛选，见下方速查表 |
 | `--run-id N` | 只看某一次运行（与 `failed_targets[].error_id` 配合可精确定位） |
 | `--since T` / `--until T` | 时间窗，接受时长（`30m`、`7d`）或 UTC ISO 时间 |
@@ -253,6 +253,29 @@ tentacles --json errors show <ERROR_ID>
 - 若同时看到 `phase: "fetch_page"` 的 `unexpected_exception`，那是整源失败的外层记录（如 Chrome 未开调试端口、
   Profile 不匹配）；`message` 里带可直接执行的启动命令。
 
+### `browser_distill` 阶段的排障现场（`type: browser` 冷启动）
+
+`scripts/browser_sources/<id>.py` 还不存在时，本轮走“受控 `pi` 探索 → 录制轨迹 → 提炼脚本 → 静态门禁 + 真实试跑”
+路径。它在 `sources fetch` 的 `stats` 中报告 `browser_mode: "distill"`，成功时额外带 `trajectory_path`（本地轨迹
+JSONL）与 `script_path`（刚写入的固化脚本）；失败时带 `browser_distill_failed: true`，不写脚本、不动旧游标。
+
+```bash
+# 冷启动成功后确认脚本落地与轨迹位置
+tentacles --json sources fetch reddit-localllama | jq '.[0].stats | {browser_mode, trajectory_path, script_path, new}'
+# 冷启动失败：拿现场
+tentacles --json errors list --source reddit-localllama --phase browser_distill --unresolved
+tentacles --json errors show <ERROR_ID>
+```
+
+| `error_code` | 含义与处理建议 |
+| :--- | :--- |
+| `pi_rpc_failed` | `pi` 子进程没能完成探索：二进制/模型/凭据/`browser.pi.timeout` 问题，源没有 `task` 文字，或 Agent 一个动作都没做。`debug_context.trajectory_path` 指向本地轨迹；`message` 会带上子进程的错误原因，必要时先手工跑一次 `pi --model <model> --thinking <level> "hello"` 验证凭据 |
+| `pi_script_rejected` | 提炼出的脚本未通过 AST 门禁或真实试跑（报错 / 超时 / 0 条 / 条目缺有效链接 / `page_url` 不是入口页），已用完 1 次修正机会。`debug_context.last_failure` 是最后一次拒绝原因，`trajectory_path` 指向本轮轨迹；看完页面结构与轨迹后调整 `task` 措辞或人工写脚本 |
+
+- 两类记录都同时把 Token 与费用留在当轮 Run 上（`tentacles --json runs show <run_id>` 的 `stats.usage` / `stats.cost`），
+  失败不代表免费：`pi` 已经完成的回合照常计费。
+- `retryable` 恒为 `false`：同一配置下一轮会重试冷启动（每轮都重新计费），需要先修正配置或 `task`。
+
 ### `runs show <RUN_ID>`
 
 在 `RunView` 全部字段之外追加 `errors: ErrorEventView[]`（同样是轻量列表，不含 `debug_context`）；运行 ID 不存在时退出码 `3`。
@@ -272,6 +295,8 @@ tentacles --json errors show <ERROR_ID>
 | `browser_replay` | `playwright_selector_timeout` | 固化 Playwright 脚本等待选择器超时（页面结构已变） |
 | `browser_replay` | `script_assertion_failed` | 脚本试跑抓到 0 条或断言不通过 |
 | `browser_heal` | `pi_heal_exhausted` | `pi` 自愈后试跑仍未通过，需要人工介入 |
+| `browser_distill` | `pi_rpc_failed` | 冷启动时受控 `pi` 子进程未完成探索（二进制/模型/超时/无 `task`） |
+| `browser_distill` | `pi_script_rejected` | 提炼脚本未通过静态门禁或真实试跑（已用过 1 次修正） |
 | `script_pr` | `git_or_pr_failed` | 脚本已生成，但推送分支或 `gh pr create` 失败 |
 | `llm_extract` | `hallucinated_link_dropped` | 模型返回了页面内不存在的链接，该条已被丢弃 |
 | `llm_extract` | `invalid_json_schema` | 模型返回违反严格 JSON Schema，本轮降级 |
@@ -285,7 +310,7 @@ tentacles --json errors show <ERROR_ID>
 | `report_process` | `citation_out_of_range` | 报告引用编号越界，已丢弃该引用 |
 | 任意阶段 | `unexpected_exception` | 未被更具体分类的失败（`retryable` 为 `false`，需查 `exception_type` 与栈帧） |
 
-> 当前版本会在抓取阶段产出 `http_status_error` / `http_redirect_blocked` / `network_timeout` / `connection_failed` / `selector_no_match` / `empty_extracted_body` / `hallucinated_link_dropped` / `invalid_json_schema` / `feed_parse_error` / `entry_unusable` / `imap_auth_failed` / `imap_message_parse_error` / `unexpected_exception`，有界面浏览器源产出 `playwright_selector_timeout` / `script_assertion_failed`，在过滤阶段产出 `decision_item_error` / `llm_batch_parse_error` / `regex_timeout` / `filter_stage_aborted`，在报告阶段产出 `summarize_batch_unparsed` / `citation_out_of_range`；`script_pr` / `pi_heal_exhausted` 等机器码是账本已预留的共享词表，由 `type: browser` 自愈与提 PR 相关实现按同一契约写入，未出现的码不会作为「未知」返回。
+> 当前版本会在抓取阶段产出 `http_status_error` / `http_redirect_blocked` / `network_timeout` / `connection_failed` / `selector_no_match` / `empty_extracted_body` / `hallucinated_link_dropped` / `invalid_json_schema` / `feed_parse_error` / `entry_unusable` / `imap_auth_failed` / `imap_message_parse_error` / `unexpected_exception`，有界面浏览器源产出 `playwright_selector_timeout` / `script_assertion_failed`（重放）与 `pi_rpc_failed` / `pi_script_rejected`（冷启动提炼），在过滤阶段产出 `decision_item_error` / `llm_batch_parse_error` / `regex_timeout` / `filter_stage_aborted`，在报告阶段产出 `summarize_batch_unparsed` / `citation_out_of_range`；`script_pr` / `pi_heal_exhausted` 等机器码是账本已预留的共享词表，由 `type: browser` 自愈与提 PR 相关实现按同一契约写入，未出现的码不会作为「未知」返回。
 
 ### 各模块的 `debug_context` 现场（实战对照）
 
@@ -336,3 +361,113 @@ tentacles --json errors show 21
 6. **单条已入库条目的过滤异常**：`items show <ITEM_ID>` 查看 `evaluations[].stage_scores[].error`（已入库数据仍保留在此，不在账本里）。
 
 注意：账本只记录执行期的失败现场，不含任何业务数据；修好配置后可以用 `errors list --unresolved` 的条数下降来验证修复是否生效。
+
+---
+
+## 7. 存储状态、索引重建与冷归档（`storage`）
+
+热库 `data/tentacles.db` 始终是唯一的在线数据库；超过 `app.storage.hot_retention_days`（默认 365 天）的历史
+条目可以按**发布时间的自然年**搬进 `data/archive/tentacles-YYYY.db`（各自带 `items_fts` 索引）。三条命令都支持
+`--json`，另有只读的 `--include-archive` 用于跨年检索（见 [读取与消费采集结果](consuming-items-and-reports.md)）。
+
+```bash
+# 体积、WAL 体积、各表行数、FTS 行数、条目时间范围与全部年度冷库清单
+tentacles --json storage status
+
+# 在线重建 FTS5 索引（--optimize 只合并索引段；--include-archive 连各年冷库一起处理）
+tentacles --json storage reindex --optimize --include-archive
+
+# 先空跑：只统计会迁出多少条、哪些条目因活跃关联被豁免，不创建也不修改任何文件
+tentacles --json storage archive --dry-run
+
+# 正式归档（默认截止时间 = 今天 - hot_retention_days），成功后回收热库空间
+tentacles --json storage archive --before 365d --vacuum
+
+# 指定截止日期：按配置的 app.timezone 解析
+tentacles --json storage archive --before 2025-01-01
+```
+
+### `storage status` 返回（`StorageStatus`）
+
+```json
+{
+  "path": "/srv/tentacles/data/tentacles.db",
+  "db_bytes": 495616,
+  "wal_bytes": 0,
+  "schema_version": 18,
+  "tables": {"items": 50, "evaluations": 420, "reports": 18, "runs": 900, "run_errors": 12, "archived_identities": 137},
+  "fts_indexed_rows": 50,
+  "oldest_item_at": "2026-03-15T08:00:00Z",
+  "newest_item_at": "2026-11-01T09:10:00Z",
+  "hot_retention_days": 365,
+  "archive_dir": "/srv/tentacles/data/archive",
+  "archives": [
+    {"year": 2025, "path": "/srv/tentacles/data/archive/tentacles-2025.db", "bytes": 458752,
+     "items": 8120, "evaluations": 24000, "fts_indexed_rows": 8120}
+  ]
+}
+```
+
+- `tables.archived_identities` 是热库里永久保留的去重墓碑行数，不是条目数；`fts_indexed_rows` 应恒等于
+  `tables.items`（不等就说明索引需要 `storage reindex`）。
+- `wal_bytes`：热库 WAL 体积。检查点之后为 `0`；持续增长说明有长事务或副本进程一直读着旧快照。
+
+### `storage reindex` 返回（`StorageReindex`）
+
+```json
+{
+  "optimize": true,
+  "rows": 8170,
+  "seconds": 0.42,
+  "databases": [
+    {"path": "/srv/tentacles/data/tentacles.db", "year": null, "rows": 50, "seconds": 0.01},
+    {"path": "/srv/tentacles/data/archive/tentacles-2025.db", "year": 2025, "rows": 8120, "seconds": 0.41}
+  ]
+}
+```
+
+- `--optimize` 只做 FTS5 段合并（不改内容）；不带它则 `rebuild` 全量重建，耗时更长但能修好索引与行数不一致。
+- 各年冷库若不存在，`--include-archive` 不会凭空创建。
+
+### `storage archive` 返回（`StorageArchive`）
+
+```json
+{
+  "dry_run": false,
+  "cutoff": "2025-11-15T19:35:49.264145Z",
+  "vacuumed": true,
+  "items": 88,
+  "evaluations": 6,
+  "deferred": 0,
+  "years": [
+    {"year": 2024, "path": "/srv/tentacles/data/archive/tentacles-2024.db", "items": 38, "evaluations": 3, "bytes": 409600},
+    {"year": 2025, "path": "/srv/tentacles/data/archive/tentacles-2025.db", "items": 50, "evaluations": 3, "bytes": 458752}
+  ],
+  "exempt": {"recent_activity": 0, "active_feedback": 1, "unresolved_errors": 1},
+  "seconds": 0.044
+}
+```
+
+| 字段 | 说明 |
+| :--- | :--- |
+| `cutoff` | 实际使用的截止时间（UTC）；早于它的条目才可能被迁出 |
+| `items` / `evaluations` | 本次真正搬走的条目数与评估数（`dry-run` 时是计划搬走量） |
+| `years[]` | 按自然年分组的结果；`items` 是该年冷库里本次新增的条数，`bytes` 是归档后的库体积（`dry-run` 为 `0`） |
+| `deferred` | 归档期间被更新（或新近产生未决错误/反馈）而临时留在热库的条数；下次再跑会自动重试 |
+| `exempt` | 早于截止时间却豁免的条目数，三个原因互不重叠：`recent_activity`（最近 30 天有更新）、`active_feedback`（`persona_update.feedback_window` 内的反馈）、`unresolved_errors`（仍有未决错误） |
+
+### 语义与安全边界
+
+- **去重墓碑让旧文不复活**：迁出的条目在热库留下 `archived_identities`（含源内外部身份、原文链接、内容指纹，
+  以及原条目的 `kind` 与 `identity_policy`），并且 `source_seen_ids` 永不清理。归档后再抓同一个源，旧文章既不会
+  变成 `new`，也不会重新生成条目。墓碑按与热行相同的三条规则判重：外部身份总是判重，原文链接只在原条目为
+  `standard` 策略时判重，内容指纹只在原条目为 `standard` 且非 email 时判重。需要正文时用
+  `items show <ID> --include-archive`。
+- **两阶段、可重跑**：先写冷库并校验其 `items_fts`，再在单个热库写事务里写墓碑并删除冷行。中途被打断时热库
+  要么全有要么全无；重跑幂等（不会重复计数），已完成的部分直接跳过。
+- **不动的数据**：`reports`（自带完整 markdown）永远留在热库；`pipeline_consumption` 与 `feedback` 行保留，
+  因此报告与已消费标记不会失效。`run_errors` 账本本身不迁移。
+- **`--dry-run` 纯只读**：不创建 `archive_dir`、不写墓碑、不改任何文件，可安全地放进定时巡检。
+  `--vacuum` 不能与 `--dry-run` 同时使用（退出码 `2`）。
+- **`--before` 解析**：接受相对时长（`365d`、`2w`、`24h`）或 ISO 日期/时间（无时区后缀按 `app.timezone`）。
+  格式非法返回退出码 `2`（`invalid`），不会退化成“归档全部”。

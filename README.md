@@ -2,7 +2,7 @@
 
 个人信息与新闻管理系统：从多种信息源抓取内容，按个人 persona 过滤，再用 LLM 加工成日报、深度报道或邮件简报。
 
-> 已支持配置驱动的 RSS、IMAP、网页与有界面 Chrome 浏览器抓取、去重入库、持久化调度、命名模型、版本化 Persona 与反馈演化，以及 keyword/decision/llm 级联过滤和 digest/deep/summarize/none 处理器。Web 端已提供 Feed、Sources、Pipelines、Reports、Runs、Settings 和 Persona 管理；文档见 [用户手册](docs/manual/user/README.md) 与 [Agent CLI 手册](docs/manual/agent-cli/README.md)，实现与验证范围见 [规格核对](docs/agents/spec-18-audit.md)。
+> 已支持配置驱动的 RSS、IMAP、网页与有界面 Chrome 浏览器抓取、去重入库、持久化调度、命名模型、版本化 Persona 与反馈演化，以及 keyword 与统一 semantic 级联过滤和 digest/deep/summarize/none 处理器。Web 端已提供 Feed、Sources、Pipelines、Reports、Runs、Settings 和 Persona 管理；文档见 [用户手册](docs/manual/user/README.md) 与 [Agent CLI 手册](docs/manual/agent-cli/README.md)，实现与验证范围见 [规格核对](docs/agents/spec-18-audit.md)。
 
 ## 网页与 REST API
 
@@ -64,10 +64,14 @@ tentacles items list --since 24h  # 查看最近 24 小时的条目
 | `tentacles items list` | 列出条目（含截断正文、`page_url` 与最新评估），可按来源、时间、关键词、`--persona`、`--min-score`、`--topic` 筛选，支持分页与 `--sort time\|relevance` |
 | `tentacles items search QUERY` | 全文检索条目：默认按 BM25 相关性排序（标题权重最高），返回 `bm25_rank` 与命中高亮 `snippet`；支持与 `items list` 一致的筛选与分页 |
 | `tentacles items show ID` | 查看条目详情（正文、来源元数据与各 Pipeline 最新评估） |
+| `tentacles items list/search/show ... --include-archive` | 跨年只读查询：与各年度冷归档库归并分页，结果用 `archive_year` 标注年份 |
 | `tentacles tick` | 先并发抓取，再依次过滤、依次运行到期 pipeline |
 | `tentacles scheduler status` | 查看任务频率、到期时间、运行状态 |
 | `tentacles pipelines list/filter/run ID` | 查看 pipeline、只过滤或生成报告 |
 | `tentacles reports list/show ID` | 查看报告列表和全文 |
+| `tentacles storage status` | 热库与各年度冷库的体积、WAL 体积、各表行数与 FTS 行数 |
+| `tentacles storage reindex [--optimize] [--include-archive]` | 在线重建（或合并）FTS5 全文索引 |
+| `tentacles storage archive [--before T] [--dry-run] [--vacuum]` | 把超过 `hot_retention_days` 的条目按自然年搬进冷库 |
 | `tentacles runs list` | 查看运行记录 |
 | `tentacles runs show RUN_ID` | 查看单次运行的统计与本次记录的故障列表 |
 | `tentacles errors list` | 检索故障账本，支持 `--unresolved`、`--source`、`--pipeline`、`--phase`、`--error-code`、`--run-id`、`--since/--until` 与分页 |
@@ -87,6 +91,25 @@ tentacles --json items list --persona default --min-score 0.8 --topic 人工智�
 # 按相关性检索，拿回 BM25 排名分与命中高亮摘录
 tentacles --json items search '广告推荐 AI' --limit 20
 ```
+
+## 冷归档：单活跃热库 + 按年冷库
+
+`data/tentacles.db` 始终是唯一的在线库——7 天深度聚类、30 天反馈回溯、跨月原位更新与外键完整性都不拆分。
+超过 `app.storage.hot_retention_days`（默认 365 天）的历史条目可以按发布年份搬进 `data/archive/tentacles-YYYY.db`
+（每个冷库自带 `items_fts`），热库只留下极窄的去重墓碑 `archived_identities`，因此归档后旧文不会被任何源重新当成新条目：
+
+```bash
+# 空跑：只统计会迁出与豁免的条目，不改任何文件
+tentacles --json storage archive --dry-run
+# 正式归档（先写冷库并校验，再在一个热库事务里写墓碑、删冷行），并回收空间
+tentacles --json storage archive --before 365d --vacuum
+# 跨年检索：热库 + 全部冷库归并分页，archive_year 标注年份
+tentacles --json items search 'iPhone' --include-archive
+```
+
+仍有未决错误、处于反馈窗口内、或最近 30 天还有更新的条目会自动留在热库；中途被打断时热库要么全有要么全无，
+重跑幂等。配置与运维细节见 [配置手册](docs/manual/user/configuration-and-models.md#5-存储冷热分层与年度冷归档appstorage)
+与 [Agent CLI 手册](docs/manual/agent-cli/operations-reference.md#7-存储状态索引重建与冷归档storage)。
 
 ## RSS / Atom 与 Web list / llm 原位更新（可选）
 
@@ -217,9 +240,15 @@ tentacles items list --source reddit-localllama
 ```yaml
 browser:
   cdp_url: http://127.0.0.1:9222          # connect_over_cdp 附着的调试端点
+  webbridge_url: http://127.0.0.1:10086   # 冷启动探索的一次性工具桥接地址（仅回环）
   auto_launch: false                      # 端口无人监听时是否自动拉起有界面 Chrome
   default_profile: Default                # 默认 Chrome Profile，源级 chrome_profile 可覆盖
   scripts_dir: ../scripts/browser_sources # 固化脚本目录（相对本文件）
+  pi:                                     # 冷启动探索与提炼的 Agent 模型
+    binary: pi
+    model: anthropic/claude-sonnet-4-6
+    reasoning_level: high
+    timeout: 300
 
 sources:
   - id: reddit-localllama
@@ -241,7 +270,13 @@ sources:
   路径必须落在 `browser.scripts_dir` 内，`../../` 越界在 `config check` 阶段即报错。
 - **失败可排障**：重放超时/脚本失败/返回 0 条都会写入 `run_errors` 的 `browser_replay` 阶段，
   带上失败瞬间的 `current_url`、`page_title`、精简 A11y 快照与脚本栈帧（`errors show`）。
-- 无脚本时的 `pi` 自动探索与脚本自愈提 PR 分别属于后续工单；`browser.pi` / `browser.pr` 目前只做 schema 校验。
+- **冷启动自动提炼**：当 `scripts/browser_sources/<id>.py` 还不存在时，本轮按 `browser.pi`（`binary` / `model` /
+  `reasoning_level` / `timeout`）拉起受控 `pi --mode rpc` 探索页面，把每一步动作与页面决策上下文写入
+  `data/trajectories/<id>/<run_id>.jsonl`（本地、脱敏、不入 Git），再从轨迹提炼固定脚本；提炼出的脚本必须先通过
+  同一套 AST 门禁**且在真实工作 Tab 上独立试跑成功**（最多一次修正）才会写入仓库，选择器摘要写到
+  `data/browser_sources/<id>.meta.json`。`stats.browser_mode = "distill"` 时报告 `trajectory_path` /
+  `script_path`，Token 与费用归入当轮 Run；未通过则不写脚本并在 `run_errors` 的 `browser_distill` 阶段留现场。
+- 脚本报错自愈与自动提 PR 属于后续工单（`browser.pr` 目前只做 schema 校验）。
 - 完整字段说明见[信息源配置手册](docs/manual/user/sources.md#5-有界面浏览器源type-browser)与
   [脚本契约](scripts/browser_sources/README.md)，排障见 [Agent CLI 运维速查](docs/manual/agent-cli/operations-reference.md)。
 
@@ -391,43 +426,45 @@ pipeline 的频率自动运行；手动命名调用不受开关限制。确认�
 
 批次关联规则、截止日期排序、提示词格式和费用语义见 [画像、过滤与报告流水线](docs/manual/user/pipelines-and-personas.md)。
 
-## Decision（JEV）过滤
+## 语义过滤（`type: semantic`）
 
-可以在 pipeline.filters 中加入 OpenRouter Decisions 阶段：
-
-```yaml
-- type: decision
-  model: decision          # 可省略，使用 defaults.models.decision
-  relevance_type: noul     # 或 score：四级有序量表
-  reject_below: 0.3
-  accept_above: 0.8
-```
-
-每条候选内容分别判断“用户是否想读”；Persona 有兴趣标签时同时选择一个标签（或 other）。
-score 的原始分数按量表最大值归一化，保存原分数、概率/置信度及实际返回的模型名。
-模型的 `concurrency` 控制固定 worker 池；结果保持输入对应关系，429 对同一批所有 worker 共享暂停点。
-401/403/非瞬时 402 会停止新派发，等待在途请求完成，再将本批记为失败；400/413 只影响该条目。
-已完成的最终评估仍缓存，重试不会为它们重复请求；取消也会保留已返回的已知用量和成本。
-
-默认要求服务方不收集数据，额外 provider 路由偏好不会移除这个默认值；只有显式 `data_collection: allow` 才放宽。
-示例配置中的阶段保持注释，启用后会实际调用模型并产生费用。`models test decision` 可先用固定 noul 题探测。
-
-## LLM 批量过滤
-
-对前面阶段拿不准的条目，可追加一层聊天模型批量分类：
+Chat 模型与 OpenRouter Decisions（JEV）共用同一个配置块；**跑哪条链路由模型自身的 `kind` 决定**，不必改配置结构。
+旧的 `type: llm` / `type: decision` 写法仍然合法，只会影响省略 `model` 时取哪个默认值。
 
 ```yaml
-- type: llm
-  model: fast             # 可省略，默认 defaults.models.filter
-  batch_size: 20          # 1–100
+- type: semantic
+  model: fast               # 可省略：semantic/llm 用 defaults.models.filter，decision 用 defaults.models.decision
+  batch_size: 20            # 每次 20 条一个 batch，也是增量落库检查点（1–100）
+  summary_chars: 160        # 每条附带的短摘要上限，0 表示只发标题（0–1000）
   reject_below: 0.5
+  accept_above: 0.85
+  # 仅当所选模型 kind 为 decision（JEV）时生效：
+  relevance_type: noul              # 或 score：四级有序量表归一化
+  jev_batch_mode: packed_questions  # 或 windowed_pool：逐条并发
 ```
 
-请求包含有序兴趣标签、画像和编号标题列表；每条最多一个标签和一句短理由。
-未返回的编号按 0 分处理，未知编号忽略。脏 JSON 会先由共享提取器恢复；无法可靠解析的批次仅拆成两半各重试一次，
-失败半批不会被误存成“无关”，而是交给下一阶段或留待重试。重试仍计入已知用量/成本。
+**Chat 链路**：每批最多 20 条，请求包含有序兴趣标签、画像与编号条目（含 `summary[:summary_chars]`）。
+每条可返回多个 `tag_ids` 与多条具体 `match_points`（兼容旧的单 `tag_id` / 单 `reason`）。
+未返回的编号按 0 分处理，未知编号忽略。脏 JSON 先由共享提取器恢复；无法可靠解析的批次仅拆成两半各重试一次，
+失败半批不会被误存成“无关”，而是写入故障账本（`llm_batch_parse_error`）并交给下一阶段或留待重试。重试仍计入已知用量/成本。
 无兴趣标签时，使用 profile 中非空条目行作为有序兴趣单元；空画像不盲目生成负面评估。
-默认示例仍不自动启用此付费阶段，确认模型和费用后可取消对应配置注释。
+
+**JEV 链路**：利用 `/alpha/decisions` 在同一 `state` 上同时回答多道命名题的能力做两步打包，20 条共享同一份 Persona：
+先问 `r_1..r_20` 相关性，只为过线幸存项补问 `t_<编号>` 兴趣标签，Persona 的重复传输从 20 份降到 2 份。
+端点以 HTTP 400/413 拒绝打包体时，该批自动对半重试一次；对半后仍被拒则剩余批次回退 `windowed_pool`
+（固定 `min(concurrency, batch_size)` 个 worker 逐条并发），429 暂停点与 401/403/非瞬时 402 终止信号对整批共享。
+匹配点不再硬编码 `decision relevance`，而是生成可读文本，例如
+`JEV 相关性 0.91，命中优先兴趣「AI与广告算法」（推荐系统、CTR预估与机器学习论文）`；`score` 模式还会写明量表档位。
+默认要求服务方不收集数据，额外 provider 路由偏好不会移除这个默认值；只有显式 `data_collection: allow` 才放宽。
+
+**跨阶段汇总**：最终评估合并条目走过所有阶段的正向证据 —— `topics` / `tags` 与 `match_points` 按阶段顺序去重
+（匹配点最多保留 5 条），兼容字段 `reason` 取首条匹配点。Web `Feed` 与 `items list/show` 展示同一份数据。
+
+**每批增量落库**：候选按 `batch_size` 分块推进（纯 `keyword` 流水线按 100 条一块），每完成一块立即在 Run 租约与
+`input_revision` 围栏下写入 `evaluations`。中途取消、断网或崩溃保留已完成分块的结论与已知用量/成本，
+重跑只评估剩余未评条目。
+
+默认示例仍把该阶段保持注释，确认模型和费用后可取消配置注释。`models test decision` 可先用固定 noul 题探测连通性。
 
 ## 自动抓取
 

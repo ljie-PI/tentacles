@@ -19,19 +19,36 @@ from tentacles.schemas import Completion
 @dataclass(frozen=True)
 class ModelRequirement:
     stage: ModelStage
-    kind: ModelKind
+    # None: the stage accepts either kind and dispatches on the resolved model.
+    kind: ModelKind | None
     # none does not use a model, but an explicit override must still be valid.
     optional: bool = False
 
     def resolve(self, models: ModelRegistry, override: str | None) -> str:
+        if self.kind is None:
+            return models.resolve_any(self.stage, override)
         name = models.resolve(self.stage, override)
         models.spec(name, kind=self.kind)
         return name
 
 
 class Stage(Protocol):
-    @property
-    def models(self) -> tuple[ModelRequirement, ...]: ...
+    def models(self, stage: StageSpec) -> tuple[ModelRequirement, ...]:
+        """The model requirements of one configured stage.
+
+        The declaration depends on the stage because a spelling can choose its
+        own default stage (see `SemanticSpec.model_stage`); central validation
+        reads it even when other options of that stage are invalid.
+        """
+        ...
+
+    def batch_size(self, stage: StageSpec) -> int | None:
+        """The paid request size this stage wants for one configured stage.
+
+        None: the stage makes no paid requests, so it does not constrain how
+        many items the cascade finishes before it persists a chunk.
+        """
+        ...
 
     def item_error_code(self, scored: StageScore) -> str:
         """The shared vocabulary code for an item this stage could not score."""

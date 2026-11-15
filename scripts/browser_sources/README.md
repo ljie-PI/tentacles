@@ -4,6 +4,13 @@
 默认路径为 `<browser.scripts_dir>/<source_id>.py`（也可用源级 `script_path` 显式指定，
 但必须落在 `browser.scripts_dir` 目录内并返回配置错误之外的结果）。
 
+某个源还没有脚本时，`tentacles sources fetch` 会走一次冷启动：受控 `pi --mode rpc` 探索页面、
+把动作与页面决策上下文录到 `data/trajectories/<id>/<run_id>.jsonl`，再从轨迹提炼出一个符合下面契约的脚本。
+**提炼出的脚本必须先通过同一套静态门禁、且在真实工作 Tab 上独立试跑成功**才会出现在本目录；
+未通过则本目录不会新增文件，失败现场记入 `run_errors` 的 `browser_distill` 阶段（详见
+[信息源手册](../../docs/manual/user/sources.md#5-有界面浏览器源type-browser)）。
+自动生成的脚本同样是需要评审的仓库代码：它由 Agent 写出，合入前请人工过一遍选择器与字段映射。
+
 ## 唯一契约
 
 ```python

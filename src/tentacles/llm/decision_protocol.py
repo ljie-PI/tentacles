@@ -6,6 +6,17 @@ import math
 import sys
 from typing import Any
 
+from tentacles.errors import UpstreamError
+
+
+class MissingDecisionAnswers(UpstreamError):
+    """The response left out an answer it was asked for.
+
+    Distinct from an unusable response: a partial answer set usually means the
+    packed payload was too large, so a caller can halve it instead of losing the
+    whole batch. Billing metadata is recorded before this is raised.
+    """
+
 
 def validate_questions(questions: dict[str, Any]) -> None:
     if not questions:

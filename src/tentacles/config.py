@@ -52,12 +52,22 @@ def chrome_profile_name(value: str) -> str:
     return value.strip()
 
 
+class StorageSpec(BaseModel):
+    """冷热分层：热库保留窗口，以及按自然年归档库的位置。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    hot_retention_days: int = Field(default=365, ge=1, le=36500)
+    archive_dir: Path = Path("../data/archive")
+
+
 class AppSpec(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     timezone: str = "Asia/Shanghai"
     data_dir: Path = Path("../data")
     reports_dir: Path = Path("../reports")
+    storage: StorageSpec = Field(default_factory=StorageSpec)
 
     @field_validator("timezone")
     @classmethod
@@ -188,6 +198,10 @@ class AppConfig(BaseModel):
     @property
     def db_path(self) -> Path:
         return self.data_dir / "tentacles.db"
+
+    @property
+    def archive_dir(self) -> Path:
+        return self.resolve(self.app.storage.archive_dir)
 
     @property
     def browser_scripts_dir(self) -> Path:

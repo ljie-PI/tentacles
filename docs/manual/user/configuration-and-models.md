@@ -12,6 +12,9 @@ app:
   timezone: Asia/Shanghai     # Web 展示与 5 段 cron 计算使用的 IANA 时区；SQLite 内一律存 UTC
   data_dir: ../data           # SQLite 数据库目录
   reports_dir: ../reports     # Markdown 报告落盘目录
+  storage:                    # 冷热分层（详见第 5 节）
+    hot_retention_days: 365   # 热库保留天数
+    archive_dir: ../data/archive  # 年度冷库目录 tentacles-YYYY.db
 ```
 
 ## 2. 配置校验（`tentacles config check`）
@@ -34,8 +37,8 @@ tentacles config check
 | 阶段 (`stage`) | 要求模型种类 (`kind`) | 用途与触发时机 |
 | :--- | :--- | :--- |
 | **`extract`** | `chat` | `type: web` + `mode: llm` 网页智能抽取（可在具体 source 上用 `model:` 覆盖） |
-| **`filter`** | `chat` | Pipeline 中的 `- type: llm` 批量分类打分阶段（可在该 filter 上用 `model:` 覆盖） |
-| **`decision`** | `decision` | Pipeline 中的 `- type: decision` 单条相关性与标签打分阶段（仅支持 OpenRouter Decisions API，如 JEV） |
+| **`filter`** | `chat` | `- type: semantic`（或旧写法 `type: llm`）在模型为 chat 时使用的默认模型（可在该 filter 上用 `model:` 覆盖） |
+| **`decision`** | `decision` | `- type: semantic`（或旧写法 `type: decision`）在模型为 decision 时使用的默认模型；只有 `type: decision` 会默认取这一项（仅支持 OpenRouter Decisions API，如 JEV） |
 | **`persona`** | `chat` | `persona set` 修改画像文本时自动抽取 5–20 个兴趣标签，以及 `persona evolve` 画像演化 |
 | **`process`** | `chat` | Pipeline 处理器（`digest` / `deep` / `summarize`）生成最终报告（可在 processor 上用 `model:` 覆盖） |
 
@@ -111,13 +114,13 @@ defaults:
 ```yaml
 browser:
   cdp_url: http://127.0.0.1:9222          # Chrome Remote Debugging 端点
-  webbridge_url: http://127.0.0.1:10086   # 预留：#82 探索期桥接地址（当前仅校验）
+  webbridge_url: http://127.0.0.1:10086   # 探索期本地工具桥接地址（仅回环）
   auto_launch: false                      # CDP 无人监听时是否自动拉起有界面 Chrome
   chrome_executable: null                 # 可选：显式 Chrome 可执行文件路径
   chrome_user_data_dir: null              # 可选：Chrome User Data 根目录（auto_launch 时必填）
   default_profile: Default                # 默认 Chrome Profile 目录名（如 Default、Profile 1）
   scripts_dir: ../scripts/browser_sources # 固化 Playwright 脚本目录，相对本文件解析
-  pi:                                     # 预留：#82/#83 的探索与自愈模型
+  pi:                                     # 首次探索与脚本提炼所用的 Agent 模型
     binary: pi
     model: anthropic/claude-sonnet-4-6
     reasoning_level: high                 # off | minimal | low | medium | high | xhigh | max
@@ -132,13 +135,20 @@ browser:
 | 字段 | 含义与默认值 |
 | :--- | :--- |
 | `cdp_url` | 用 `connect_over_cdp` 附着的有界面 Chrome 调试端点，**必须带显式端口**，默认 `http://127.0.0.1:9222` |
-| `webbridge_url` | 预留给 #82 探索期的本地桥接地址，当前不产生任何网络行为 |
+| `webbridge_url` | 首次探索时的本地工具桥接端点，**只接受回环地址与显式端口**（默认 `http://127.0.0.1:10086`）。抓取进程在该地址启动一次性 JSON 端点，受控 `pi` 子进程里的扩展只能通过它操作工作 Tab；端口被占用会直接报配置错误 |
 | `auto_launch` | 默认 `false`。为 `true` 且 `cdp_url` 无人监听时，按目标 Profile 以有界面模式拉起 Chrome（**绝不传 `--headless`**）；抓取结束后只关闭这次拉起的进程 |
 | `chrome_executable` | 可选 Chrome 可执行文件；缺省在 macOS/Windows 常见路径与 `PATH` 的 `google-chrome*` / `chromium*` 中查找 |
 | `chrome_user_data_dir` | 可选 User Data 根目录；附着时若配置了它，会与实际命令行 `--user-data-dir` 比对 |
 | `default_profile` | 默认 Chrome Profile 目录名，源级 `chrome_profile` 可覆盖；只接受目录名（禁止 `/`、前导 `-` 等可注入参数的值） |
 | `scripts_dir` | 固化脚本目录，相对 YAML 解析；源级 `script_path` 必须解析到该目录内的 `.py` 文件 |
-| `pi` / `pr` | #82 / #83 的预留配置块，当前**只做 schema 校验**，不影响抓取行为 |
+| `pi.binary` | `pi` 可执行文件，默认走 `PATH` 上的 `pi`；源级 `pi.binary` 可覆盖 |
+| `pi.model` | 首次探索与脚本提炼使用的模型（`provider/id` 形式），源级 `pi.model` 可覆盖 |
+| `pi.reasoning_level` | 映射为 `pi --thinking`，取值 `off`/`minimal`/`low`/`medium`/`high`/`xhigh`/`max` |
+| `pi.timeout` | 单轮探索或提炼回合的超时秒数（默认 300）；超时会中止该回合并杀掉子进程 |
+| `pr` | #83 的预留配置块，当前**只做 schema 校验**，不影响抓取行为 |
+
+`pi` 只在**尚无固化脚本的冷启动**里使用：探索、提炼与试跑都消耗真实模型 Token 与费用，
+完整流程与计费说明见 [信息源 → 有界面浏览器源](sources.md#5-有界面浏览器源type-browser)。
 
 **硬性安全边界**
 
@@ -150,3 +160,67 @@ browser:
   `../../` 或符号链接逃逸都会在 `tentacles config check` 阶段报错。
 - **只关自己的 Tab**：每次重放新建一个隔离工作 Tab，无论成功、超时、异常还是 Ctrl-C 取消都只关闭该 Tab；
   运行时不调用 `browser.close()`，绝不关闭你的 Chrome 主窗口，也不写你的 Profile。
+
+---
+
+## 5. 存储冷热分层与年度冷归档（`app.storage`）
+
+热库始终是**唯一的在线数据库** `data/tentacles.db`：7 天深度聚类、30 天反馈回溯、跨月原位更新与 SQLite
+外键完整性全部留在原地，不会因为跨月被切成多个库。运行数年后，超出保留期的历史条目可以按**发布时间的自然年**
+搬进独立冷库：
+
+```text
+data/
+├── tentacles.db                # 热库：默认保留最近 hot_retention_days 天
+└── archive/
+    ├── tentacles-2024.db       # 2024 自然年冷库（自带独立 items_fts 索引）
+    └── tentacles-2025.db
+```
+
+```yaml
+app:
+  storage:
+    hot_retention_days: 365     # storage archive 的默认截止时间（天）
+    archive_dir: ../data/archive  # 相对配置文件所在目录解析
+```
+
+| 配置项 | 默认值 | 说明 |
+| :--- | :--- | :--- |
+| `hot_retention_days` | `365` | `tentacles storage archive` 不传 `--before` 时的默认截止天数：更早的条目会被搬进冷库 |
+| `archive_dir` | `../data/archive` | 年度冷库目录，相对 YAML 文件解析；`tentacles-<YYYY>.db` 由工具生成，`tentacles config check` 会拒绝把它设成 `app.data_dir` 或其父目录 |
+
+**归档不变量**
+
+1. **去重墓碑永久留在热库**：条目迁出时，热库只保留极窄的 `archived_identities`
+   （`source_id`、`external_id`、`url`、`fingerprint`、原条目的 `kind`、`identity_policy`、归档年份），
+   `source_seen_ids` 一并保留，因此归档之后任何信息源再抓到旧文章都不会被当成 `new`。墓碑走的是与热行
+   **完全相同**的三条去重规则：外部身份总是判重；原文链接只在原条目为 `standard` 策略时判重；
+   内容指纹只在原条目为 `standard` 且非 email 时判重。所以 `revision` 链接、邮件指纹在归档前后
+   都不会压制新条目（schema 19 之前写入的旧墓碑按最保守的 `standard`、非 email 继续参与三条规则）。
+2. **活跃关联自动豁免**：仍有未决错误（`errors list --unresolved`）、处于 `persona_update.feedback_window`
+   活跃反馈窗口内、或最近 30 天还有更新活动的条目一律留在热库，不会产生悬空引用。
+3. **报告自洽**：`reports` 自带完整 `markdown`，其 `item_ids` 指向已归档条目时仍可通过
+   `items show --include-archive` 查回原文。
+
+**运维命令**（完整 JSON 契约见 [Agent CLI 手册](../agent-cli/operations-reference.md#7-存储状态索引重建与冷归档storage)）：
+
+```bash
+# 先看体积、各表行数与已有冷库清单（只读）
+tentacles --json storage status
+
+# 只统计会迁出/豁免多少条，不创建也不修改任何文件
+tentacles --json storage archive --dry-run
+
+# 正式归档：先写冷库并校验，再在一个热库事务里写墓碑、删冷行；--vacuum 回收空间
+tentacles --json storage archive --before 365d --vacuum
+
+# 重建（或 --optimize 合并）FTS5 索引，可带上全部冷库
+tentacles --json storage reindex --include-archive
+
+# 跨年检索：热库 + 全部冷库归并分页，结果用 archive_year 标注年份
+tentacles --json items search 'iPhone' --include-archive
+```
+
+归档是**两阶段**的：先把条目与对应 `evaluations` 写进 `tentacles-<YYYY>.db` 并校验该库的 `items_fts`，
+再在一个热库写事务里写入墓碑并删除冷行。中途被打断时热库要么全有要么全无，重跑 `storage archive`
+是幂等的；期间被更新过的条目会留在热库（返回里计入 `deferred`），冷库里的过期副本会被撤掉。

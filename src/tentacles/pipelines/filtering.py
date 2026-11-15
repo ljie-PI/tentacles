@@ -11,7 +11,35 @@ from tentacles.pipelines.adapters import Stage
 from tentacles.pipelines.config import PipelineSpec, StageSpec
 from tentacles.llm.registry import ModelRegistry
 from tentacles.pipelines.registry import STAGES
-from tentacles.pipelines.models import Evaluation, StageScore, StageBatch, FilterBatch
+from tentacles.pipelines.models import MAX_MATCH_POINTS, Evaluation, StageScore, StageBatch, FilterBatch
+
+# 没有任何付费批次的级联仍按大块推进，避免频繁写库与检查点。
+CHUNK_WITHOUT_BATCH = 100
+
+
+def _chunk_size(spec: PipelineSpec) -> int:
+    """Finished chunks are persisted, so the paid batch size is also the checkpoint unit."""
+    sizes = (STAGES[stage.type].batch_size(stage) for stage in spec.filters)
+    return max((size for size in sizes if size is not None), default=CHUNK_WITHOUT_BATCH)
+
+
+def _evidence(traces: list[StageScore]) -> tuple[list[str], list[str]]:
+    """Merge every stage's positive evidence in stage order, without duplicates.
+
+    Tags and match points only ever describe a hit, so an error score (which
+    carries none) can never contribute a fabricated reason.
+    """
+    tags: dict[str, str] = {}
+    points: dict[str, str] = {}
+    for scored in traces:
+        if scored.score is None:
+            continue
+        for tag in scored.tags:
+            tags.setdefault(tag.casefold(), tag)
+        for point in scored.details.get('match_points') or []:
+            if isinstance(point, str) and point.strip():
+                points.setdefault(point.casefold(), point.strip())
+    return list(tags.values()), list(points.values())[:MAX_MATCH_POINTS]
 
 
 def _record_item_error(progress: FilterBatch, spec: PipelineSpec, adapter: Stage, stage: StageSpec,
@@ -42,48 +70,64 @@ async def filter_items(items: list[Item], persona: PersonaView, spec: PipelineSp
     progress.batches = [StageBatch([]) for _ in spec.filters]
     traces: dict[str, list[StageScore]] = {item.id: [] for item in items}
     final: dict[str, Evaluation] = {}
-    pending = list(items)
     if not spec.filters:
         progress.evaluations = [Evaluation(pipeline_id=spec.id, item_id=item.id, persona_version=persona.version,
             input_revision=item.content_revision,
             passed=True, score=1, reason='no filtering stages configured', stage='none', evaluated_at=now)
             for item in items]
         return progress
-    for i, stage in enumerate(spec.filters):
-        last = i == len(spec.filters) - 1
-        forwarded = []
-        batch = progress.batches[i]
-        adapter = STAGES[stage.type]
-        await adapter.score(pending, persona, stage, i, models, batch)
-        scores = batch.scores
-        for item, scored in zip(pending, scores):
-            traces[item.id].append(scored)
-            if scored.score is None:
-                counts[i]['errors'] += 1
-                if not last and batch.error is None:
+
+    async def cascade(chunk: list[Item]) -> None:
+        """Run one chunk through the whole cascade, leaving final evaluations behind."""
+        pending = chunk
+        for i, stage in enumerate(spec.filters):
+            last = i == len(spec.filters) - 1
+            forwarded = []
+            batch = progress.batches[i]
+            adapter = STAGES[stage.type]
+            scored_from = len(batch.scores)
+            await adapter.score(pending, persona, stage, i, models, batch)
+            for item, scored in zip(pending, batch.scores[scored_from:]):
+                traces[item.id].append(scored)
+                if scored.score is None:
+                    counts[i]['errors'] += 1
+                    if not last and batch.error is None:
+                        counts[i]['forwarded'] += 1
+                        forwarded.append(item)
+                        continue
+                    _record_item_error(progress, spec, adapter, stage, i, item, scored)
+                    continue
+                rejected = scored.score < stage.rejection
+                accepted = not rejected and (last or stage.accept_above is not None
+                                             and scored.score >= stage.accept_above)
+                if rejected or accepted:
+                    counts[i]['rejected' if rejected else 'passed'] += 1
+                    tags, points = _evidence(traces[item.id])
+                    final[item.id] = Evaluation(pipeline_id=spec.id, item_id=item.id,
+                        input_revision=item.content_revision,
+                        persona_version=persona.version, passed=accepted, score=scored.score,
+                        tags=tags, match_points=points,
+                        reason=points[0] if points else scored.reason, stage=stage.type,
+                        stage_scores=traces[item.id], evaluated_at=now)
+                elif batch.error is None:
                     counts[i]['forwarded'] += 1
                     forwarded.append(item)
-                    continue
-                _record_item_error(progress, spec, adapter, stage, i, item, scored)
-                continue
-            rejected = scored.score < stage.rejection
-            accepted = not rejected and (last or stage.accept_above is not None and scored.score >= stage.accept_above)
-            if rejected or accepted:
-                counts[i]['rejected' if rejected else 'passed'] += 1
-                final[item.id] = Evaluation(pipeline_id=spec.id, item_id=item.id,
-                    input_revision=item.content_revision,
-                    persona_version=persona.version, passed=accepted, score=scored.score,
-                    tags=scored.tags, match_points=list(scored.details.get('match_points') or []),
-                    reason=scored.reason, stage=stage.type,
-                    stage_scores=traces[item.id], evaluated_at=now)
-            elif batch.error is None:
-                counts[i]['forwarded'] += 1
-                forwarded.append(item)
+            if batch.error is not None:
+                progress.error = batch.error
+                return
+            pending = forwarded
+
+    size = _chunk_size(spec)
+    for offset in range(0, len(items), size):
+        chunk = items[offset:offset + size]
+        await cascade(chunk)
         progress.evaluations = [final[item.id] for item in items if item.id in final]
-        if batch.error is not None:
-            progress.error = batch.error
+        if progress.error is not None:
             return progress
-        pending = forwarded
+        if progress.checkpoint is not None:
+            finished = [final[item.id] for item in chunk if item.id in final]
+            if finished:
+                await progress.checkpoint(finished)
     return progress
 
 

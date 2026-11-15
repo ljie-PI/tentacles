@@ -35,6 +35,16 @@ class ModelRegistry:
         self.spec(name, kind='decision' if stage == 'decision' else 'chat')
         return name
 
+    def resolve_any(self, stage: Stage, override: str | None = None) -> str:
+        """Resolve a model for an adapter that accepts either kind and dispatches itself."""
+        if stage not in STAGES:
+            raise ConfigError(f'unknown model stage {stage!r}')
+        name = override if override is not None else self._defaults.models.get(stage)
+        if name is None:
+            raise ConfigError(f'defaults.models.{stage}: no model configured')
+        self.spec(name)
+        return name
+
     def spec(self, name: str, *, kind: str | None = None) -> ModelSpec:
         if name not in self._specs:
             raise NotFound(f'unknown model {name!r}')

@@ -53,15 +53,16 @@ pipelines:
         hard_exclude: ['sponsored\s+by']
         guard_ambiguous_exclude: true   # 默认 true：软排除与正向词同时命中时豁免转交下一关
         reject_below: 0.5
-      - type: decision
-        model: decision
-        relevance_type: noul
-        reject_below: 0.3
-        accept_above: 0.8
-      - type: llm
-        model: fast
-        batch_size: 20
+      # 统一语义过滤块：模型是 chat 还是 decision，由模型自身的 kind 决定。
+      - type: semantic
+        model: fast                     # 省略时按 type 取默认：semantic/llm 用 defaults.models.filter，decision 用 defaults.models.decision
+        batch_size: 20                  # 每次 20 条一个 batch，也是增量落库的检查点粒度（1~100）
+        summary_chars: 160              # 每条附带清洗摘要的前 160 字，0 表示只发标题（0~1000）
         reject_below: 0.5
+        accept_above: 0.85
+        # 仅当所选模型 kind 为 decision（JEV）时生效：
+        # relevance_type: noul          # noul（默认，想读概率）| score（四级量表归一化）
+        # jev_batch_mode: packed_questions  # 默认一次请求打包 20 道题 | windowed_pool 逐条并发
     processor:
       type: digest
       language: zh-CN
@@ -72,9 +73,10 @@ pipelines:
 1. 得分 `< reject_below`（默认 `0.5`）：**立即淘汰**，不再进入后续付费阶段。
 2. 得分 `>= accept_above`：**立即通过**，跳过后续阶段直接入选（节省大模型开销）。
 3. 介于两者之间：**转交下一阶段**继续判断；若已是最后一个阶段且未被淘汰，则视为通过；若未配置任何 `filters: []`，所有候选条目默认 `1.0` 分通过。
-4. 某阶段单条请求出错时不会误判为 `0` 分淘汰：有下一阶段则转交下一阶段，若是最后阶段出错则暂不落库，留待下一轮自动重试。
+4. 某阶段单条请求出错时不会误判为 `0` 分淘汰：有下一阶段则转交下一阶段，若是最后阶段出错则暂不落库、写入故障账本（`tentacles errors list`），留待下一轮自动重试。
+5. 候选按语义阶段的 `batch_size` 分块推进（纯 `keyword` 流水线按 100 条一块）：**每完成一块立即在 Run 租约保护下落库**。中途取消、断网或崩溃都不会浪费已完成分块的模型费用，重跑自动跳过已评条目。
 
-### 三种过滤器详解
+### 两种过滤器详解
 
 #### ① `keyword`（零成本本地匹配）
 - 合并 Persona 的 `include/exclude/hard_exclude` 与当前阶段配置的同名列表，对“标题 + 摘要”做不区分大小写匹配（`regex: true` 时按 Unicode 正则匹配，单条单阶段限时 50ms 防回溯卡死）。
@@ -94,18 +96,45 @@ pipelines:
 
 **为什么需要豁免？** 若只想屏蔽带货促销，`exclude: [广告]` 会把《字节开源万亿参数**广告** CTR **算法**模型》一起误杀。把双关词留在 `exclude`、把确定垃圾词放进 `hard_exclude`，《…广告…算法…》会得 `0.55` 分送到语义关，由模型结合完整 Persona 判定；纯促销稿（只命中“广告”）仍得 `0.0` 分淘汰。关闭豁免（`guard_ambiguous_exclude: false`）即恢复旧的无条件淘汰行为。
 
-#### ② `decision`（OpenRouter Decisions / JEV 高并发判别打分）
-- 使用 `kind: decision` 模型（如 `typesafe/jev-1.13`）对每条候选资讯独立判断：**“根据该 Persona 及其优先级，用户是否想读这条内容？”**
-- `relevance_type` 支持：
-  - `noul`（默认）：直接返回 `0.0 ~ 1.0` 的“想读”概率；
-  - `score`：按四级有序量表（`Not interested` / `Slight interest` / `Relevant` / `Essential reading`，`0~3`）打分并归一化到 `0.0 ~ 1.0`。
-- 当 Persona 拥有兴趣标签时，同一次请求会附带一道 `choice` 题，为该条目选出最匹配的一个优先标签（或 `other`）。
-- 隐私保护：默认强制附加 `provider.data_collection = "deny"`（拒绝服务商收集数据），除非你在模型的 `extra_body.provider` 中显式写出 `data_collection: allow`。
+#### ② `semantic`（统一语义过滤：Chat LLM 与 JEV 共用一套配置）
 
-#### ③ `llm`（聊天模型批量分类与短理由）
-- 使用 `chat` 模型（默认 `defaults.models.filter`）按 `batch_size`（默认 20，范围 1–100）将编号标题与 Persona 打包分类。
-- 每条最多选一个标签、打 `0~1` 分并附一句简短匹配理由（低于 `0.3` 分的无关项模型直接省略，按 `0` 分处理）。
-- 自带脏 JSON 提取恢复；若某批返回格式损坏，会自动将该批对半拆成两半各重试一次，避免单条脏数据拖垮整批。
+`type: semantic` 同时适用于聊天模型与 OpenRouter Decisions（JEV）模型：**实际跑哪条链路由模型自身的 `kind` 决定**，配置无须写死。旧写法 `type: llm` 与 `type: decision` **完全兼容**，仍然合法；两者只会影响“省略 `model` 时用哪个默认模型”：
+
+| 写法 | 省略 `model` 时的默认模型 | 实际执行器 |
+| :--- | :--- | :--- |
+| `semantic`（推荐） | `defaults.models.filter` | 由所选模型的 `kind` 决定 |
+| `llm`（旧写法） | `defaults.models.filter` | 同上 |
+| `decision`（旧写法） | `defaults.models.decision` | 同上 |
+
+也就是说：`type: decision` 配 `model: fast`（chat 模型）现在会走聊天链路，而不再报“必须使用 decision 模型”；反之 `type: semantic` 配 `model: decision` 会走 JEV。
+
+**通用参数**
+
+| 参数 | 默认 | 范围 | 说明 |
+| :--- | :--- | :--- | :--- |
+| `batch_size` | `20` | `1..100` | 每次请求的条数，也是增量落库的检查点粒度 |
+| `summary_chars` | `160` | `0..1000` | 每条附带给模型的清洗摘要上限，`0` 表示只发标题。标题模糊时短摘要是区分“商业促销广告”与“广告推荐算法论文”的关键 |
+| `reject_below` / `accept_above` | 见级联规则 | `0..1` | 与其他阶段一致 |
+| `relevance_type` | `noul` | `noul` / `score` | 仅 `kind: decision` 生效 |
+| `jev_batch_mode` | `packed_questions` | `packed_questions` / `windowed_pool` | 仅 `kind: decision` 生效 |
+
+**Chat 模型链路**
+
+- 每批 `batch_size` 条（默认 20）：请求携带 Persona、有序兴趣标签，以及 `{id, source, title, summary[:summary_chars]}` 列表。
+- 每条可返回**多个** `tag_ids` 与**多条**具体 `match_points`（兼容旧的单 `tag_id` / 单 `reason` 字符串）；低于 `0.3` 分的无关项模型直接省略，按 `0.0` 分处理，未返回的编号同样记 `0.0` 分。
+- 脏 JSON 先由共享提取器恢复；整批结构损坏时该批对半拆成两个子批各重试一次，仍失败的半批写入故障账本（`error_code: llm_batch_parse_error`），**不会被误存成 0 分淘汰**。
+
+**JEV（OpenRouter Decisions）两步打包 `packed_questions`（默认）**
+
+1. **第一步：批量相关性**。一份 Persona + 这一批 `batch_size` 条条目（含 `title` 与 `summary[:summary_chars]`）放进同一个 `state`，一次请求同时回答 `r_1..r_20` 共 20 道相关题（`noul` 概率或 `score` 四级量表）。相比逐条请求，Persona 从 20 份降到 1 份。
+2. **第二步：只为幸存项补问标签**。只有得分 `>= reject_below`（且 Persona 配有兴趣标签）的条目才进入同一 Batch 的第二次精简请求 `t_<编号>`（`choice` 题，选一个优先标签或 `other`），垃圾项不会再消耗标签题算力。
+3. **折半与降级保护**：端点若以 `HTTP 400 / 413` 拒绝这个打包体（题量或体积超限），该 Batch 自动对半拆成两个子批各重试一次；若对半后仍被拒，则本阶段剩余批次自动回退为 `windowed_pool`（每个 Chunk 用 `min(模型 concurrency, batch_size)` 个 worker 逐条并发请求），绝不整批挂死。
+4. **可读的匹配点**：不再硬编码 `decision relevance`，而是合成如 `JEV 相关性 0.91，命中优先兴趣「AI与广告算法」（推荐系统、CTR预估与机器学习论文）`；`score` 模式还会写明量表档位（如 `JEV 量表评级：Essential reading (1.00)`）。
+- 两步都依赖 Persona 渲染文本，隐私保护同样默认强制 `provider.data_collection = "deny"`，除非你在模型的 `extra_body.provider` 中显式写 `data_collection: allow`。
+
+**跨阶段匹配点汇总**
+
+最终 `Evaluation` 会合并该条目走过所有阶段的正向证据：`tags`（即 `topics`）与 `match_points` 按阶段顺序去重，匹配点最多保留前 5 条；兼容字段 `reason` 取首条匹配点。因此 `keyword` 命中的具体词项、JEV/LLM 的模型理由会一起出现在 `items list/show` 与 Web `Feed` 中。
 
 ---
 

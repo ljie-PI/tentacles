@@ -108,6 +108,17 @@ class RunOperation:
 
         await run_store_call(publish)
 
+    async def checkpoint(self, write: Callable[[RunWriter], None], *, cost: float | None = None) -> None:
+        """Persist finished work under this Run's lease without ending it.
+
+        A later failure or cancellation keeps every checkpointed batch; the final
+        commit still publishes the whole result and the terminal stats.
+        """
+        if self._committed or not self.run_id:
+            return
+        await run_store_call(lambda: self._store.checkpoint_run(
+            self.run_id, write, now=to_utc(self._clock()), cost=cost))
+
 
 class RunLifecycle:
     def __init__(self, store: Store, clock: Callable[[], datetime], *,

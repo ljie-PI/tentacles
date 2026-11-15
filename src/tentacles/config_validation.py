@@ -23,8 +23,11 @@ from tentacles.errors import ConfigError, ConfigIssue, ConfigValidationError
 from tentacles.llm.config import ModelSpec, STAGES
 from tentacles.personas.models import persona_name
 from tentacles.pipelines.adapters import ModelRequirement
+from tentacles.pipelines.config import StageSpec
 from tentacles.pipelines.registry import PROCESSORS, STAGES as FILTER_STAGES
 from tentacles.prompts import load_prompt
+
+_STAGE_DECLARATION: TypeAdapter[StageSpec] = TypeAdapter(StageSpec)
 
 
 def _mapping(value: Any) -> Mapping[str, Any]:
@@ -50,7 +53,7 @@ def _schema_errors(exc: ValidationError, prefix: Sequence[str | int] = ()) -> li
             message = f"invalid {loc[-1]}"
         if error['type'] == 'union_tag_invalid':
             loc = (*loc, 'type')
-            message = 'unknown filter stage type (expected keyword, decision or llm)'
+            message = 'unknown filter stage type (expected keyword, llm, decision or semantic)'
         errors.append(ConfigIssue(format_loc(loc), message))
     return errors
 
@@ -132,6 +135,17 @@ def _model_error(models: Mapping[str, ModelSpec], defaults: Mapping[str, Any],
     return None
 
 
+def _any_kind_model_error(models: Mapping[str, ModelSpec], defaults: Mapping[str, Any],
+                          stage: str, override: Any, where: str) -> ConfigIssue | None:
+    """An adaptive stage accepts either kind; any existing default satisfies it."""
+    if override is not None and not isinstance(override, str):
+        return None
+    name = override if override is not None else defaults.get(stage)
+    if isinstance(name, str) and name in models:
+        return None
+    return ConfigIssue(where, f'requires an existing model or {stage}-stage default')
+
+
 def _adapter_model_errors(requirements: tuple[ModelRequirement, ...], data: Mapping[str, Any],
                           models: Mapping[str, ModelSpec], defaults: Mapping[str, Any],
                           where: str) -> list[ConfigIssue]:
@@ -140,11 +154,27 @@ def _adapter_model_errors(requirements: tuple[ModelRequirement, ...], data: Mapp
         override = data.get('model')
         if requirement.optional and override is None:
             continue
-        error = _model_error(models, defaults, requirement.stage, override, f'{where}.model',
-                             kind=requirement.kind)
+        if requirement.kind is None:
+            error = _any_kind_model_error(models, defaults, requirement.stage, override, f'{where}.model')
+        else:
+            error = _model_error(models, defaults, requirement.stage, override, f'{where}.model',
+                                 kind=requirement.kind)
         if error is not None:
             errors.append(error)
     return errors
+
+
+def _declared_stage(stage_type: str, data: Mapping[str, Any]) -> StageSpec:
+    """Parse a filter declaration far enough to read its model requirements.
+
+    Other options of this stage may already have schema errors, and its model
+    checks must still run, so fall back to the `type`-only declaration that
+    every stage spec accepts.
+    """
+    try:
+        return _STAGE_DECLARATION.validate_python(data)
+    except ValidationError:
+        return _STAGE_DECLARATION.validate_python({'type': stage_type})
 
 
 def _browser_scripts_dir(browser: Mapping[str, Any], config_path: Path) -> Path:
@@ -168,6 +198,22 @@ def _browser_errors(options: Mapping[str, Any], where: str, browser: Mapping[str
     elif not script.is_relative_to(_browser_scripts_dir(browser, config_path)):
         errors.append(ConfigIssue(f"{where}.script_path", "replay script must stay inside browser.scripts_dir"))
     return errors
+
+
+def _storage_errors(app: Mapping[str, Any], config_path: Path) -> list[ConfigIssue]:
+    """The archive directory must be its own place, never the live data directory or its parent."""
+    storage = _mapping(app.get('storage'))
+    data_dir = _path(app.get('data_dir', str(AppSpec().data_dir)), config_path)
+    raw = storage.get('archive_dir')
+    archive_dir = _path(raw, config_path) if raw is not None else (
+        data_dir / 'archive' if data_dir is not None else None)
+    if archive_dir is None:
+        return [ConfigIssue('app.storage.archive_dir', 'invalid archive directory path')]
+    if data_dir is not None and (archive_dir == data_dir or archive_dir in data_dir.parents):
+        return [ConfigIssue('app.storage.archive_dir', 'must not be app.data_dir or contain it')]
+    if archive_dir.exists() and not archive_dir.is_dir():
+        return [ConfigIssue('app.storage.archive_dir', 'must be a directory')]
+    return []
 
 
 def _source_options(data: Mapping[str, Any], where: str, *, config_path: Path | None = None,
@@ -240,6 +286,7 @@ def validate_config(config: AppConfig | Mapping[str, Any], existing_personas: Co
         AppConfig.model_validate(data)
     except ValidationError as exc:
         errors.extend(_schema_errors(exc))
+    errors.extend(_storage_errors(_mapping(data.get('app')), config_path))
 
     models: dict[str, ModelSpec] = {}
     for name, value in _mapping(data.get('models')).items():
@@ -316,9 +363,10 @@ def validate_config(config: AppConfig | Mapping[str, Any], existing_personas: Co
             filter_data = _mapping(value)
             stage_type = filter_data.get('type', 'keyword')
             adapter = FILTER_STAGES.get(stage_type) if isinstance(stage_type, str) else None
-            if adapter is not None:
-                errors.extend(_adapter_model_errors(adapter.models, filter_data, models, defaults,
-                                                     f'{where}.filters[{j}]'))
+            if adapter is not None and isinstance(stage_type, str):
+                errors.extend(_adapter_model_errors(
+                    adapter.models(_declared_stage(stage_type, filter_data)), filter_data,
+                    models, defaults, f'{where}.filters[{j}]'))
         processor = _mapping(pipeline.get('processor'))
         processor_type = processor.get('type', 'digest')
         processor_adapter = PROCESSORS.get(processor_type) if isinstance(processor_type, str) else None

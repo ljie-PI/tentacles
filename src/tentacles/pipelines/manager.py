@@ -13,7 +13,7 @@ from tentacles.llm.registry import ModelRegistry
 from tentacles.personas.models import PersonaView
 from tentacles.pipelines.config import PipelineSpec
 from tentacles.pipelines.filtering import filter_items, filter_stats
-from tentacles.pipelines.models import PipelineOutcome, PipelineQuery, FilterBatch
+from tentacles.pipelines.models import Evaluation, PipelineOutcome, PipelineQuery, FilterBatch
 from tentacles.pipelines.registry import PROCESSORS
 from tentacles.runs import RunLifecycle, RunOperation, RunResult
 from tentacles.store import RunWriter, Store
@@ -69,7 +69,15 @@ class PipelineManager:
             candidates = await run_store_call(self._store.filter_candidates,
                 query,
                 reevaluate=reevaluate, run_id=op.run_id)
-            batch = FilterBatch([], [], record_error=op.record_error)
+
+            async def checkpoint(finished: list[Evaluation]) -> None:
+                # Charge only what the stages have reported so far; the commit
+                # writes the final totals once the stage metrics are merged.
+                charged = [stage.metrics.cost for stage in batch.batches if stage.metrics.cost is not None]
+                await op.checkpoint(lambda writer: writer.save_evaluations(finished),
+                                    cost=sum(charged) if charged else None)
+
+            batch = FilterBatch([], [], record_error=op.record_error, checkpoint=checkpoint)
             try:
                 await filter_items(candidates, current, spec, op.started_at, self._models, batch)
             finally:

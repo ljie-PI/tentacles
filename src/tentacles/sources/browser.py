@@ -2,8 +2,11 @@
 
 The script lives in the repository (`browser.scripts_dir`), passes a static AST
 gate, and only ever sees one isolated work tab in the configured Chrome profile.
+A source without a script yet is a cold start: the exploration Agent drives that
+tab, its trajectory is recorded, and the distilled script has to pass the static
+gate plus a standalone trial run before it is installed here.
 Whatever happens, that tab is reclaimed and every failure site lands in the
-`run_errors` ledger under `phase='browser_replay'`.
+`run_errors` ledger under `browser_replay` (or `browser_distill`) phase.
 """
 
 from __future__ import annotations
@@ -20,8 +23,10 @@ from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from tentacles.asyncutil import run_store_call
-from tentacles.config import AppConfig, ReasoningLevel, chrome_profile_name, reject_headless
-from tentacles.diagnostics import DiagnosticEvent, stack_frames
+from tentacles.config import (
+    AppConfig, BrowserPiSpec, ReasoningLevel, chrome_profile_name, reject_headless,
+)
+from tentacles.diagnostics import DiagnosticEvent, configured_secrets, stack_frames
 from tentacles.errors import ConfigError
 from tentacles.models import Item, ItemObservation, LinkDisposition, normalize_url
 from tentacles.sources.base import DiagnosedError, FetchContext, FetchResult, Source, register
@@ -30,6 +35,7 @@ from tentacles.sources.browser_contract import (
 )
 from tentacles.sources.browser_script import load_script
 from tentacles.sources.browser_session import page_snapshot, work_tab
+from tentacles.sources.distiller import DistillFailed, DistillRequest, distill
 from tentacles.text import truncate
 from tentacles.timeutil import to_utc
 
@@ -37,7 +43,7 @@ log = logging.getLogger(__name__)
 
 
 class BrowserPiOptions(BaseModel):
-    """Source-level overrides for the exploration agent of #82 (validated only)."""
+    """Source-level overrides for the exploration agent of a cold start."""
 
     model_config = ConfigDict(extra='forbid')
 
@@ -94,8 +100,10 @@ class BrowserSource(Source):
         config = ctx.config
         if config is None:
             raise ConfigError('browser sources need the loaded application config (the `browser` block)')
+        script = _script_path(config, self.spec.id, opts)
+        if not script.exists():
+            return await self._distill(script, opts, ctx, cursor)
         try:
-            script = _script_path(config, self.spec.id, opts)
             extract = load_script(script)
         except ScriptGateError as exc:
             # A rejected script never runs, so this configuration error has to fail
@@ -109,12 +117,47 @@ class BrowserSource(Source):
             return self._failed(opts, ctx, script=script, exc=failure.error, snapshot=failure.snapshot,
                                 timeout=failure.timeout)
         raw_items = output.items[:opts.max_items]
+        replay_stats: dict[str, Any] = {'browser_mode': 'replay'}
         if not raw_items:
             self._record(ctx, opts, error_code='script_assertion_failed', severity='warning',
                          message=f'replay script {script.name} returned no items',
                          target_url=output.page_url, snapshot=snapshot)
-            return FetchResult([], _cursor(opts, script, 0), {'entries': 0, 'no_items': True})
-        return await self._items(raw_items, output, opts, ctx, snapshot, cursor, script)
+            return FetchResult([], _cursor(opts, script, 0),
+                               {'entries': 0, 'no_items': True, **replay_stats})
+        return await self._items(raw_items, output, opts, ctx, cursor, script,
+                                 extra_stats=replay_stats)
+
+    async def _distill(self, script: Path, opts: BrowserOptions, ctx: FetchContext,
+                       cursor: dict[str, Any]) -> FetchResult:
+        """Cold start: explore with pi, record the trajectory, gate and install a script."""
+        config = cast(AppConfig, ctx.config)
+        request = DistillRequest(
+            source_id=self.spec.id, run_id=ctx.run_id, page_url=opts.page_url, task=opts.task,
+            max_items=opts.max_items, timeout=opts.timeout, chrome_profile=opts.chrome_profile,
+            script_path=script, pi=_pi_spec(config, opts))
+        stats: dict[str, Any] = {'browser_mode': 'distill'}
+        try:
+            distilled = await distill(request, config=config, on_usage=ctx.metrics.record,
+                                      secrets=configured_secrets(config))
+        except DistillFailed as failure:
+            stats['browser_distill_failed'] = True
+            trajectory = failure.context.get('trajectory_path')
+            if isinstance(trajectory, str) and trajectory:
+                stats['trajectory_path'] = trajectory
+            self._record(ctx, opts, phase='browser_distill', error_code=failure.error_code,
+                         message=failure.message, exc=failure.error, snapshot=failure.context,
+                         target_url=opts.page_url)
+            if opts.on_detail_error == 'fail_batch':
+                # The concrete failure is in the ledger; no generic whole-source row on top.
+                raise DiagnosedError(
+                    f'browser distill failed for {self.spec.id} ({failure.message})') from None
+            # No script was installed, so the old cursor stays: this round fetched nothing.
+            return FetchResult([], cursor, {'entries': 0, **stats})
+        stats['trajectory_path'] = str(distilled.trajectory)
+        stats['script_path'] = str(distilled.path)
+        raw_items = distilled.output.items[:opts.max_items]
+        return await self._items(raw_items, distilled.output, opts, ctx, cursor, distilled.path,
+                                 extra_stats=stats)
 
     async def _replay(self, extract: ExtractScript, opts: BrowserOptions,
                       config: AppConfig) -> tuple[BrowserExtractOutput, dict[str, Any]]:
@@ -134,8 +177,8 @@ class BrowserSource(Source):
                 raise _ReplayFailed(exc, await page_snapshot(page)) from None
 
     async def _items(self, raw_items: list[RawBrowserItem], output: BrowserExtractOutput,
-                     opts: BrowserOptions, ctx: FetchContext, snapshot: dict[str, Any],
-                     cursor: dict[str, Any], script: Path) -> FetchResult:
+                     opts: BrowserOptions, ctx: FetchContext, cursor: dict[str, Any], script: Path,
+                     *, extra_stats: dict[str, Any] | None = None) -> FetchResult:
         """Turn raw entries into Items, then drop what this source already stored."""
         items, seen, duplicates = [], set(), 0
         for raw in raw_items:
@@ -146,7 +189,8 @@ class BrowserSource(Source):
             seen.add(item.external_id)
             items.append(item)
         kept, links = await self._classify(items, ctx)
-        stats: dict[str, Any] = {'entries': len(raw_items), 'duplicates': duplicates,
+        stats: dict[str, Any] = {**(extra_stats or {}), 'entries': len(raw_items),
+                                 'duplicates': duplicates,
                                  'skipped_known': len(items) - len(kept)}
         if self.spec.update_existing:
             stats['refresh_links'] = sum(1 for item in kept if links.get(item.url) == 'refresh')
@@ -180,14 +224,14 @@ class BrowserSource(Source):
 
     def _record(self, ctx: FetchContext, opts: BrowserOptions, *, error_code: str, message: str,
                 snapshot: dict[str, Any], target_url: str, exc: BaseException | None = None,
-                severity: str = 'error') -> None:
+                severity: str = 'error', phase: str = 'browser_replay') -> None:
         if ctx.record_error is None:
             return
         context: dict[str, Any] = {'page_url': opts.page_url, **snapshot}
         if exc is not None:
             context['traceback'] = stack_frames(exc)
         ctx.record_error(DiagnosticEvent(
-            phase='browser_replay', error_code=error_code, message=message, severity=severity,
+            phase=phase, error_code=error_code, message=message, severity=severity,
             source_id=self.spec.id, page_url=opts.page_url, target_url=target_url,
             exception_type=type(exc).__name__ if exc is not None else None, retryable=False,
             debug_context=context))
@@ -250,6 +294,17 @@ def _script_path(config: AppConfig, source_id: str, opts: BrowserOptions) -> Pat
     if path.suffix != '.py' or not path.is_relative_to(scripts_dir):
         raise ConfigError(f'replay script must be a .py file inside {scripts_dir}')
     return path
+
+
+def _pi_spec(config: AppConfig, opts: BrowserOptions) -> BrowserPiSpec:
+    """Source-level `pi` overrides win over the `browser.pi` block."""
+    base, override = config.browser.pi, opts.pi
+    if override is None:
+        return base
+    return BrowserPiSpec(binary=override.binary or base.binary,
+                         model=override.model or base.model,
+                         reasoning_level=override.reasoning_level or base.reasoning_level,
+                         timeout=override.timeout or base.timeout)
 
 
 def _failed_target(opts: BrowserOptions, snapshot: dict[str, Any]) -> str:

@@ -3,12 +3,15 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Callable, Literal
+from typing import Any, Awaitable, Callable, Literal
 
 from pydantic import BaseModel, Field
 
 from tentacles.diagnostics import DiagnosticEvent, FailedTargetRef
 from tentacles.llm.types import TokenUsage, UsageTotals
+
+# 合并多个阶段证据后的可读匹配点上限：保留最早的几条具体要点。
+MAX_MATCH_POINTS = 5
 
 
 class StageScore(BaseModel):
@@ -55,6 +58,8 @@ class FilterBatch:
     error: str | None = None
     batches: list[StageBatch] = field(default_factory=list)
     record_error: Callable[[DiagnosticEvent], None] | None = None
+    # Publishes one finished chunk under the Run's lease; None keeps the run in memory.
+    checkpoint: Callable[[list[Evaluation]], Awaitable[None]] | None = None
 
 
 class PipelineOutcome(BaseModel):

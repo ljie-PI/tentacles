@@ -7,9 +7,10 @@ kind, add its adapter (and any new options schema) and register it; do not add
 dispatch branches to the cascade, manager, or configuration validation.
 
 - Each adapter declares its model requirements: default stage and model kind.
-  Central validation reads those declarations even when unrelated configuration
-  fields are invalid. `none` needs no model, but still validates an explicit
-  model override.
+  A Stage's declaration is a function of its configured stage (`Stage.models(stage)`),
+  because a spelling can choose its own default stage. Central validation reads those
+  declarations even when unrelated configuration fields are invalid. `none` needs no
+  model, but still validates an explicit model override.
 - A Stage writes one ordered `StageScore` per input into the caller's mutable
   `StageBatch`, recording usage as completions arrive. `score=None` is an item
   error, not a rejection. `batch.error` stops the cascade without discarding
@@ -20,9 +21,36 @@ dispatch branches to the cascade, manager, or configuration validation.
   `details.match_points`. `hard_exclude` always rejects; a soft `exclude` plus a
   positive hit scores 0.55, which is above the usual rejection threshold and
   below any `accept_above`, so the entry reaches the next semantic stage instead
-  of being cached as a 0.0 rejection. The cascade copies only the deciding
-  stage's `match_points` into the evaluation; aggregating several stages belongs
-  to the semantic-stage work, not to this seam.
+  of being cached as a 0.0 rejection.
+- Every stage's positive evidence reaches the evaluation: the cascade merges the
+  `tags` and `details.match_points` of the stages an item actually passed through,
+  in stage order and without duplicates, keeps at most `MAX_MATCH_POINTS` points
+  and takes `reason` from the first one. A stage that produced no score
+  contributes nothing, so an item error can never become a fabricated reason.
+- `semantic` is one Stage for two model kinds: `type: semantic`, and the pre-#80
+  spellings `llm` and `decision`, all select the same adapter. Its
+  `ModelRequirement` declares `kind=None`, which resolves through
+  `ModelRegistry.resolve_any` and lets the adapter dispatch on `models.spec(name).kind`.
+  The spelling only picks which default the stage prefers (`decision` keeps
+  `defaults.models.decision`, the others keep `defaults.models.filter`), and the
+  adapter declares that preference from the configured stage, so central validation
+  checks the default the stage really resolves. The two
+  executors share `batch_size` and `summary_chars`; `relevance_type` and
+  `jev_batch_mode` only apply to the Decisions executor, which packs one shared
+  persona per batch, halves a payload the endpoint refuses with 400/413 or answers
+  only partly (a dropped answer surfaces as `MissingDecisionAnswers`) once, and
+  then falls back to one request per item for the rest of the stage. A refused
+  second step (interest tags) keeps the step-one relevance verdicts; only items
+  that genuinely fail stay `score=None` item errors in the ledger.
+- `FilterBatch.checkpoint` is how a stage's finished work reaches disk mid-Run:
+  it receives the evaluations of one completed chunk and the manager publishes
+  them through `RunOperation.checkpoint` → `Store.checkpoint_run`, under the same
+  lease fence and `input_revision` check as the final commit but without ending
+  the Run. Chunks follow the largest `Stage.batch_size` the stage's own adapter
+  declares (100 when nothing declares one, as in a keyword-only cascade), which is
+  why a semantic `batch_size` is also the paid request size. A cancelled
+  or failed Run keeps every checkpointed chunk, and the next run's candidate
+  query skips those items by itself.
 - A Processor returns location-free `ReportDraft` values, possibly empty, and
   records completions through the provided callback. It owns content, citations,
   provenance, creation time and report-local usage, not final IDs or paths.
@@ -122,7 +150,8 @@ ledger: `FetchContext.record_error`, `FilterBatch.record_error` and the
 whole-source row. `filtering.filter_items` records an item error only where the
 cascade finally gives up on that item: `score=None` on the last stage, or any
 stage that aborts the batch; the code it records is the one that stage's adapter
-declares in `item_error_code`, never a branch on `stage.type`.
+declares in `item_error_code` (the `semantic` adapter picks it from
+`details.executor`), never a branch on `stage.type`.
 
 Schema 13 adds source-scoped alias mappings without changing existing identities;
 schema 12 preserves existing rows with revision 1 and null content-update time.
@@ -135,6 +164,21 @@ trigram index over the four searchable columns, kept in sync by SQL triggers rat
 than by the write paths. `Store.list_items` is that seam: three or more character
 terms come from the index, shorter ones are matched natively per column, so callers
 must not build their own `LIKE` scans to narrow a listing.
+Schema 18 adds the `archived_identities` tombstone table. `archive.py`
+(`ArchiveManager`) owns the two-phase yearly cold archive: it writes complete copies
+into `data/archive/tentacles-YYYY.db` (opened through `Store`, so the cold database
+carries the same schema and its own `items_fts`) and `Store.import_archived` verifies
+rows and index before `Store.archive_move` tombstones identities and deletes the hot
+rows in one transaction. Cold databases are sealed out of WAL mode so a plain
+read-only `Store(read_only=True)` never creates side files. `--include-archive`
+queries each database separately and merges in memory, which keeps cross-year reads
+independent of SQLite's ten-database `ATTACH` limit. Schema 19 adds
+`archived_identities.kind` and `identity_policy` so a tombstone is read through the
+exact identity rules of the row it replaced: external identity always suppresses,
+URL only for `standard`, fingerprint only for `standard` non-email. An archived
+`revision` URL and an archived email fingerprint therefore stay as unsuppressing as
+they were while hot; `Store.seen_links` applies the same URL guard. Tombstones
+written before schema 19 keep the conservative `standard`/non-email defaults.
 Pipeline activity is `COALESCE(updated_at, fetched_at)` with expression indexes;
 the Feed deliberately retains `COALESCE(published, fetched_at)`. Filter captures
 the input revision before scoring, and evaluation/report publication validates it
@@ -166,3 +210,18 @@ the live page, so it pays a per-tab reload cost instead of trusting the user's C
 cache. A fixed script must not own the tab lifecycle: only the runtime can capture the
 failure site, so timeouts, script errors and zero-item results become `browser_replay`
 events whose `debug_context` carries the URL, title, A11y excerpt and traceback.
+
+A `type: browser` source without a fixed script is a cold start, and that policy lives in
+the same three modules plus `sources/pi_rpc.py`, `sources/browser_bridge.py`,
+`sources/trajectory.py` and `sources/distiller.py`. The Agent is one controlled
+`pi --mode rpc` child (ephemeral session, no discovery, no built-in tools, model and
+thinking level pinned on the command line); its only tools are the ones the shipped
+`sources/browser_bridge.js` extension registers, each of which arrives back as one
+loopback JSON request so the fetching process — not the Agent — owns the page, the
+trajectory and the ledger. Every step is recorded to a local, redacted
+`data/trajectories/<id>/<run>.jsonl` before the next one runs, and provider usage is
+forwarded to the owning `Run` as it arrives. A distilled script is repository code even
+when an Agent wrote it, so it is written only after the same static gate and a standalone
+trial on a fresh real `BrowserContext`, with one corrective turn; otherwise the failure
+lands as `browser_distill` and no script exists for the next round to replay. The search
+for a script is a filesystem check (`<scripts_dir>/<id>.py`), never a database flag.

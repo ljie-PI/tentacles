@@ -8,6 +8,7 @@ from typing import Annotated, Any, Literal, Union
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from tentacles.llm.config import Stage as ModelStage
 from tentacles.schedule import Schedule
 from tentacles.timeutil import parse_duration
 
@@ -52,19 +53,30 @@ class KeywordSpec(ThresholdSpec):
         return self
 
 
-class DecisionSpec(ThresholdSpec):
-    type: Literal['decision']
-    model: str | None = None
-    relevance_type: Literal['noul', 'score'] = 'noul'
+class SemanticSpec(ThresholdSpec):
+    """One semantic stage shared by chat-LLM and Decisions (JEV) models.
 
+    The resolved model's own `kind` decides the executor; `llm` and `decision`
+    are the pre-#80 spellings of this same block and only change which model
+    default the stage prefers when `model` is omitted.
+    """
 
-class LLMSpec(ThresholdSpec):
-    type: Literal['llm']
+    type: Literal['semantic', 'llm', 'decision'] = 'semantic'
     model: str | None = None
+    # Finished batches are the checkpoint unit, so this is also the paid request size.
     batch_size: int = Field(default=20, ge=1, le=100)
+    # Short summary appended to each numbered item: 0 sends titles only.
+    summary_chars: int = Field(default=160, ge=0, le=1000)
+    relevance_type: Literal['noul', 'score'] = 'noul'
+    jev_batch_mode: Literal['packed_questions', 'windowed_pool'] = 'packed_questions'
+
+    @property
+    def model_stage(self) -> ModelStage:
+        """Model default consulted when `model` is omitted; the old spelling still decides."""
+        return 'decision' if self.type == 'decision' else 'filter'
 
 
-StageSpec = Annotated[Union[KeywordSpec, DecisionSpec, LLMSpec], Field(discriminator='type')]
+StageSpec = Annotated[Union[KeywordSpec, SemanticSpec], Field(discriminator='type')]
 
 
 class ProcessorSpec(BaseModel):

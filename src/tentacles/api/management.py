@@ -2,10 +2,10 @@
 from fastapi import APIRouter
 
 from tentacles.api.dependencies import Service
-from tentacles.api.models import PipelineFilter
+from tentacles.api.models import PipelineFilter, StorageArchiveRequest
 from tentacles.errors import Busy, UpstreamError
 from tentacles.pipelines.models import PipelineOutcome, PipelineView, ReportView
-from tentacles.schemas import ModelTest, ModelView, Page
+from tentacles.schemas import ModelTest, ModelView, Page, StorageArchive, StorageReindex, StorageStatus
 
 router = APIRouter()
 
@@ -55,3 +55,19 @@ async def test_model(name: str, svc: Service):
     # A completed connectivity test may legitimately report ok=false, including
     # its latency/error. It is not a failed API operation or an empty 502 body.
     return await svc.test_model(name)
+
+
+@router.get('/storage/status', response_model=StorageStatus)
+def storage_status(svc: Service):
+    return svc.storage_status()
+
+
+@router.post('/storage/reindex', response_model=StorageReindex)
+def storage_reindex(svc: Service, optimize: bool = False, include_archive: bool = False):
+    return svc.storage_reindex(optimize=optimize, include_archive=include_archive)
+
+
+@router.post('/storage/archive', response_model=StorageArchive)
+def storage_archive(svc: Service, body: StorageArchiveRequest | None = None):
+    request = body or StorageArchiveRequest()
+    return svc.storage_archive(before=request.before, dry_run=request.dry_run, vacuum=request.vacuum)
