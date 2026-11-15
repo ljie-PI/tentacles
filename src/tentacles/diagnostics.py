@@ -28,7 +28,7 @@ MAX_DEBUG_CONTEXT_BYTES = 16 * 1024
 
 PHASES: tuple[str, ...] = (
     'fetch_page', 'parse_entry', 'fetch_detail', 'imap_fetch', 'browser_replay',
-    'browser_heal', 'llm_extract', 'filter_stage', 'report_process', 'script_pr',
+    'browser_heal', 'browser_distill', 'llm_extract', 'filter_stage', 'report_process', 'script_pr',
 )
 SEVERITIES: tuple[str, ...] = ('error', 'warning')
 
@@ -46,6 +46,11 @@ ERROR_PHASES: dict[str, tuple[str, ...]] = {
     'playwright_selector_timeout': ('browser_replay',),
     'script_assertion_failed': ('browser_replay',),
     'pi_heal_exhausted': ('browser_heal',),
+    # #82 cold start: the controlled `pi --mode rpc` exploration and the gate on
+    # the script it distilled. Named before the script exists, so neither is a
+    # replay failure.
+    'pi_rpc_failed': ('browser_distill',),
+    'pi_script_rejected': ('browser_distill',),
     'git_or_pr_failed': ('script_pr',),
     'hallucinated_link_dropped': ('llm_extract',),
     'invalid_json_schema': ('llm_extract',),
