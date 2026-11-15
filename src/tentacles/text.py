@@ -96,7 +96,7 @@ def html_to_text(html: str) -> str:
         tag.insert_before("\n")
         tag.insert_after("\n")
     text = soup.get_text()
-    lines = (re.sub(r"[ \t ]+", " ", line).strip() for line in text.splitlines())
+    lines = (re.sub(r"[ \t \xa0]+", " ", line).strip() for line in text.splitlines())
     return "\n".join(line for line in lines if line)
 
 
