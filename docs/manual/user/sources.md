@@ -75,7 +75,7 @@ sources:
 - 文件夹始终以**只读模式**打开，使用 `BODY.PEEK[]` 读取：**绝不标记已读、不移动、不删除、不 expunge**。
 - 每个文件夹独立维护 `UIDVALIDITY + 最后处理 UID` 游标；按 UID 升序拉取。
 - 优先取 `text/plain`，无纯文本时将 HTML 转为文本；自动清理常见 `>` 回复引用头和 HTML quote 容器；不提取附件正文，仅记录附件文件名列表。邮件不做内容指纹或近似标题判重（相同内容但 `Message-ID` 不同的邮件均会保留）。
-- **单封坏信不会拖垮整个邮箱**：登录/连接失败记 `imap_auth_failed`（**不回显密码与服务器 banner**）；某封邮件 MIME 解析或 UID 校验异常时记 `imap_message_parse_error`，`external_id` 为 `folder:UIDVALIDITY:UID`，该封被跳过并计入 `stats.unparsed`，游标仍向前推进，因此坏信不会毎轮堵住整个文件夹。
+- **单封坏信不会拖垮整个邮箱**：登录/连接失败记 `imap_auth_failed`（**不回显密码与服务器 banner**）；登录后在拉取过程中连接中断记 `connection_failed`（可重试），其余未被分类的异常记 `unexpected_exception`（不可重试）；某封邮件 MIME 解析或 UID 校验异常时记 `imap_message_parse_error`，`external_id` 为 `folder:UIDVALIDITY:UID`，该封被跳过并计入 `stats.unparsed`，游标仍向前推进，因此坏信不会毎轮堵住整个文件夹。
 
 ---
 
@@ -252,7 +252,9 @@ sources:
 脚本位于 `scripts/browser_sources/<source_id>.py`，唯一入口是
 `async def extract(page, *, page_url, max_items, timeout_ms=30_000) -> BrowserExtractOutput`，
 输出 `RawBrowserItem(title=..., url=..., author=..., content=..., summary=..., published=<ISO 8601>, comments_url=None)`。
-脚本在 `exec` 之前会先经过 `ast.parse` 静态导入白名单门禁（禁止 `os` / `subprocess` / `socket` / `shutil` / `open` / `eval` / `__import__` 等）。
+脚本在 `exec` 之前会先经过 `ast.parse` 静态门禁：每个可读的名字必须是脚本自己绑定的或门禁列出的内建，导入只允许 `playwright.async_api.Page` 与 `tentacles.sources.browser_contract` 的两个契约模型（`os` / `subprocess` / `importlib` / `typing` / `__builtins__` / `eval` / `open` / 任何 `__dunder__` 一律拒绝），另拒绝解释器帧与格式化属性（`gi_frame` / `f_back` / `f_code` / `format` / `format_map`）、宿主路径参数（`fulfill(path=…)` / `tracing.stop(path=…)` / `storage_state(path=…)`）、`file:` 本地导航与原始 CDP 会话。
+
+**信任边界（诚实说明）**：门禁保证脚本无法执行任意 Python、无法直接读写宿主文件，但 **Playwright 自身仍代表脚本访问网络与页面**，所以脚本依旧是需要代码评审的仓库代码（它可按登录态访问站点、发起请求）；模块级死循环或超大内存分配会阻塞该源的工作线程（`MAX_SCRIPT_BYTES` 只限制脚本源码大小）。
 完整契约、字段表与示例见 [`scripts/browser_sources/README.md`](../../../scripts/browser_sources/README.md)。
 
 ```bash

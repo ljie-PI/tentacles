@@ -64,8 +64,12 @@ FORBIDDEN_ATTRIBUTES: frozenset[str] = frozenset({
     'fork', 'format', 'format_map', 'func_globals', 'getattr', 'gi_frame', 'gi_code',
     'import_module', 'install', 'launch', 'launch_persistent_context', 'launch_server',
     'load_script', 'open', 'pdf', 'popen', 'read_text', 'save_as', 'screenshot',
-    'set_input_files', 'setattr', 'spawn', 'system', 'write_text',
+    'set_input_files', 'setattr', 'spawn', 'storage_state', 'system', 'tracing', 'write_text',
+    # Raw CDP hands the script `Browser.setDownloadBehavior` and friends.
+    'new_browser_cdp_session',
 })
+# Schemes that read the host rather than the web.
+_LOCAL_SCHEMES: tuple[str, ...] = ('file:',)
 # Exact statement types only: a future node type (`match`, `except*`, a type
 # alias) is rejected by default. No `class` — its `__init_subclass__` hook runs
 # when the class is defined — and no `global`/`nonlocal`/`del`, which only make
@@ -109,6 +113,17 @@ def check_script(source: str, *, name: str) -> ast.Module:
             _check_name(node, name, imported=imported, readable=readable, parents=parents)
         elif isinstance(node, (ast.Attribute, ast.Subscript)):
             _check_reference(node, name, imported=imported)
+        elif isinstance(node, ast.Call):
+            # Playwright writes and reads host files on the caller's behalf:
+            # `route.fulfill(path=…)`, `tracing.stop(path=…)` and
+            # `storage_state(path=…)` all take a host path, and none of them is a
+            # filesystem API the gate could otherwise see.
+            if any(keyword.arg == 'path' for keyword in node.keywords):
+                raise ScriptGateError(_rejected(name, node, "dangerous use of a host path argument"))
+        elif isinstance(node, ast.Constant) and isinstance(node.value, str):
+            # A navigation to `file:` reads the host filesystem as the browser user.
+            if node.value.strip().lower().startswith(_LOCAL_SCHEMES):
+                raise ScriptGateError(_rejected(name, node, f"dangerous local URL {node.value[:24]!r}"))
     return tree
 
 
