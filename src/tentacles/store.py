@@ -1179,6 +1179,22 @@ class Store:
             raise
         return refs
 
+    def checkpoint_run(self, run_id: int, write: Callable[[RunWriter], None], *, now: datetime,
+                       cost: float | None = None) -> None:
+        """Persist finished work under the Run's lease without finishing the Run.
+
+        Incremental checkpoints keep every completed batch of an interrupted Run;
+        the fence still refuses writes once the lease has been reclaimed.
+        """
+        writer = RunWriter(self, now)
+        with self._lock, self._conn:
+            self._conn.execute('BEGIN IMMEDIATE')
+            self._require_running(run_id)
+            write(writer)
+            if cost is not None:
+                self._conn.execute("UPDATE runs SET cost = ? WHERE id = ? AND status = 'running'",
+                                   (cost, run_id))
+
     def start_run(self, kind: str, target: str, now: datetime) -> int:
         """Create an unleased Run; RunLifecycle owns its terminal cleanup."""
         with self._lock, self._conn:
