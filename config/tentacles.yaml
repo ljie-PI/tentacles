@@ -58,6 +58,8 @@ persona_update:
 # 只在数据库不存在同名 persona 时导入；之后修改这里不会覆盖已存版本。
 # profile 与 profile_file 二选一；文件路径相对本 YAML 所在目录。
 # 首次导入不调用模型；persona set 修改 profile 才抽取标签（可 --skip-tags）。
+# exclude 是“软排除”：同时命中 include 时由 keyword 阶段豁免，转交下一关语义精判；
+# hard_exclude 是“硬排除”：无歧义的垃圾特征，命中即 0 分淘汰（如《限时特惠…》）。
 personas:
   default:
     profile: |
@@ -66,6 +68,29 @@ personas:
       不关注重复营销、广告和缺乏事实依据的炒作。
     include: [人工智能, AI, 开源]
     exclude: [广告, 促销]
+    hard_exclude: ['限时特惠', '扫码加群']
+
+# 有界面 Chrome 运行时（type: browser）。严格禁止无头模式：复用你已登录的 Chrome Profile，
+# 通过 CDP 附着或按需拉起可见窗口，并在新建的隔离工作 Tab 中重放固化脚本。
+# 前置条件、Profile 核验与脚本规范见 docs/manual/user/sources.md 与 scripts/browser_sources/README.md。
+browser:
+  cdp_url: http://127.0.0.1:9222          # Chrome Remote Debugging 端点（connect_over_cdp 附着）
+  webbridge_url: http://127.0.0.1:10086   # 预留：供 #82 探索期桥接的本地地址
+  auto_launch: false                      # CDP 无人监听时是否自动拉起有界面 Chrome（绝不传 --headless）
+  chrome_executable: null                 # 可选显式 Chrome 可执行文件路径
+  chrome_user_data_dir: null              # 可选 Chrome User Data 根目录（auto_launch 时必填）
+  default_profile: Default                # 默认 Chrome Profile 目录名（如 Default、Profile 1）
+  scripts_dir: ../scripts/browser_sources # 固化 Playwright 脚本目录；相对本文件解析
+  pi:                                     # 预留：#82/#83 的探索与自愈模型（当前仅校验）
+    binary: pi
+    model: anthropic/claude-sonnet-4-6
+    reasoning_level: high                 # off | minimal | low | medium | high | xhigh | max
+    timeout: 300
+  pr:                                     # 预留：#83 脚本自愈后自动提 PR（当前仅校验）
+    enabled: true
+    base_branch: master
+    branch_prefix: auto/browser-source-
+    labels: [ready-for-human]
 
 # 信息源。通用字段：id（唯一）、type、schedule（抓取频率：30m / 2h / 1d 等间隔，
 # 或 @hourly/@daily/@weekly、5 段 cron 表达式）、name（可选显示名）、enabled（默认 true）。
@@ -165,6 +190,25 @@ sources:
     timeout: 30
     proxy: ${HTTP_PROXY:-}
 
+  # 有界面浏览器源：附着已登录的 Chrome Profile，重放 scripts/browser_sources/ 下的固化脚本。
+  # 默认关闭；需先启动带调试端口的 Chrome（见 docs/manual/user/sources.md）。
+  - id: reddit-localllama
+    type: browser
+    name: r/LocalLLaMA 最新讨论
+    enabled: false
+    schedule: 1h
+    page_url: https://www.reddit.com/r/LocalLLaMA/new/
+    task: >
+      打开 r/LocalLLaMA 的 New 列表页，抓取前 20 条帖子的标题、帖子详情链接、作者、发布时间和正文摘要，
+      跳过置顶广告（promoted）。
+    # chrome_profile: Profile 1           # 可选：覆盖 browser.default_profile
+    update_existing: false                # 可选：同源规范化 URL 原位更新（与 web list 一致）
+    on_detail_error: record_and_skip      # fail_batch | record_and_skip
+    script_path: ../scripts/browser_sources/reddit-localllama.py  # 可省略，缺省为 <scripts_dir>/<id>.py
+    max_items: 25
+    timeout: 60                           # 单次重放整体超时秒数
+    # headless: true                      # 不允许：有界面运行时直接报配置错误
+
 # tick 会先抓取、再只过滤、最后运行到期的 pipeline；模型调用可能产生费用。
 # 也可手动执行 pipelines filter/run ID；enabled: false 关闭自动执行。
 pipelines:
@@ -177,9 +221,15 @@ pipelines:
     filter_schedule: 30m      # 可省略；此处更频繁地只过滤，到午夜再生成日报
     max_items: 500
     filters:
+      # guard_ambiguous_exclude（默认 true）：软 exclude 与正向词同时命中时给 0.55 分，
+      # 不淘汰也不满分短路，交给下一关结合完整画像裁决；只命中软 exclude 仍 0 分淘汰。
+      # 纯正向命中：accept_above 要求 1.0 时给 1.0（保留旧短路省钱用法），否则 0.85。
       - type: keyword
         reject_below: 0.5
         accept_above: 1.0
+        # 阶段级硬排除：命中即淘汰。正则特征需同时打开 regex: true。
+        # hard_exclude: ['sponsored\s+by']
+        # regex: true
       # 可选：填好 OPENROUTER_API_KEY 后取消下面注释，启用 decision 过滤。
       # 默认仍只用 keyword，避免升级后自动产生额外模型调用。
       # - type: decision

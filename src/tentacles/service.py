@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from datetime import datetime
 from pathlib import Path
-from typing import Callable, Mapping, Any
+from typing import Callable, Literal, Mapping, Any
 from zoneinfo import ZoneInfo
 
 import httpx
@@ -17,7 +17,7 @@ from tentacles.net import HttpPool
 from tentacles.llm.registry import ModelRegistry
 from tentacles.llm.config import Stage
 from tentacles.llm.json import extract_json
-from tentacles.schemas import ConfigCheck, ErrorEventDetail, ErrorEventView, FetchOutcome, ItemDetail, ItemView, Page, RunDetail, RunView, SourceView, TaskView, ModelView, Completion, ModelTest, TickOutcome
+from tentacles.schemas import ConfigCheck, ErrorEventDetail, ErrorEventView, FetchOutcome, ItemDetail, ItemSearchView, ItemView, Page, RunDetail, RunView, SourceView, TaskView, ModelView, Completion, ModelTest, TickOutcome
 from tentacles.store import ItemQuery, RunErrorQuery, Store
 from tentacles.personas.manager import PersonaManager
 from tentacles.personas.models import FeedbackView, PersonaProposal, PersonaView
@@ -143,10 +143,13 @@ class TentaclesService:
     async def set_persona(self, name: str, *, profile: str | None = None, skip_tags: bool = False,
                           include_add: list[str] | None = None, include_remove: list[str] | None = None,
                           exclude_add: list[str] | None = None, exclude_remove: list[str] | None = None,
+                          hard_exclude_add: list[str] | None = None, hard_exclude_remove: list[str] | None = None,
                           note: str | None = None, expected_version: int | None = None) -> PersonaView:
         return await self.personas.set(name, profile=profile, skip_tags=skip_tags,
                                        include_add=include_add, include_remove=include_remove,
-                                       exclude_add=exclude_add, exclude_remove=exclude_remove, note=note, expected_version=expected_version)
+                                       exclude_add=exclude_add, exclude_remove=exclude_remove,
+                                       hard_exclude_add=hard_exclude_add, hard_exclude_remove=hard_exclude_remove,
+                                       note=note, expected_version=expected_version)
 
     # ---- models -------------------------------------------------------------
 
@@ -215,7 +218,42 @@ class TentaclesService:
                    since: str | datetime | None = None, until: str | datetime | None = None,
                    search: str | None = None, limit: int = 50, offset: int = 0,
                    pipeline: str | None = None, persona: str | None = None, passed: bool | None = None,
-                   min_score: float | None = None, topic: str | None = None) -> Page[ItemView]:
+                   min_score: float | None = None, topic: str | None = None,
+                   sort: str = 'time') -> Page[ItemView]:
+        q = self._item_query(sources=sources, kinds=kinds, since=since, until=until, search=search,
+                             limit=limit, offset=offset, pipeline=pipeline, persona=persona,
+                             passed=passed, min_score=min_score, topic=topic, sort=sort)
+        hits, total = self.store.list_items(q)
+        views = [ItemView.of(hit.item, hit.evaluation, snippet=hit.snippet or None) for hit in hits]
+        return Page[ItemView](items=views, total=total, limit=q.limit, offset=q.offset)
+
+    def search_items(self, query: str, *, sources: list[str] | None = None, kinds: list[str] | None = None,
+                     since: str | datetime | None = None, until: str | datetime | None = None,
+                     limit: int = 50, offset: int = 0, pipeline: str | None = None,
+                     persona: str | None = None, passed: bool | None = None, min_score: float | None = None,
+                     topic: str | None = None, sort: str = 'relevance') -> Page[ItemSearchView]:
+        """Rank Items against one query; the same filters as `list_items` apply."""
+        if not query.strip():
+            raise ConfigError('search query must not be empty')
+        q = self._item_query(sources=sources, kinds=kinds, since=since, until=until, search=query,
+                             limit=limit, offset=offset, pipeline=pipeline, persona=persona,
+                             passed=passed, min_score=min_score, topic=topic, sort=sort)
+        hits, total = self.store.list_items(q)
+        views = [ItemSearchView.of(hit.item, hit.evaluation, snippet=hit.snippet,
+                                   bm25_rank=hit.bm25_rank) for hit in hits]
+        return Page[ItemSearchView](items=views, total=total, limit=q.limit, offset=q.offset)
+
+    def _item_query(self, *, sources: list[str] | None, kinds: list[str] | None,
+                    since: str | datetime | None, until: str | datetime | None, search: str | None,
+                    limit: int, offset: int, pipeline: str | None, persona: str | None,
+                    passed: bool | None, min_score: float | None, topic: str | None,
+                    sort: str) -> ItemQuery:
+        if sort == 'relevance':
+            order: Literal['time', 'relevance'] = 'relevance'
+        elif sort == 'time':
+            order = 'time'
+        else:
+            raise ConfigError("sort must be 'time' or 'relevance'")
         if passed is not None and pipeline is None:
             raise ConfigError('passed/rejected filtering requires a pipeline')
         if pipeline is not None and persona is not None:
@@ -238,13 +276,13 @@ class TentaclesService:
             for s in sources:  # 已从配置移除的源仍可按 id 查询历史条目
                 if s not in known:
                     raise NotFound(f"unknown source {s!r}")
-        q = ItemQuery(source_ids=sources or None, kinds=kinds or None, since=self._time(since),
-                      until=self._time(until), search=search or None, limit=limit, offset=offset,
-                      pipeline_id=pipeline, pipeline_ids=pipeline_ids, passed=passed,
-                      min_score=min_score, topic=topic or None)
-        items, total = self.store.list_items(q)
-        views = [ItemView.of(item, evaluation) for item, evaluation in items]
-        return Page[ItemView](items=views, total=total, limit=limit, offset=offset)
+        # relevance 只在有检索词时才有意义（BM25 或标题命中优先），否则静默按时间排会误导调用方
+        if sort == 'relevance' and not search:
+            raise ConfigError('relevance sorting requires a search query')
+        return ItemQuery(source_ids=sources or None, kinds=kinds or None, since=self._time(since),
+                         until=self._time(until), search=search or None, limit=limit, offset=offset,
+                         pipeline_id=pipeline, pipeline_ids=pipeline_ids, passed=passed,
+                         min_score=min_score, topic=topic or None, sort=order)
 
     def get_item(self, item_id: str) -> ItemDetail:
         item = self.store.get_item(item_id)

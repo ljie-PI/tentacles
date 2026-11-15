@@ -2,7 +2,7 @@
 
 个人信息与新闻管理系统：从多种信息源抓取内容，按个人 persona 过滤，再用 LLM 加工成日报、深度报道或邮件简报。
 
-> 已支持配置驱动的 RSS、IMAP 和网页抓取、去重入库、持久化调度、命名模型、版本化 Persona 与反馈演化，以及 keyword/decision/llm 级联过滤和 digest/deep/summarize/none 处理器。Web 端已提供 Feed、Sources、Pipelines、Reports、Runs、Settings 和 Persona 管理；文档见 [用户手册](docs/manual/user/README.md) 与 [Agent CLI 手册](docs/manual/agent-cli/README.md)，实现与验证范围见 [规格核对](docs/agents/spec-18-audit.md)。
+> 已支持配置驱动的 RSS、IMAP、网页与有界面 Chrome 浏览器抓取、去重入库、持久化调度、命名模型、版本化 Persona 与反馈演化，以及 keyword/decision/llm 级联过滤和 digest/deep/summarize/none 处理器。Web 端已提供 Feed、Sources、Pipelines、Reports、Runs、Settings 和 Persona 管理；文档见 [用户手册](docs/manual/user/README.md) 与 [Agent CLI 手册](docs/manual/agent-cli/README.md)，实现与验证范围见 [规格核对](docs/agents/spec-18-audit.md)。
 
 ## 网页与 REST API
 
@@ -61,7 +61,8 @@ tentacles items list --since 24h  # 查看最近 24 小时的条目
 | `tentacles persona rollback NAME VERSION` | 复制旧内容为新版本，不删除历史 |
 | `tentacles sources list` | 列出信息源及其抓取状态 |
 | `tentacles sources fetch [ID...]` | 立即抓取信息源，不写 ID 时抓取全部启用的源 |
-| `tentacles items list` | 列出条目（含截断正文、`page_url` 与最新评估），可按来源、时间、关键词、`--persona`、`--min-score`、`--topic` 筛选，支持分页 |
+| `tentacles items list` | 列出条目（含截断正文、`page_url` 与最新评估），可按来源、时间、关键词、`--persona`、`--min-score`、`--topic` 筛选，支持分页与 `--sort time\|relevance` |
+| `tentacles items search QUERY` | 全文检索条目：默认按 BM25 相关性排序（标题权重最高），返回 `bm25_rank` 与命中高亮 `snippet`；支持与 `items list` 一致的筛选与分页 |
 | `tentacles items show ID` | 查看条目详情（正文、来源元数据与各 Pipeline 最新评估） |
 | `tentacles tick` | 先并发抓取，再依次过滤、依次运行到期 pipeline |
 | `tentacles scheduler status` | 查看任务频率、到期时间、运行状态 |
@@ -75,6 +76,7 @@ tentacles items list --since 24h  # 查看最近 24 小时的条目
 所有命令都支持 `--json`：stdout 只输出一个 JSON 值，日志写到 stderr，退出码按错误类型区分。给 agent 用的完整说明见 [Agent CLI 手册](docs/manual/agent-cli/README.md)。
 
 入库正文统一截断到 1000 汉字/英文词（`content_truncated` 标记），摘要不超过 300；非邮件条目必须保留单条原文 `url` 或入口 `page_url`，需要完整原文时顺着链接回访即可。
+检索走 SQLite 内置 FTS5 全文索引：3 个字符及以上的词项命中倒排索引，1–2 字短词（如 `广告`、`AI`）逐列匹配，中英长短词都不会漏召回；`tentacles --json items search QUERY` 按 BM25 相关性排序并返回命中高亮 `snippet`。
 `--json items list` 不传 `--pipeline` 时也会自动关联最新一次有效评估，直接给出 `topics`、`match_score`、`match_level`、`match_points`：
 
 ```bash
@@ -82,6 +84,8 @@ tentacles items list --since 24h  # 查看最近 24 小时的条目
 tentacles --json items list --since 24h --limit 50
 # 只看某画像下匹配度 >= 0.8 且命中指定主题的条目
 tentacles --json items list --persona default --min-score 0.8 --topic 人工智能
+# 按相关性检索，拿回 BM25 排名分与命中高亮摘录
+tentacles --json items search '广告推荐 AI' --limit 20
 ```
 
 ## RSS / Atom 与 Web list / llm 原位更新（可选）
@@ -195,6 +199,52 @@ tentacles items show ITEM_ID
 杂乱页面还可用 `mode: llm`，由 extract 阶段模型从有界“文本 + 链接”中抽取；编造链接被丢弃。
 `web-llm` 示例默认关闭，启用后会发送页面内容并可能产生费用；严格 JSON、缓存与计费规则同见协议。
 
+## 有界面浏览器信息源（`type: browser`）
+
+静态抓取拿不到的动态流与登录态页面，可以用 `type: browser`：在**你自己已登录的可见 Chrome** 里新建一个隔离工作 Tab，
+确定性重放仓库内的固化 Playwright 脚本，把文字条目转成 `kind: "browser"` 入库。**严格禁止无头模式**——
+配置里的 `headless: true` 会直接报错，运行时也没有任何无头分支。
+
+```bash
+# 1) 先用手动启动的 Chrome 开好调试端口（用你日常的 Profile，正常登录目标站点）
+"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
+  --remote-debugging-port=9222 --profile-directory="Profile 1"
+# 2) 示例源默认关闭，显式抓取即可（脚本在 scripts/browser_sources/reddit-localllama.py）
+tentacles sources fetch reddit-localllama
+tentacles items list --source reddit-localllama
+```
+
+```yaml
+browser:
+  cdp_url: http://127.0.0.1:9222          # connect_over_cdp 附着的调试端点
+  auto_launch: false                      # 端口无人监听时是否自动拉起有界面 Chrome
+  default_profile: Default                # 默认 Chrome Profile，源级 chrome_profile 可覆盖
+  scripts_dir: ../scripts/browser_sources # 固化脚本目录（相对本文件）
+
+sources:
+  - id: reddit-localllama
+    type: browser
+    enabled: false
+    schedule: 1h
+    page_url: https://www.reddit.com/r/LocalLLaMA/new/
+    chrome_profile: Profile 1
+    on_detail_error: record_and_skip      # fail_batch | record_and_skip
+    max_items: 25
+    timeout: 60
+```
+
+- **复用登录态、不抢窗口**：附着后先用 `chrome://version` 核验实际 `--profile-directory`（不匹配或带 `--headless` 立即报错），
+  同一 `(cdp_url, profile)` 串行执行；无论成功、异常、超时还是 Ctrl-C，都只关闭本次新建的 Tab，绝不关闭你的 Chrome。
+- **固化脚本契约**：`scripts/browser_sources/<id>.py` 实现
+  `async def extract(page, *, page_url, max_items, timeout_ms=30_000) -> BrowserExtractOutput`；
+  加载前经 `ast.parse` 静态导入白名单门禁，禁止 `os` / `subprocess` / `socket` / `open` / `eval` / `__import__` 等。
+  路径必须落在 `browser.scripts_dir` 内，`../../` 越界在 `config check` 阶段即报错。
+- **失败可排障**：重放超时/脚本失败/返回 0 条都会写入 `run_errors` 的 `browser_replay` 阶段，
+  带上失败瞬间的 `current_url`、`page_title`、精简 A11y 快照与脚本栈帧（`errors show`）。
+- 无脚本时的 `pi` 自动探索与脚本自愈提 PR 分别属于后续工单；`browser.pi` / `browser.pr` 目前只做 schema 校验。
+- 完整字段说明见[信息源配置手册](docs/manual/user/sources.md#5-有界面浏览器源type-browser)与
+  [脚本契约](scripts/browser_sources/README.md)，排障见 [Agent CLI 运维速查](docs/manual/agent-cli/operations-reference.md)。
+
 ## 模型配置
 
 示例提供 `fast`（DeepSeek）、`smart`（Claude Sonnet）、`max`（Claude Opus）和 `decision`（JEV）。
@@ -220,6 +270,7 @@ tentacles persona list
 tentacles persona show default
 tentacles persona set default --file ./my-interests.md --note "调整优先级"
 tentacles persona set default --include 机器人 --remove-exclude 科学 --note "更新关键词"
+tentacles persona set default --hard-exclude 限时特惠 --remove-hard-exclude 扫码加群 --note "收紧硬排除"
 cat ./my-interests.md | tentacles persona set work --stdin --skip-tags
 tentacles persona history default
 tentacles persona rollback default 1 --note "恢复初始方向"
@@ -290,7 +341,10 @@ tentacles reports show REPORT_ID
 消费记录独立于 Persona 版本，同一 pipeline 中的条目只消费一次。报告失败时保留未报告状态，修复问题后可以重试。
 报告存入 SQLite，同时按 pipeline 写入 `reports_dir` 下的 Markdown 文件（新文件默认私有权限）。
 
-关键词在标题和摘要中不区分大小写匹配，exclude 优先（0 分）、include 为 1 分，否则 0.5。
+关键词在标题和摘要中不区分大小写匹配：命中 `hard_exclude` 无条件 0 分淘汰；只命中软 `exclude` 也是 0 分；
+但软 `exclude` 与正向词（`include` 或兴趣标签）同时命中时给 0.55 分转交下一关语义精判（`guard_ambiguous_exclude: false` 可关闭）；
+仅正向命中给 1.0 分（配置了 `accept_above: 1.0` 时）或 0.85 分，均未命中 0.5 分。
+每条评估都记录实际命中的具体词项（`match_points`）。
 可启用有执行时限的正则匹配。级联保留每阶段分数、理由及统计；最后阶段出错的条目不缓存，之后可以重试。
 `items list --pipeline ... --rejected` 查看淘汰结果；`items show ID` 包含各 pipeline 的最新评估。
 `items list --persona ... --min-score ... --topic ...` 可不指定 pipeline 直接按画像、匹配分与主题筛选。

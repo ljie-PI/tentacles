@@ -80,7 +80,8 @@ async def filter_items(items: list[Item], persona: PersonaView, spec: PipelineSp
                 final[item.id] = Evaluation(pipeline_id=spec.id, item_id=item.id,
                     input_revision=item.content_revision,
                     persona_version=persona.version, passed=accepted, score=scored.score,
-                    tags=scored.tags, reason=scored.reason, stage=stage.type,
+                    tags=scored.tags, match_points=list(scored.details.get('match_points') or []),
+                    reason=scored.reason, stage=stage.type,
                     stage_scores=traces[item.id], evaluated_at=now)
             elif batch.error is None:
                 counts[i]['forwarded'] += 1

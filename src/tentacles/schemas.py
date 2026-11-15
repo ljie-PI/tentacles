@@ -127,6 +127,8 @@ class ItemView(BaseModel):
     reason: str | None = None
     stage: str | None = None
     stage_scores: list[StageScore] = Field(default_factory=list)
+    # 命中高亮摘录：只有带检索词的列表与检索命令返回，其余为 null
+    snippet: str | None = None
 
     @model_validator(mode="after")
     def _mirror_aliases(self) -> "ItemView":
@@ -155,8 +157,22 @@ class ItemView(BaseModel):
         return "medium" if self.match_score >= 0.5 else "low"
 
     @classmethod
-    def of(cls, item: Item, evaluation: Evaluation | None = None) -> "ItemView":
-        return cls.model_validate({**item.model_dump(), **(evaluation.model_dump() if evaluation else {})})
+    def of(cls, item: Item, evaluation: Evaluation | None = None, *, snippet: str | None = None) -> "ItemView":
+        return cls.model_validate({**item.model_dump(), **(evaluation.model_dump() if evaluation else {}),
+                                   "snippet": snippet})
+
+
+class ItemSearchView(ItemView):
+    """一条相关性排序的检索命中：BM25 排名分与必带的高亮摘录。"""
+
+    snippet: str = ""
+    bm25_rank: float | None = None
+
+    @classmethod
+    def of(cls, item: Item, evaluation: Evaluation | None = None, *, snippet: str | None = None,
+           bm25_rank: float | None = None) -> "ItemSearchView":
+        return cls.model_validate({**item.model_dump(), **(evaluation.model_dump() if evaluation else {}),
+                                   "snippet": snippet or "", "bm25_rank": bm25_rank})
 
 
 class ItemDetail(ItemView):

@@ -43,6 +43,7 @@ class PersonaSeed(BaseModel):
     profile_file: Path | None = None
     include: list[str] = Field(default_factory=list)
     exclude: list[str] = Field(default_factory=list)
+    hard_exclude: list[str] = Field(default_factory=list)
     note: str = ''
 
     @model_validator(mode='after')
@@ -51,7 +52,7 @@ class PersonaSeed(BaseModel):
             raise ValueError('provide exactly one of profile or profile_file')
         return self
 
-    @field_validator('include', 'exclude')
+    @field_validator('include', 'exclude', 'hard_exclude')
     @classmethod
     def _keywords(cls, value: list[str]) -> list[str]:
         return keywords(value)
@@ -77,7 +78,10 @@ class PersonaView(BaseModel):
     profile: str
     tags: list[InterestTag] = Field(default_factory=list)
     include: list[str] = Field(default_factory=list)
+    # 软排除：同时命中正向兴趣词时由 keyword 阶段豁免，转交下一关语义判断。
     exclude: list[str] = Field(default_factory=list)
+    # 硬排除：无歧义的垃圾特征，命中即无条件淘汰。
+    hard_exclude: list[str] = Field(default_factory=list)
     source: PersonaSource
     note: str = ''
     created_at: datetime
@@ -94,8 +98,11 @@ class PersonaEdit:
     include_remove: list[str] = field(default_factory=list)
     exclude_add: list[str] = field(default_factory=list)
     exclude_remove: list[str] = field(default_factory=list)
+    hard_exclude_add: list[str] = field(default_factory=list)
+    hard_exclude_remove: list[str] = field(default_factory=list)
     include_replace: list[str] | None = None
     exclude_replace: list[str] | None = None
+    hard_exclude_replace: list[str] | None = None
     source: PersonaSource = 'manual'
     note: str = ''
     tag_status: TagStatus = 'unchanged'
@@ -120,6 +127,7 @@ class EvolutionContent(BaseModel):
     tags: list[InterestTag] = Field(min_length=5, max_length=20)
     include: list[str] = Field(max_length=100)
     exclude: list[str] = Field(max_length=100)
+    hard_exclude: list[str] = Field(default_factory=list, max_length=100)
     summary: str = Field(min_length=1, max_length=2000)
 
     def check_profile_length(self, limit: int) -> None:
@@ -143,7 +151,7 @@ class EvolutionContent(BaseModel):
             raise ValueError('interest tags are too long')
         return values
 
-    @field_validator('include', 'exclude')
+    @field_validator('include', 'exclude', 'hard_exclude')
     @classmethod
     def _bounded_keywords(cls, values: list[str]) -> list[str]:
         values = keywords(values)

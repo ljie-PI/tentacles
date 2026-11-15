@@ -100,3 +100,53 @@ defaults:
 - **探测命令**：`tentacles models list` 查看密钥是否已配置（绝不回显明文）；`tentacles models test <NAME>`（或在 Web **Settings** 页点击测试）会发起一次真实轻量请求（**可能产生微量费用**），返回延迟、响应样例、Token 用量与服务商返回的 `cost`。
 - **重试策略**：对 HTTP `408 / 409 / 425 / 429`、所有 `5xx`（含 `524 / 529`）、网络错误和超时自动重试。优先遵守响应头 `Retry-After`（支持秒数和 HTTP 日期，上限 60 秒），否则采用带抖动的指数退避（上限 30 秒）。不跟随 HTTP 重定向，防止 `Authorization` 头泄露到第三方域名。
 - **密钥脱敏**：所有模型 `api_key` 注册进全局脱敏器，任何日志、异常诊断、报告正文或提取标题中若意外出现已配置的密钥文本，均会被强制替换为 `[REDACTED]`。
+
+---
+
+## 4. 有界面浏览器运行时（`browser`）
+
+`type: browser` 信息源共用一个**严格禁止无头模式**的 Chrome 运行时：它复用你日常 Chrome 的登录态，
+在真实可见窗口里新建一个隔离工作 Tab 重放固化脚本，抓完即关，不抢占你的浏览窗口。
+
+```yaml
+browser:
+  cdp_url: http://127.0.0.1:9222          # Chrome Remote Debugging 端点
+  webbridge_url: http://127.0.0.1:10086   # 预留：#82 探索期桥接地址（当前仅校验）
+  auto_launch: false                      # CDP 无人监听时是否自动拉起有界面 Chrome
+  chrome_executable: null                 # 可选：显式 Chrome 可执行文件路径
+  chrome_user_data_dir: null              # 可选：Chrome User Data 根目录（auto_launch 时必填）
+  default_profile: Default                # 默认 Chrome Profile 目录名（如 Default、Profile 1）
+  scripts_dir: ../scripts/browser_sources # 固化 Playwright 脚本目录，相对本文件解析
+  pi:                                     # 预留：#82/#83 的探索与自愈模型
+    binary: pi
+    model: anthropic/claude-sonnet-4-6
+    reasoning_level: high                 # off | minimal | low | medium | high | xhigh | max
+    timeout: 300
+  pr:                                     # 预留：#83 脚本自愈后自动提 PR
+    enabled: true
+    base_branch: master
+    branch_prefix: auto/browser-source-
+    labels: [ready-for-human]
+```
+
+| 字段 | 含义与默认值 |
+| :--- | :--- |
+| `cdp_url` | 用 `connect_over_cdp` 附着的有界面 Chrome 调试端点，**必须带显式端口**，默认 `http://127.0.0.1:9222` |
+| `webbridge_url` | 预留给 #82 探索期的本地桥接地址，当前不产生任何网络行为 |
+| `auto_launch` | 默认 `false`。为 `true` 且 `cdp_url` 无人监听时，按目标 Profile 以有界面模式拉起 Chrome（**绝不传 `--headless`**）；抓取结束后只关闭这次拉起的进程 |
+| `chrome_executable` | 可选 Chrome 可执行文件；缺省在 macOS/Windows 常见路径与 `PATH` 的 `google-chrome*` / `chromium*` 中查找 |
+| `chrome_user_data_dir` | 可选 User Data 根目录；附着时若配置了它，会与实际命令行 `--user-data-dir` 比对 |
+| `default_profile` | 默认 Chrome Profile 目录名，源级 `chrome_profile` 可覆盖；只接受目录名（禁止 `/`、前导 `-` 等可注入参数的值） |
+| `scripts_dir` | 固化脚本目录，相对 YAML 解析；源级 `script_path` 必须解析到该目录内的 `.py` 文件 |
+| `pi` / `pr` | #82 / #83 的预留配置块，当前**只做 schema 校验**，不影响抓取行为 |
+
+**硬性安全边界**
+
+- **绝不无头**：`headless` 只接受 `false`（或缺省）。`browser.headless: true` 与源级 `headless: true` 都会直接报配置错误，
+  运行时代码里也不存在任何无头分支；附着到的 Chrome 若带 `--headless`，同样立即拒绝。
+- **Profile 核验**：附着成功后读取 `chrome://version` 的真实命令行，比对 `--profile-directory`（以及配置了
+  `chrome_user_data_dir` 时的 `--user-data-dir`）。不匹配时 `ConfigError` 会直接给出可复制执行的启动命令。
+- **脚本路径防越界**：源级 `script_path` 必须是以 `.py` 结尾、真实路径落在 `browser.scripts_dir` 内的文件；
+  `../../` 或符号链接逃逸都会在 `tentacles config check` 阶段报错。
+- **只关自己的 Tab**：每次重放新建一个隔离工作 Tab，无论成功、超时、异常还是 Ctrl-C 取消都只关闭该 Tab；
+  运行时不调用 `browser.close()`，绝不关闭你的 Chrome 主窗口，也不写你的 Profile。

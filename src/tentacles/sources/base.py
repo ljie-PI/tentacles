@@ -47,6 +47,7 @@ class FetchContext:
     models: ModelRegistry | None = None
     metrics: UsageTotals = field(default_factory=UsageTotals)
     classify_links: Callable[[list[str]], dict[str, LinkDisposition]] | None = None
+    config: AppConfig | None = None
     # Per-target failure diagnostics, wired straight to the owning RunOperation.
     record_error: Callable[[DiagnosticEvent], None] = discard_diagnostic
 
