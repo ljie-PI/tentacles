@@ -29,7 +29,9 @@ tentacles --json sources fetch hacker-news inbox
     "updated": 2,
     "dup": 13,
     "error": null,
-    "stats": {"entries": 20, "too_old": 0, "fetched": 20, "new": 5, "updated": 2, "dup": 13}
+    "stats": {"entries": 20, "too_old": 0, "fetched": 20, "new": 5, "updated": 2, "dup": 13},
+    "error_count": 0,
+    "failed_targets": []
   },
   {
     "source_id": "broken-feed",
@@ -38,14 +40,19 @@ tentacles --json sources fetch hacker-news inbox
     "new": 0,
     "updated": 0,
     "dup": 0,
-    "error": "RSS request returned HTTP 500",
-    "stats": {}
+    "error": "RSS request failed (ConnectError)",
+    "stats": {},
+    "error_count": 1,
+    "failed_targets": [
+      {"error_id": 21, "target_url": null, "external_id": null, "error_code": "connection_failed"}
+    ]
   }
 ]
 ```
 
 - **必须逐项检查 `status`**：批量抓取中即使部分源报错（`status: "error"`）或正被其他进程占用锁（`status: "busy"`，`run_id: 0`），**进程退出码仍为 `0`**；仅当传入了不存在的 Source ID 时才返回退出码 `3`（`not_found`）。
 - 成功批次满足 `stats.fetched = new + updated + dup`（未开启 `update_existing: true` 的源 `updated` 恒为 `0`）。
+- **`error_count` / `failed_targets`**：本次运行写入故障账本的条数与指针（`error_id` 用于接续 `tentacles --json errors show <error_id>`）。未获取成功的目标即使整批业务数据回滚也一定会出现在这里，详见 **[第 5 节 故障账本](#5-故障账本errors-list--errors-show--runs-show)**。
 
 ---
 
@@ -88,7 +95,9 @@ tentacles --json pipelines run daily-tech
     "cost": 0.024,
     "models": ["deepseek-flash", "claude-sonnet-5-5"]
   },
-  "error": null
+  "error": null,
+  "error_count": 0,
+  "failed_targets": []
 }
 ```
 
@@ -134,8 +143,138 @@ tentacles --json runs list --kind pipeline --target daily-tech
 
 ---
 
-## 5. 失败诊断与错误排查
+## 5. 故障账本（`errors list` / `errors show` / `runs show`）
 
-- 检查 `sources list` / `pipelines list` / `scheduler status` 中的 `last_status` 与 `last_error`；
-- 调用 `tentacles --json runs list --kind fetch --target <SOURCE_ID>` 查看失败运行的 `error` 摘要与 `stats`（如 `dropped_links`、阶段 `errors` 计数、`aborted` / `abort_status`）；
-- 对单条已入库条目的过滤阶段异常，可通过 `tentacles --json items show <ITEM_ID>` 查看 `evaluations[].stage_scores[].error`。
+业务写入可能整批回滚，但逐条失败事件**必定落库**：`run_errors` 账本不参与 `items` / `reports` 的业务事务，`sources fetch`、`tick`、`pipelines filter/run` 在异常或取消时也会把执行中收集到的每一条结构化故障（含具体哪个 `target_url` / `external_id` 没拿到）写入。
+
+```bash
+# 只看尚未消警（后续重试仍未成功）的故障，按时间倒序（默认 limit 50）
+tentacles --json errors list --unresolved
+
+# 定位某个源最近 7 天抓不到的条目
+tentacles --json errors list --source hacker-news --since 7d --limit 100
+
+# 展开一条故障的完整描述与已脱敏的排障现场
+tentacles --json errors show 21
+
+# 查看单次运行的全部统计与本次运行记录的故障
+tentacles --json runs show 8
+```
+
+### `errors list` 筛选参数
+
+| 参数 | 说明 |
+| :--- | :--- |
+| `--unresolved` | 仅返回 `resolved_at IS NULL`（当前仍未消警）的记录 |
+| `--source ID` | 按信息源筛选（定位某个源漏抓了哪些条目） |
+| `--pipeline ID` | 按 Pipeline 筛选（过滤/成稿阶段故障） |
+| `--phase P` | 按阶段筛选：`fetch_page`、`parse_entry`、`fetch_detail`、`imap_fetch`、`browser_replay`、`browser_heal`、`llm_extract`、`filter_stage`、`report_process`、`script_pr` |
+| `--error-code CODE` | 按机器错误码筛选，见下方速查表 |
+| `--run-id N` | 只看某一次运行（与 `failed_targets[].error_id` 配合可精确定位） |
+| `--since T` / `--until T` | 时间窗，接受时长（`30m`、`7d`）或 UTC ISO 时间 |
+| `--limit 1..500` / `--offset N` | 分页；越界返回退出码 `2`（`invalid`） |
+
+返回 `Page[ErrorEventView]`：**列表故意不包含体积较大的 `debug_context`**，便于高密度扫描；需要现场时再单条 `errors show`。
+
+```json
+{
+  "items": [
+    {
+      "id": 21,
+      "run_id": 8,
+      "occurred_at": "2026-10-25T03:15:00Z",
+      "phase": "fetch_page",
+      "severity": "error",
+      "source_id": "hacker-news",
+      "pipeline_id": null,
+      "page_url": "https://news.ycombinator.com/",
+      "target_url": null,
+      "item_id": null,
+      "external_id": null,
+      "error_code": "connection_failed",
+      "http_status": null,
+      "exception_type": "UpstreamError",
+      "message": "RSS request failed (ConnectError)",
+      "retryable": true,
+      "resolved_at": null
+    }
+  ],
+  "total": 1,
+  "limit": 50,
+  "offset": 0
+}
+```
+
+### `errors show <ERROR_ID>`
+
+在 `ErrorEventView` 全部字段之外追加 `debug_context`（已剥离凭据的结构化现场，序列化后严格 `<= 16 KB`）：
+
+```json
+{
+  "id": 21,
+  "run_id": 8,
+  "phase": "fetch_page",
+  "error_code": "connection_failed",
+  "message": "RSS request failed (ConnectError)",
+  "page_url": "https://[REDACTED]@feed.example.test/rss?token=[REDACTED]&limit=5",
+  "debug_context": {
+    "exception": "Traceback (most recent call last):\n  File \".../sources/runner.py\", line 55, in fetch_source\n    result = await source.fetch(state.cursor, ctx)\ntentacles.errors.UpstreamError: RSS request failed (ConnectError)"
+  }
+}
+```
+
+- ID 不存在时退出码 `3`（`not_found`）。
+- `debug_context` 中模型 `api_key`、`Authorization` / `Cookie` / `Set-Cookie` / `Proxy-Authorization`、IMAP 与代理密码、URL userinfo 及 `token` / `key` / `sig` / `password` / `secret` 等敏感参数一律替换为 `[REDACTED]`；保留的是**请求地址、HTTP 状态与白名单特征头**（`content-type`、`location`、`retry-after`、`server`、`cf-mitigated`、`x-ratelimit-*`）、HTML 骨架裁剪与栈帧摘要。超限时以 `{"truncated": true, ...}` 标记，不会静默丢弃。
+
+### `runs show <RUN_ID>`
+
+在 `RunView` 全部字段之外追加 `errors: ErrorEventView[]`（同样是轻量列表，不含 `debug_context`）；运行 ID 不存在时退出码 `3`。
+
+### `error_code` 速查表（Agent 排障指向）
+
+| `phase` | `error_code` | 含义与处理建议 |
+| :--- | :--- | :--- |
+| `fetch_page` / `fetch_detail` | `http_status_error` | 目标返回 401/403/404/429/5xx：检查登录态与 Cookie，或把源切换为 `type: browser`；`http_status` 字段给出具体状态码 |
+| `fetch_page` / `fetch_detail` | `http_redirect_blocked` | 静态 `web` 源遇到 301/302；`debug_context` 中的跳转目标即新地址，改用 `https://` 或修正 `url` |
+| `fetch_page` / `fetch_detail` | `network_timeout` | 连接/读取超时（可重试）：多为瞬态网络抖动、代理不通或 TLS 握手失败 |
+| `fetch_page` / `fetch_detail` | `connection_failed` | DNS 解析失败、连接被拒绝、TLS 失败（可重试）：先确认 `url` 可达与代理配置 |
+| `parse_entry` | `selector_no_match` | CSS 选择器匹配数为 0，或列表项缺少 `title` / `link`：需改 `list_selector` / 字段选择器 |
+| `fetch_detail` | `empty_extracted_body` | 详情页 HTTP 200 但正文为空（SPA 空壳或反爬挑战页）：需要浏览器源 |
+| `browser_replay` | `playwright_selector_timeout` | 固化 Playwright 脚本等待选择器超时（页面结构已变） |
+| `browser_replay` | `script_assertion_failed` | 脚本试跑抓到 0 条或断言不通过 |
+| `browser_heal` | `pi_heal_exhausted` | `pi` 自愈后试跑仍未通过，需要人工介入 |
+| `script_pr` | `git_or_pr_failed` | 脚本已生成，但推送分支或 `gh pr create` 失败 |
+| `llm_extract` | `hallucinated_link_dropped` | 模型返回了页面内不存在的链接，该条已被丢弃 |
+| `llm_extract` | `invalid_json_schema` | 模型返回违反严格 JSON Schema，本轮降级 |
+| `imap_fetch` | `imap_auth_failed` | IMAP 认证失败：检查 `username` / `password`（确认不是应用专用密码过期） |
+| `imap_fetch` | `imap_message_parse_error` | 指定 `folder + uid` 的邮件解析异常（单条跳过） |
+| `filter_stage` | `decision_item_error` | 过滤阶段单条错误（该条本轮未判定，下一轮会重试） |
+| `filter_stage` | `llm_batch_parse_error` | 拆批后仍无法解析模型输出 |
+| `filter_stage` | `regex_timeout` | 关键词正则超时，需简化表达式 |
+| `filter_stage` | `filter_stage_aborted` | 整批过滤被上游错误中断；`debug_context` 中带阶段进度 |
+| `report_process` | `summarize_batch_unparsed` | 简报批次 JSON 违约，已降级处理 |
+| `report_process` | `citation_out_of_range` | 报告引用编号越界，已丢弃该引用 |
+| 任意阶段 | `unexpected_exception` | 未被更具体分类的失败（`retryable` 为 `false`，需查 `exception_type` 与栈帧） |
+
+> 当前版本会在抓取阶段产出 `network_timeout` / `connection_failed` / `unexpected_exception`，在过滤阶段产出 `filter_stage_aborted`；其余机器码是账本已预留的共享词表，由对应模块在实现后按同一契约写入，Agent 可放心按表编写分支，未出现的码不会作为「未知」返回。
+
+### 自动消警（`resolved_at`）
+
+- 同一 `(source_id, target_url)` 或 `(source_id, external_id)` **后续成功入库**时，该源此前未解决的记录自动回填 `resolved_at`；
+- 同一 `(pipeline_id, item_id)` **后续成功写入评估**时，`filter_stage` 的未决记录自动消警；
+- 因此 `errors list --unresolved` 就是「当前仍然漏抓 / 未成功判定」的准确清单，不需要 Agent 自己做去重与对账。
+
+---
+
+## 6. 失败诊断与错误排查工作流
+
+推荐的排障顺序（每一步都能拿到可直接执行的线索）：
+
+1. **执行结果先看指针**：`sources fetch` / `tick` / `pipelines run` 返回的 `error_count` 与 `failed_targets`。`error_count > 0` 时不要只看 `status`，那只是整轮结论。
+2. **按失败目标定位**：用 `failed_targets[].error_id` 直接 `errors show <error_id>`；或用 `errors list --run-id <RUN_ID>` 看本次运行的全部故障。
+3. **按源/时间扫描漏网内容**：`errors list --unresolved --source <SOURCE_ID> --since 7d`，`target_url` 就是没拿到的具体内容地址。
+4. **按错误码决定动作**：查上面速查表 —— `retryable: true` 的（`network_timeout`、`connection_failed`）等下一轮或立即重跑；`retryable: false` 或 `http_status_error` / `selector_no_match` / `empty_extracted_body` 属于确定性故障，必须改配置或换源类型，重试不会好转。
+5. **交叉核对运行汇总**：`runs show <RUN_ID>` 给出该轮 `stats` 与故障列表；`sources list` / `pipelines list` / `scheduler status` 中的 `last_status`、`last_error` 只反映**最近一次**运行结论。
+6. **单条已入库条目的过滤异常**：`items show <ITEM_ID>` 查看 `evaluations[].stage_scores[].error`（已入库数据仍保留在此，不在账本里）。
+
+注意：账本只记录执行期的失败现场，不含任何业务数据；修好配置后可以用 `errors list --unresolved` 的条数下降来验证修复是否生效。
