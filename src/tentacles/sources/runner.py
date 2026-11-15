@@ -7,7 +7,7 @@ from datetime import timedelta
 from typing import TYPE_CHECKING
 
 from tentacles.asyncutil import run_store_call
-from tentacles.config import SourceSpec
+from tentacles.config import AppConfig, SourceSpec
 from tentacles.diagnostics import DiagnosticEvent, classify_failure, stack_frames
 from tentacles.errors import TentaclesError
 from tentacles.models import has_original_url
@@ -44,7 +44,7 @@ def _fetch_failure(spec: SourceSpec, exc: Exception) -> DiagnosticEvent:
 
 async def fetch_source(spec: SourceSpec, operation: RunOperation, *, store: Store, http: HttpPool,
                        imap_factory: ImapFactory = connect_imap, timezone: str = 'UTC',
-                       models: ModelRegistry | None = None) -> None:
+                       models: ModelRegistry | None = None, config: AppConfig | None = None) -> None:
     """The lifecycle owns errors, cancellation and terminal state.
 
     Share its accumulator so even billed responses drained during cancellation
@@ -53,7 +53,8 @@ async def fetch_source(spec: SourceSpec, operation: RunOperation, *, store: Stor
     ctx = FetchContext(http=http, now=operation.started_at, imap_factory=imap_factory, timezone=timezone,
                        seen_links=lambda urls: store.seen_links(spec.id, urls), models=models,
                        metrics=operation.metrics,
-                       classify_links=lambda urls: store.classify_links(spec.id, urls))
+                       classify_links=lambda urls: store.classify_links(spec.id, urls),
+                       config=config, record_error=operation.record_error)
     state = await run_store_call(store.get_source_state, spec.id)
     source = build_source(spec)
     try:
