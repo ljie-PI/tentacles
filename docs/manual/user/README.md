@@ -10,6 +10,7 @@
    - `config/tentacles.yaml` 全局选项、`.env` 环境变量注入、配置校验
    - 命名模型（OpenAI 兼容 / Anthropic / OpenRouter）与五大阶段（`extract` / `filter` / `decision` / `persona` / `process`）路由、重试与计费规则
    - 有界面浏览器运行时（`browser` 块）：CDP 附着、Profile 核验、自动拉起与「绝不无头」边界
+   - 存储冷热分层（`app.storage`）：单活跃热库、按自然年冷归档、去重墓碑与 `storage` 运维命令
 2. **[信息源配置与原位更新](sources.md)**
    - RSS / Atom 订阅
    - IMAP 邮箱只读增量抓取（Gmail 应用专用密码说明、文件夹游标与正文清洗）
