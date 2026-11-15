@@ -41,6 +41,22 @@ _BEARER = re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]{16,}")
 _COOKIE = re.compile(r"(?im)^\s*(?:set-)?cookie\s*[:=]\s*\S{8,}")
 _EMAIL = re.compile(r"\b[\w.+-]+@[\w-]+\.[A-Za-z]{2,}\b")
 _HOME_PATH = re.compile(r"(?:/Users|/home)/[^/\s\"']+|[A-Za-z]:\\Users\\[^\\\s\"']+")
+# Provider key shapes. They are matched verbatim so an ordinary long string (a URL,
+# a selector, a CSS class) is still publishable.
+_SK_TOKEN = re.compile(r"\bsk-[A-Za-z0-9_-]{16,}")
+_SK_RUN = re.compile(r"[A-Za-z0-9]{16,}")
+_PROVIDER_KEYS: tuple[tuple[re.Pattern[str], str], ...] = (
+    (re.compile(r"\bgh[pousr]_[A-Za-z0-9]{16,}"), "a GitHub token"),
+    (re.compile(r"\bAKIA[0-9A-Z]{16}\b"), "an AWS access key"),
+    (re.compile(r"\bxox[baprs]-[A-Za-z0-9-]{10,}"), "a Slack token"),
+    (re.compile(r"\bAIza[0-9A-Za-z_-]{20,}"), "a Google API key"),
+    (re.compile(r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}"), "a JWT"),
+)
+# `name = "literal"` where the name itself claims to be a credential.
+_CREDENTIAL_ASSIGNMENT = re.compile(
+    r"(?i)(?<![A-Za-z0-9])[A-Za-z0-9_.-]*?"
+    r"(?:api[_-]?key|apikey|token|secret|password|passwd|authorization|cookie)"
+    r"['\"]?\s*[:=]\s*(?P<quote>['\"])(?P<value>[^'\"\n]{12,})(?P=quote)")
 
 
 class ScriptPrError(Exception):
@@ -350,6 +366,16 @@ def sensitive_findings(text: str, secrets: Sequence[str] = ()) -> list[str]:
         findings.append("an email address")
     if _HOME_PATH.search(text):
         findings.append("a local user path")
+    if _sk_key(text):
+        findings.append("an API key")
+    findings.extend(reason for pattern, reason in _PROVIDER_KEYS if pattern.search(text))
+    if _CREDENTIAL_ASSIGNMENT.search(text):
+        findings.append("a hard-coded credential")
     if any(secret and secret in text for secret in secrets):
         findings.append("a configured secret")
     return findings
+
+
+def _sk_key(text: str) -> bool:
+    """`sk-…` keys, ignoring the hyphenated identifiers a CSS class is made of."""
+    return any(_SK_RUN.search(token) for token in _SK_TOKEN.findall(text))
