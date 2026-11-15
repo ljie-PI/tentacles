@@ -10,6 +10,7 @@ from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator
 
+from tentacles.text import truncate_content_units
 from tentacles.timeutil import to_utc, utcnow
 
 # 常见追踪参数，抓取内容时无意义
@@ -19,8 +20,12 @@ _TRACKING_PARAMS = {
     "scene", "nsukey", "fbclid", "gclid", "igshid",
 }
 
-ItemKind = Literal["rss", "email", "web"]
+ItemKind = Literal["rss", "email", "web", "browser"]
 LinkDisposition = Literal["new", "refresh", "skip"]
+
+# 入库正文上限：CJK 字符 + 非 CJK 词元合计不超过 1000，摘要不超过 300
+CONTENT_UNITS = 1000
+SUMMARY_UNITS = 300
 
 
 def normalize_url(url: str) -> str:
@@ -33,6 +38,17 @@ def normalize_url(url: str) -> str:
     path = parsed.path or "/"
     return urlunparse((parsed.scheme or "https", parsed.netloc.lower(), path,
                        "", urlencode(query), ""))
+
+
+def is_http_url(value: str) -> bool:
+    """Whether `value` is an absolute http(s) URL with a host."""
+    parsed = urlparse(value.strip())
+    return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
+
+
+def has_original_url(url: str, page_url: str) -> bool:
+    """Non-email Items keep either the detail link or their entry-page link."""
+    return is_http_url(url) or is_http_url(page_url)
 
 
 def content_fingerprint(title: str, summary: str = "") -> str:
@@ -54,10 +70,12 @@ class Item(BaseModel):
     identity_policy: Literal["standard", "revision"] = "standard"
     external_id: str = ""
     url: str = ""
+    page_url: str = ""
     title: str
     author: str = ""
     summary: str = ""
     content: str = ""
+    content_truncated: bool = False
     published: datetime | None = None
     fetched_at: datetime = Field(default_factory=utcnow)
     updated_at: datetime | None = None
@@ -80,6 +98,13 @@ class Item(BaseModel):
     def model_post_init(self, __context) -> None:
         if self.url:
             self.url = normalize_url(self.url)
+        if self.page_url:
+            self.page_url = normalize_url(self.page_url)
+        # 入库即截断：内容与摘要共用同一套 unit 计量，截断标记只增不减，
+        # 以便从库中读回的已截断正文继续显示 content_truncated。
+        self.content, _, truncated = truncate_content_units(self.content, CONTENT_UNITS)
+        self.content_truncated = self.content_truncated or truncated
+        self.summary = truncate_content_units(self.summary, SUMMARY_UNITS)[0]
         if not self.fingerprint:
             self.fingerprint = content_fingerprint(self.title, self.summary)
         if not self.external_id:
@@ -101,6 +126,7 @@ class ItemObservation(BaseModel):
     stable_external_id: bool = False
     title: str | None = None
     url: str | None = None
+    page_url: str | None = None
     author: str | None = None
     summary: str | None = None
     content: str | None = None

@@ -17,7 +17,8 @@ from typing import Any, Callable, Literal, Sequence
 
 from tentacles.dedup import split_similar
 from tentacles.diagnostics import DiagnosticEvent, FailedTargetRef, RunErrorDetail, RunErrorRecord
-from tentacles.models import Item, ItemObservation, LinkDisposition, item_id, normalize_url
+from tentacles.models import CONTENT_UNITS, Item, ItemObservation, LinkDisposition, item_id, normalize_url
+from tentacles.text import truncate_content_units
 from tentacles.errors import Conflict
 from tentacles.personas.models import FeedbackView, PersonaEdit, PersonaView, edit_keywords, keywords
 from tentacles.timeutil import from_iso, to_iso, to_utc, utcnow
@@ -61,7 +62,11 @@ class ItemQuery:
     limit: int = 50
     offset: int = 0
     pipeline_id: str | None = None
+    # --persona 在 Service 中解析成使用该画像的 pipeline 集合
+    pipeline_ids: list[str] | None = None
     passed: bool | None = None
+    min_score: float | None = None
+    topic: str | None = None
 
 
 @dataclass
@@ -271,6 +276,18 @@ def _migrate_v13(conn: sqlite3.Connection) -> None:
 
 
 def _migrate_v14(conn: sqlite3.Connection) -> None:
+    conn.execute("ALTER TABLE items ADD COLUMN page_url TEXT NOT NULL DEFAULT ''")
+    conn.execute('ALTER TABLE items ADD COLUMN content_truncated INTEGER NOT NULL DEFAULT 0')
+    conn.execute("ALTER TABLE evaluations ADD COLUMN match_points TEXT NOT NULL DEFAULT '[]'")
+    # 存量超长正文按同一单位规则回填，保证库内正文与截断标记一致。
+    for row in conn.execute("SELECT id, content FROM items WHERE content != ''").fetchall():
+        content, _, truncated = truncate_content_units(row['content'], CONTENT_UNITS)
+        if truncated:
+            conn.execute('UPDATE items SET content = ?, content_truncated = 1 WHERE id = ?',
+                         (content, row['id']))
+
+
+def _migrate_v15(conn: sqlite3.Connection) -> None:
     # The diagnostics ledger is independent of business writes: a run records a
     # failed target here even when its item/report transaction never commits.
     conn.execute("""CREATE TABLE run_errors (
@@ -298,21 +315,40 @@ def _migrate_v14(conn: sqlite3.Connection) -> None:
     conn.execute('CREATE INDEX idx_run_errors_target ON run_errors (target_url)')
 
 
-MIGRATIONS: list[Callable[[sqlite3.Connection], None]] = [_migrate_v1, _migrate_v2, _migrate_v3, _migrate_v4, _migrate_v5, _migrate_v6, _migrate_v7, _migrate_v8, _migrate_v9, _migrate_v10, _migrate_v11, _migrate_v12, _migrate_v13, _migrate_v14]
+MIGRATIONS: list[Callable[[sqlite3.Connection], None]] = [_migrate_v1, _migrate_v2, _migrate_v3, _migrate_v4, _migrate_v5, _migrate_v6, _migrate_v7, _migrate_v8, _migrate_v9, _migrate_v10, _migrate_v11, _migrate_v12, _migrate_v13, _migrate_v14, _migrate_v15]
 
-_ITEM_COLUMNS = ("id, source_id, kind, external_id, url, title, author, summary, content,"
-                 " published, fetched_at, fingerprint, meta, identity_policy, updated_at, content_revision")
+_ITEM_COLUMNS = ("id, source_id, kind, external_id, url, page_url, title, author, summary, content,"
+                 " content_truncated, published, fetched_at, fingerprint, meta, identity_policy,"
+                 " updated_at, content_revision")
 _EVAL_COLUMNS = ('pipeline_id', 'item_id', 'persona_version', 'passed', 'score', 'tags',
-                 'reason', 'stage', 'stage_scores', 'evaluated_at', 'reported_at', 'input_revision')
+                 'reason', 'stage', 'stage_scores', 'evaluated_at', 'reported_at', 'input_revision',
+                 'match_points')
 _EVAL_PROJECTION = ', '.join(f'e.{column} AS eval_{column}' for column in _EVAL_COLUMNS)
 _SORT_TIME = "COALESCE(published, fetched_at)"
 _ACTIVITY_TIME = "COALESCE(updated_at, fetched_at)"
-_CONTENT_FIELDS = ('title', 'summary', 'content', 'author', 'url', 'published')
+_CONTENT_FIELDS = ('title', 'summary', 'content', 'author', 'url', 'page_url', 'published')
+# 与正文一样参与更新比较的元数据：邮件收件人影响摘要生成，全文哈希感知截断外更新
+_CONTENT_META_FIELDS = ('to', 'cc', 'full_content_sha1')
 # 单条 UPDATE 的参数上限远高于此；分块只是让超大批次不会碰到它
 _RESOLVE_CHUNK = 400
 _RUN_ERROR_COLUMNS = ("id, run_id, occurred_at, phase, severity, source_id, pipeline_id, page_url,"
                       " target_url, item_id, external_id, error_code, http_status, exception_type,"
                       " message, retryable, resolved_at")
+
+# 精确关联某个 pipeline 当前最新 Persona 版本的评估
+_PIPELINE_EVAL_JOIN = (
+    ' JOIN evaluations e ON e.item_id = items.id AND e.pipeline_id = ?'
+    ' AND e.input_revision = items.content_revision'
+    ' AND e.persona_version = (SELECT MAX(n.persona_version) FROM evaluations n'
+    ' WHERE n.pipeline_id = e.pipeline_id AND n.item_id = e.item_id)')
+# 未指定 pipeline 时关联最新一次有效评估（可为空）
+_LATEST_EVAL_JOIN = (
+    ' LEFT JOIN (SELECT * FROM (SELECT e.*, ROW_NUMBER() OVER (PARTITION BY e.item_id'
+    ' ORDER BY e.evaluated_at DESC, e.pipeline_id) AS eval_rank FROM evaluations e'
+    ' WHERE e.persona_version = (SELECT MAX(n.persona_version) FROM evaluations n'
+    ' WHERE n.pipeline_id = e.pipeline_id AND n.item_id = e.item_id){scope})'
+    ' WHERE eval_rank = 1) e ON e.item_id = items.id'
+    ' AND e.input_revision = items.content_revision')
 
 
 @dataclass(frozen=True)
@@ -503,6 +539,17 @@ class Store:
                 ' WHERE newer.pipeline_id = e.pipeline_id AND newer.item_id = e.item_id)'
                 ' ORDER BY e.pipeline_id', args).fetchall()
         return [_row_to_evaluation(row) for row in rows]
+
+    def latest_evaluation(self, item_id: str) -> Evaluation | None:
+        """The newest evaluation of the item's current content revision, if any."""
+        with self._lock:
+            row = self._conn.execute(
+                'SELECT e.* FROM evaluations e JOIN items i ON i.id = e.item_id'
+                ' WHERE e.item_id = ? AND e.input_revision = i.content_revision'
+                ' AND e.persona_version = (SELECT MAX(n.persona_version) FROM evaluations n'
+                ' WHERE n.pipeline_id = e.pipeline_id AND n.item_id = e.item_id)'
+                ' ORDER BY e.evaluated_at DESC, e.pipeline_id LIMIT 1', (item_id,)).fetchone()
+        return _row_to_evaluation(row) if row is not None else None
 
     def submit_feedback(self, item_id: str, persona: str, rating: int, note: str,
                         now: datetime) -> FeedbackView:
@@ -838,14 +885,16 @@ class Store:
                 latest = observation.apply(target)
                 changed = (any(getattr(target, key) != getattr(latest, key) for key in _CONTENT_FIELDS)
                            or any(str(target.meta.get(key, '')) != str(latest.meta.get(key, ''))
-                                  for key in ('to', 'cc')))
+                                  for key in _CONTENT_META_FIELDS))
                 if changed:
                     if now is None:
                         raise ValueError('content updates require an observation time')
                     self._conn.execute(
-                        'UPDATE items SET title = ?, summary = ?, content = ?, author = ?, url = ?, published = ?,'
-                        ' fingerprint = ?, meta = ?, updated_at = ?, content_revision = content_revision + 1 WHERE id = ?',
-                        (latest.title, latest.summary, latest.content, latest.author, latest.url, to_iso(latest.published),
+                        'UPDATE items SET title = ?, summary = ?, content = ?, author = ?, url = ?, page_url = ?,'
+                        ' content_truncated = ?, published = ?, fingerprint = ?, meta = ?, updated_at = ?,'
+                        ' content_revision = content_revision + 1 WHERE id = ?',
+                        (latest.title, latest.summary, latest.content, latest.author, latest.url,
+                         latest.page_url, int(latest.content_truncated), to_iso(latest.published),
                          latest.fingerprint, json.dumps(latest.meta, ensure_ascii=False), to_iso(now), target.id))
                     self._conn.execute('DELETE FROM evaluations WHERE item_id = ?', (target.id,))
                     updated += 1
@@ -885,9 +934,9 @@ class Store:
 
     def _insert_item(self, it: Item) -> None:
         self._conn.execute(
-            f"INSERT INTO items ({_ITEM_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (it.id, it.source_id, it.kind, it.external_id, it.url, it.title, it.author,
-             it.summary, it.content, to_iso(it.published), to_iso(it.fetched_at),
+            f"INSERT INTO items ({_ITEM_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (it.id, it.source_id, it.kind, it.external_id, it.url, it.page_url, it.title, it.author,
+             it.summary, it.content, int(it.content_truncated), to_iso(it.published), to_iso(it.fetched_at),
              it.fingerprint, json.dumps(it.meta, ensure_ascii=False), it.identity_policy, None, 1))
 
     # 三条规则各走自己的索引；合成一个 OR 查询会退化为全表扫描
@@ -932,45 +981,53 @@ class Store:
 
     def list_items(self, q: ItemQuery) -> tuple[list[tuple[Item, Evaluation | None]], int]:
         where = ["1 = 1"]
-        args: list[Any] = []
-        joined = ''
-        extra_columns = ''
+        where_args: list[Any] = []
         if q.pipeline_id is not None:
-            joined = (' JOIN evaluations e ON e.item_id = items.id AND e.pipeline_id = ?'
-                      ' AND e.input_revision = items.content_revision'
-                      ' AND e.persona_version = (SELECT MAX(n.persona_version) FROM evaluations n'
-                      ' WHERE n.pipeline_id = e.pipeline_id AND n.item_id = e.item_id)')
-            args.append(q.pipeline_id)
-            extra_columns = ', ' + _EVAL_PROJECTION
-            if q.passed is not None:
-                where.append('e.passed = ?')
-                args.append(q.passed)
+            joined, join_args = _PIPELINE_EVAL_JOIN, [q.pipeline_id]
+        else:
+            scope, join_args = '', []
+            if q.pipeline_ids is not None:
+                # 画像未配置任何 pipeline 时没有任何评估可关联
+                scope = f" AND e.pipeline_id IN ({','.join('?' * len(q.pipeline_ids))})" \
+                    if q.pipeline_ids else ' AND 0'
+                join_args = list(q.pipeline_ids)
+            joined = _LATEST_EVAL_JOIN.format(scope=scope)
+        if q.passed is not None:
+            where.append('e.passed = ?')
+            where_args.append(q.passed)
+        if q.min_score is not None:
+            where.append('e.score >= ?')
+            where_args.append(q.min_score)
+        if q.topic is not None:
+            where.append('EXISTS (SELECT 1 FROM json_each(e.tags) WHERE json_each.value = ?)')
+            where_args.append(q.topic)
         if q.source_ids:
             where.append(f"source_id IN ({','.join('?' * len(q.source_ids))})")
-            args += q.source_ids
+            where_args += q.source_ids
         if q.kinds:
             where.append(f"kind IN ({','.join('?' * len(q.kinds))})")
-            args += q.kinds
+            where_args += q.kinds
         if q.since:
             where.append(f"{_SORT_TIME} >= ?")
-            args.append(to_iso(q.since))
+            where_args.append(to_iso(q.since))
         if q.until:
             where.append(f"{_SORT_TIME} < ?")
-            args.append(to_iso(q.until))
+            where_args.append(to_iso(q.until))
         if q.search:
             where.append("(instr(casefold(title), ?) > 0 OR instr(casefold(summary), ?) > 0"
                          " OR instr(casefold(author), ?) > 0 OR instr(casefold(content), ?) > 0)")
-            args += [q.search.casefold()] * 4
+            where_args += [q.search.casefold()] * 4
         cond = " AND ".join(where)
+        args = [*join_args, *where_args]
         with self._lock:
             total = self._conn.execute(f"SELECT COUNT(*) FROM items{joined} WHERE {cond}", args).fetchone()[0]
             rows = self._conn.execute(
-                f"SELECT {_ITEM_COLUMNS}{extra_columns} FROM items{joined} WHERE {cond}"
+                f"SELECT {_ITEM_COLUMNS}, {_EVAL_PROJECTION} FROM items{joined} WHERE {cond}"
                 f" ORDER BY {_SORT_TIME} DESC, id LIMIT ? OFFSET ?",
                 [*args, q.limit, q.offset],
             ).fetchall()
-        return [(_row_to_item(r), _row_to_evaluation(r, "eval_")
-                 if q.pipeline_id is not None else None) for r in rows], total
+        return [(_row_to_item(r), _row_to_evaluation(r, "eval_") if r['eval_pipeline_id'] is not None else None)
+                for r in rows], total
 
     # ---- source state -----------------------------------------------------
 
@@ -1226,12 +1283,13 @@ class RunWriter:
                 raise Conflict('item content changed while evaluating')
             self._store._conn.execute(
                 'INSERT OR IGNORE INTO evaluations VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?,'
-                ' (SELECT consumed_at FROM pipeline_consumption WHERE pipeline_id = ? AND item_id = ?), ?)',
+                ' (SELECT consumed_at FROM pipeline_consumption WHERE pipeline_id = ? AND item_id = ?), ?, ?)',
                 (evaluation.pipeline_id, evaluation.item_id, evaluation.persona_version,
                  evaluation.passed, evaluation.score, json.dumps(evaluation.tags, ensure_ascii=False),
                  evaluation.reason, evaluation.stage,
                  json.dumps([s.model_dump() for s in evaluation.stage_scores], ensure_ascii=False),
-                 to_iso(evaluation.evaluated_at), evaluation.pipeline_id, evaluation.item_id, evaluation.input_revision))
+                 to_iso(evaluation.evaluated_at), evaluation.pipeline_id, evaluation.item_id,
+                 evaluation.input_revision, json.dumps(evaluation.match_points, ensure_ascii=False)))
         self._store._resolve_evaluation_errors(evaluations, self._now)
 
     def save_reports(self, drafts: list[ReportDraft], evaluations: list[Evaluation], *,
@@ -1280,8 +1338,8 @@ def _run_error_fields(row: sqlite3.Row) -> dict[str, Any]:
 def _row_to_item(r: sqlite3.Row) -> Item:
     return Item(
         id=r["id"], source_id=r["source_id"], kind=r["kind"], external_id=r["external_id"],
-        url=r["url"], title=r["title"], author=r["author"], summary=r["summary"],
-        content=r["content"], published=from_iso(r["published"]),
+        url=r["url"], page_url=r["page_url"], title=r["title"], author=r["author"], summary=r["summary"],
+        content=r["content"], content_truncated=bool(r["content_truncated"]), published=from_iso(r["published"]),
         fetched_at=from_iso(r["fetched_at"]), fingerprint=r["fingerprint"],
         updated_at=from_iso(r["updated_at"]), content_revision=r["content_revision"],
         meta=json.loads(r["meta"]), identity_policy=r["identity_policy"],
@@ -1299,6 +1357,7 @@ def _row_to_persona(row: sqlite3.Row) -> PersonaView:
 def _row_to_evaluation(row: sqlite3.Row, prefix: str = '') -> Evaluation:
     data = {column: row[prefix + column] for column in _EVAL_COLUMNS}
     data['tags'] = json.loads(data['tags'])
+    data['match_points'] = json.loads(data['match_points'])
     data['stage_scores'] = json.loads(data['stage_scores'])
     data['evaluated_at'], data['reported_at'] = from_iso(data['evaluated_at']), from_iso(data['reported_at'])
     return Evaluation.model_validate(data)

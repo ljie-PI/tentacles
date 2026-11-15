@@ -29,6 +29,7 @@ class Evaluation(BaseModel):
     passed: bool
     score: float
     tags: list[str] = Field(default_factory=list)
+    match_points: list[str] = Field(default_factory=list)
     reason: str
     stage: str
     stage_scores: list[StageScore] = Field(default_factory=list)

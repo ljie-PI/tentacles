@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import timedelta
 from typing import TYPE_CHECKING
 
@@ -9,6 +10,7 @@ from tentacles.asyncutil import run_store_call
 from tentacles.config import SourceSpec
 from tentacles.diagnostics import DiagnosticEvent, classify_failure, stack_frames
 from tentacles.errors import TentaclesError
+from tentacles.models import has_original_url
 from tentacles.net import HttpPool
 from tentacles.runs import RunOperation
 from tentacles.sources.base import FetchContext, build_source
@@ -17,6 +19,8 @@ from tentacles.sources.imap_client import ImapFactory, connect_imap
 
 if TYPE_CHECKING:
     from tentacles.llm.registry import ModelRegistry
+
+log = logging.getLogger(__name__)
 
 # 其他来源在这段时间内报道过的近似标题视为同一条（跨来源转载）
 CROSS_SOURCE_WINDOW = timedelta(hours=48)
@@ -58,6 +62,16 @@ async def fetch_source(spec: SourceSpec, operation: RunOperation, *, store: Stor
         # the failure reaches RunLifecycle's rollback-and-cleanup path.
         operation.record_error(_fetch_failure(spec, exc))
         raise
+    # 非邮件条目必须留有原文详情或入口页链接，否则无法回溯未截断全文。
+    reachable = [index for index, item in enumerate(result.items)
+                 if item.kind == 'email' or has_original_url(item.url, item.page_url)]
+    dropped = len(result.items) - len(reachable)
+    if dropped:
+        log.warning('%s: dropped %d item(s) without an http(s) original or page URL', spec.id, dropped)
+        result.items = [result.items[index] for index in reachable]
+        if result.observations:
+            result.observations = [result.observations[index] for index in reachable]
+        result.stats['invalid_url'] = dropped
     for item in result.items:
         item.fetched_at = ctx.now
     title_since = ctx.now - CROSS_SOURCE_WINDOW if source.dedup_titles else None

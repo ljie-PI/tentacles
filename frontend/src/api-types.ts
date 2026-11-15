@@ -603,6 +603,8 @@ export interface components {
             input_revision: number;
             /** Item Id */
             item_id: string;
+            /** Match Points */
+            match_points?: string[];
             /** Passed */
             passed: boolean;
             /** Persona Version */
@@ -724,8 +726,16 @@ export interface components {
         ItemDetail: {
             /** Author */
             author: string;
-            /** Content */
+            /**
+             * Content
+             * @default
+             */
             content: string;
+            /**
+             * Content Truncated
+             * @default false
+             */
+            content_truncated: boolean;
             /** Evaluations */
             evaluations?: components["schemas"]["Evaluation"][];
             /** External Id */
@@ -745,11 +755,25 @@ export interface components {
              * Kind
              * @enum {string}
              */
-            kind: "rss" | "email" | "web";
+            kind: "rss" | "email" | "web" | "browser";
+            /**
+             * Match Level
+             * @enum {string}
+             */
+            readonly match_level: "high" | "medium" | "low" | "rejected" | "unscored";
+            /** Match Points */
+            match_points?: string[];
+            /** Match Score */
+            match_score?: number | null;
             /** Meta */
             meta: {
                 [key: string]: unknown;
             };
+            /**
+             * Page Url
+             * @default
+             */
+            page_url: string;
             /** Passed */
             passed?: boolean | null;
             /** Persona Version */
@@ -774,6 +798,8 @@ export interface components {
             tags?: string[];
             /** Title */
             title: string;
+            /** Topics */
+            topics?: string[];
             /** Updated At */
             updated_at?: string | null;
             /** Url */
@@ -799,6 +825,16 @@ export interface components {
             /** Author */
             author: string;
             /**
+             * Content
+             * @default
+             */
+            content: string;
+            /**
+             * Content Truncated
+             * @default false
+             */
+            content_truncated: boolean;
+            /**
              * Fetched At
              * Format: date-time
              */
@@ -811,7 +847,21 @@ export interface components {
              * Kind
              * @enum {string}
              */
-            kind: "rss" | "email" | "web";
+            kind: "rss" | "email" | "web" | "browser";
+            /**
+             * Match Level
+             * @enum {string}
+             */
+            readonly match_level: "high" | "medium" | "low" | "rejected" | "unscored";
+            /** Match Points */
+            match_points?: string[];
+            /** Match Score */
+            match_score?: number | null;
+            /**
+             * Page Url
+             * @default
+             */
+            page_url: string;
             /** Passed */
             passed?: boolean | null;
             /** Persona Version */
@@ -836,6 +886,8 @@ export interface components {
             tags?: string[];
             /** Title */
             title: string;
+            /** Topics */
+            topics?: string[];
             /** Updated At */
             updated_at?: string | null;
             /** Url */
@@ -1652,14 +1704,17 @@ export interface operations {
         parameters: {
             query?: {
                 sources?: string[] | null;
-                kinds?: ("rss" | "email" | "web")[] | null;
+                kinds?: ("rss" | "email" | "web" | "browser")[] | null;
                 since?: string | null;
                 until?: string | null;
                 search?: string | null;
                 limit?: number;
                 offset?: number;
                 pipeline?: string | null;
+                persona?: string | null;
                 passed?: boolean | null;
+                min_score?: number | null;
+                topic?: string | null;
             };
             header?: never;
             path?: never;
