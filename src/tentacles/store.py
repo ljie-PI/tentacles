@@ -17,7 +17,8 @@ from typing import Any, Callable, Literal, Sequence
 
 from tentacles.dedup import split_similar
 from tentacles.diagnostics import DiagnosticEvent, FailedTargetRef, RunErrorDetail, RunErrorRecord
-from tentacles.models import CONTENT_UNITS, Item, ItemObservation, LinkDisposition, item_id, normalize_url
+from tentacles.models import (CONTENT_UNITS, SUMMARY_UNITS, Item, ItemObservation, LinkDisposition,
+                              item_id, normalize_url)
 from tentacles.text import truncate_content_units
 from tentacles.errors import Conflict
 from tentacles.personas.models import FeedbackView, PersonaEdit, PersonaView, edit_keywords, keywords
@@ -279,12 +280,13 @@ def _migrate_v14(conn: sqlite3.Connection) -> None:
     conn.execute("ALTER TABLE items ADD COLUMN page_url TEXT NOT NULL DEFAULT ''")
     conn.execute('ALTER TABLE items ADD COLUMN content_truncated INTEGER NOT NULL DEFAULT 0')
     conn.execute("ALTER TABLE evaluations ADD COLUMN match_points TEXT NOT NULL DEFAULT '[]'")
-    # 存量超长正文按同一单位规则回填，保证库内正文与截断标记一致。
-    for row in conn.execute("SELECT id, content FROM items WHERE content != ''").fetchall():
+    # 存量超长正文与摘要按同一单位规则回填，保证库内文本与文档上限一致。
+    for row in conn.execute("SELECT id, summary, content FROM items").fetchall():
         content, _, truncated = truncate_content_units(row['content'], CONTENT_UNITS)
-        if truncated:
-            conn.execute('UPDATE items SET content = ?, content_truncated = 1 WHERE id = ?',
-                         (content, row['id']))
+        summary = truncate_content_units(row['summary'], SUMMARY_UNITS)[0]
+        if truncated or summary != row['summary']:
+            conn.execute('UPDATE items SET content = ?, content_truncated = ?, summary = ? WHERE id = ?',
+                         (content, int(truncated), summary, row['id']))
 
 
 def _migrate_v15(conn: sqlite3.Connection) -> None:
