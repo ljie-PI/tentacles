@@ -100,6 +100,7 @@ def check_script(source: str, *, name: str) -> ast.Module:
     except SyntaxError as exc:
         raise ScriptGateError(f"browser script {name} is not valid Python (line {exc.lineno})") from None
     imported = _check_imports(tree, name)
+    _check_module_body(tree, name)
     readable = _bound_names(tree) | ALLOWED_BUILTINS
     parents = _parents(tree)
     for node in ast.walk(tree):
@@ -125,6 +126,20 @@ def check_script(source: str, *, name: str) -> ast.Module:
             if node.value.strip().lower().startswith(_LOCAL_SCHEMES):
                 raise ScriptGateError(_rejected(name, node, f"dangerous local URL {node.value[:24]!r}"))
     return tree
+
+
+def _check_module_body(tree: ast.Module, name: str) -> None:
+    """A script defines an entry point; it does not run a program at import.
+
+    Module-level control flow is where a replay would hang or exhaust memory
+    before the runtime ever gets the coroutine back, and no fixed script needs
+    it: imports, definitions, constants and annotations are enough.
+    """
+    for node in tree.body:
+        if isinstance(node, (ast.Import, ast.ImportFrom, ast.FunctionDef, ast.AsyncFunctionDef,
+                             ast.Assign, ast.AnnAssign, ast.Expr, ast.Pass)):
+            continue
+        raise ScriptGateError(_rejected(name, node, f"dangerous module-level {type(node).__name__}"))
 
 
 def _check_imports(tree: ast.Module, name: str) -> dict[str, str]:

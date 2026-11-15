@@ -51,6 +51,8 @@ async def extract(page: Page, *, page_url: str, max_items: int,
   局部变量也不行——导入名只能出现在注解里或作为直接调用目标）。
 - 语句：只允许函数定义、赋值、`for`/`while`/`if`/`with`/`try`/`raise`/`assert` 与 `return` 等；
   `class`（`__init_subclass__` 钩子在定义时就执行）、`global`、`nonlocal`、`del` 与 `match` 一律拒绝。
+- 模块级只能是注释、导入、函数定义与常量赋值：模块级 `while`/`for`/`if` 会被拒绝，避免死循环或
+  超大分配在运行时拿到协程之前就阻塞工作线程。
 
 错误信息会指出真实原因（dangerous import / dangerous name / dangerous attribute / dangerous statement）、
 文件名与行号。被拦截的脚本不会执行，以 `script_assertion_failed` 记账，并让该源整次抓取直接失败（`on_detail_error`
