@@ -16,7 +16,9 @@ from typing import Any
 
 from pydantic import BaseModel, TypeAdapter, ValidationError
 
-from tentacles.config import AppConfig, AppSpec, SourceSpec, format_loc
+from tentacles.config import (
+    AppConfig, AppSpec, DEFAULT_BROWSER_SCRIPTS_DIR, SourceSpec, format_loc,
+)
 from tentacles.errors import ConfigError, ConfigIssue, ConfigValidationError
 from tentacles.llm.config import ModelSpec, STAGES
 from tentacles.personas.models import persona_name
@@ -145,7 +147,31 @@ def _adapter_model_errors(requirements: tuple[ModelRequirement, ...], data: Mapp
     return errors
 
 
-def _source_options(data: Mapping[str, Any], where: str) -> tuple[BaseModel | None, list[ConfigIssue]]:
+def _browser_scripts_dir(browser: Mapping[str, Any], config_path: Path) -> Path:
+    """The directory fixed Playwright scripts must live in, resolved like the runtime does."""
+    resolved = _path(browser.get("scripts_dir", str(DEFAULT_BROWSER_SCRIPTS_DIR)), config_path)
+    return resolved if resolved is not None else (config_path.parent / DEFAULT_BROWSER_SCRIPTS_DIR).resolve()
+
+
+def _browser_errors(options: Mapping[str, Any], where: str, browser: Mapping[str, Any],
+                    config_path: Path) -> list[ConfigIssue]:
+    """Script path containment for `type: browser` (headless is rejected by its schema)."""
+    errors: list[ConfigIssue] = []
+    raw = options.get("script_path")
+    if raw is None:
+        return errors
+    script = _path(raw, config_path) if isinstance(raw, str) and raw.strip() else None
+    if script is None:
+        errors.append(ConfigIssue(f"{where}.script_path", "invalid replay script path"))
+    elif script.suffix != ".py":
+        errors.append(ConfigIssue(f"{where}.script_path", "replay script must be a .py file"))
+    elif not script.is_relative_to(_browser_scripts_dir(browser, config_path)):
+        errors.append(ConfigIssue(f"{where}.script_path", "replay script must stay inside browser.scripts_dir"))
+    return errors
+
+
+def _source_options(data: Mapping[str, Any], where: str, *, config_path: Path | None = None,
+                    browser: Mapping[str, Any] | None = None) -> tuple[BaseModel | None, list[ConfigIssue]]:
     from tentacles.sources import SOURCE_TYPES
 
     source_type = data.get('type')
@@ -171,6 +197,8 @@ def _source_options(data: Mapping[str, Any], where: str) -> tuple[BaseModel | No
             errors.append(ConfigIssue(f'{where}.selectors', 'list mode requires selectors'))
         if mode in ('list', 'page') and options.get('model') is not None:
             errors.append(ConfigIssue(f'{where}.model', 'model override is only supported in llm mode'))
+    if source_type == 'browser' and config_path is not None:
+        errors.extend(_browser_errors(options, where, browser or {}, config_path))
     try:
         return cls.Options.model_validate(options), errors
     except ValidationError as exc:
@@ -181,7 +209,9 @@ def _source_options(data: Mapping[str, Any], where: str) -> tuple[BaseModel | No
 
 def validate_source(spec: SourceSpec, where: str, config: AppConfig | None = None) -> BaseModel:
     """Runtime source construction uses the same source-local schema checks."""
-    options, errors = _source_options(spec.model_dump(), where)
+    options, errors = _source_options(
+        spec.model_dump(), where, config_path=config.path if config is not None else None,
+        browser=config.browser.model_dump() if config is not None else None)
     if config is not None:
         error = _source_model_error(spec.model_dump(), config.models,
                                     {str(key): value for key, value in config.defaults.models.items()}, where)
@@ -241,7 +271,8 @@ def validate_config(config: AppConfig | Mapping[str, Any], existing_personas: Co
             if source_id in source_ids:
                 errors.append(ConfigIssue(f'{where}.id', 'duplicate source id'))
             source_ids.add(source_id)
-        _, source_errors = _source_options(source, where)
+        _, source_errors = _source_options(source, where, config_path=config_path,
+                                           browser=_mapping(data.get('browser')))
         errors.extend(source_errors)
         error = _source_model_error(source, models, defaults, where)
         if error is not None:

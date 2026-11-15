@@ -11,7 +11,8 @@ import os
 import re
 from collections.abc import Mapping, Sequence
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
+from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import yaml
@@ -27,6 +28,28 @@ from tentacles.pipelines.config import PipelineSpec
 
 DEFAULT_CONFIG = Path("config") / "tentacles.yaml"
 _ENV_REF = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}")
+
+ReasoningLevel = Literal["off", "minimal", "low", "medium", "high", "xhigh", "max"]
+DEFAULT_CHROME_PROFILE = "Default"
+DEFAULT_BROWSER_SCRIPTS_DIR = Path("../scripts/browser_sources")
+HEADLESS_ERROR = "browser sources run headed Chrome only; headless is not supported"
+# Chrome receives the profile as `--profile-directory=<name>`, so a value that
+# could introduce another flag or leave the User Data directory is rejected.
+_PROFILE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9 _.\-]{0,63}")
+
+
+def reject_headless(value: bool) -> bool:
+    """`headless: true` is a configuration error: browser sources stay headed."""
+    if value:
+        raise ValueError(HEADLESS_ERROR)
+    return value
+
+
+def chrome_profile_name(value: str) -> str:
+    """Validate a Chrome profile directory name used as `--profile-directory`."""
+    if not _PROFILE_NAME.fullmatch(value.strip()):
+        raise ValueError("must be a Chrome profile directory name such as Default or Profile 1")
+    return value.strip()
 
 
 class AppSpec(BaseModel):
@@ -70,6 +93,67 @@ class SourceSpec(BaseModel):
         return dict(self.model_extra or {})
 
 
+class BrowserPiSpec(BaseModel):
+    """Agent settings for browser exploration (#82); validated, not yet used."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    binary: str = "pi"
+    model: str = "anthropic/claude-sonnet-4-6"
+    reasoning_level: ReasoningLevel = "high"
+    timeout: float = Field(default=300, gt=0, allow_inf_nan=False)
+
+
+class BrowserPrSpec(BaseModel):
+    """Script self-healing publication settings (#83); validated, not yet used."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = True
+    base_branch: str = "master"
+    branch_prefix: str = "auto/browser-source-"
+    labels: list[str] = Field(default_factory=lambda: ["ready-for-human"])
+
+
+class BrowserSpec(BaseModel):
+    """The headed-only Chrome runtime shared by every `type: browser` source."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    # Chrome's Remote Debugging endpoint; attached to with connect_over_cdp.
+    cdp_url: str = "http://127.0.0.1:9222"
+    # Reserved for the exploration bridge of #82.
+    webbridge_url: str = "http://127.0.0.1:10086"
+    # Launch a headed Chrome for the target profile when nothing listens on cdp_url.
+    auto_launch: bool = False
+    chrome_executable: Path | None = None
+    chrome_user_data_dir: Path | None = None
+    default_profile: str = DEFAULT_CHROME_PROFILE
+    scripts_dir: Path = DEFAULT_BROWSER_SCRIPTS_DIR
+    headless: bool = False
+    pr: BrowserPrSpec = Field(default_factory=BrowserPrSpec)
+    pi: BrowserPiSpec = Field(default_factory=BrowserPiSpec)
+
+    _headed_only = field_validator("headless")(reject_headless)
+
+    @field_validator("cdp_url")
+    @classmethod
+    def _cdp_endpoint(cls, value: str) -> str:
+        try:
+            parsed = urlsplit(value)
+            port = parsed.port
+        except ValueError:
+            raise ValueError("must be an http(s) endpoint with an explicit port") from None
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname or port is None:
+            raise ValueError("must be an http(s) endpoint with an explicit port")
+        return value.rstrip("/")
+
+    @field_validator("default_profile")
+    @classmethod
+    def _profile(cls, value: str) -> str:
+        return chrome_profile_name(value)
+
+
 class AppConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -81,6 +165,7 @@ class AppConfig(BaseModel):
     pipelines: list[PipelineSpec] = Field(default_factory=list)
     persona_update: PersonaUpdate = Field(default_factory=PersonaUpdate)
     server: ServerSpec = Field(default_factory=ServerSpec)
+    browser: BrowserSpec = Field(default_factory=BrowserSpec)
 
     _path: Path = PrivateAttr(default=Path(DEFAULT_CONFIG))
 
@@ -103,6 +188,11 @@ class AppConfig(BaseModel):
     @property
     def db_path(self) -> Path:
         return self.data_dir / "tentacles.db"
+
+    @property
+    def browser_scripts_dir(self) -> Path:
+        """The repository-controlled directory holding fixed Playwright scripts."""
+        return self.resolve(self.browser.scripts_dir)
 
     def source(self, source_id: str) -> SourceSpec:
         for s in self.sources:
