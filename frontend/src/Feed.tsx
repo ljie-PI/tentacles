@@ -11,6 +11,13 @@ function MatchPoints({ points }: { points: string[] | undefined }) {
   return <ul className="match-points">{points.map(point => <li key={point}>{point}</li>)}</ul>
 }
 
+function Reason({ reason, points }: { reason: string | null | undefined; points: string[] | undefined }) {
+  // `reason` is the documented compatibility alias of the first match point, so it only
+  // needs its own line when it states something the merged match points do not.
+  if (!reason || (points || []).some(point => point === reason || point.startsWith(reason))) return null
+  return <p className="muted small">{reason}</p>
+}
+
 function ItemCard({ item, open, formatTime, persona, feedbackDisabled }: { item: Item; open: () => void; formatTime: TimeFormatter; persona: string; feedbackDisabled: boolean }) {
   return <article className="item-card">
     <div className="item-meta"><span className="source-dot" />{item.source_id}<span>·</span>{formatTime(item.published || item.fetched_at)}<span className="kind">{item.kind}</span></div>
@@ -19,6 +26,7 @@ function ItemCard({ item, open, formatTime, persona, feedbackDisabled }: { item:
     <p className="summary">{item.summary || '暂无摘要，打开详情阅读正文。'}</p>
     <footer className="card-footer"><div className="tags">{item.match_score != null && <ScoreBadge score={item.match_score} />}{(item.topics || []).map(tag => <span className="tag" key={tag}>{tag}</span>)}{item.match_level !== 'unscored' && <span className="tag">分档：{item.match_level}</span>}{item.stage && <span className="tag">阶段：{item.stage}</span>}{item.passed != null && <span className="tag">{item.passed ? '通过' : '未通过'}</span>}</div><button className="text-button read-link" onClick={open}>阅读详情 <span aria-hidden="true">↗</span></button></footer>
     <MatchPoints points={item.match_points} />
+    <Reason reason={item.reason} points={item.match_points} />
     <FeedbackButtons itemId={item.id} persona={persona} disabled={feedbackDisabled} />
   </article>
 }
