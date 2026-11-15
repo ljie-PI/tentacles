@@ -9,13 +9,13 @@
 1. **[基础配置与命名模型](configuration-and-models.md)**
    - `config/tentacles.yaml` 全局选项、`.env` 环境变量注入、配置校验
    - 命名模型（OpenAI 兼容 / Anthropic / OpenRouter）与五大阶段（`extract` / `filter` / `decision` / `persona` / `process`）路由、重试与计费规则
-   - 有界面浏览器运行时（`browser` 块）：CDP 附着、Profile 核验、自动拉起与「绝不无头」边界
+   - 有界面浏览器运行时（`browser` 块）：CDP 附着、Profile 核验、自动拉起、「绝不无头」边界，以及 `browser.pr` 评审分支/标签配置
    - 存储冷热分层（`app.storage`）：单活跃热库、按自然年冷归档、去重墓碑与 `storage` 运维命令
 2. **[信息源配置与原位更新](sources.md)**
    - RSS / Atom 订阅
    - IMAP 邮箱只读增量抓取（Gmail 应用专用密码说明、文件夹游标与正文清洗）
    - Web 网页信息源（`list` CSS 选择器、`page` 内容版本差异、`llm` 智能抽取）
-   - 有界面 Chrome 浏览器源（`type: browser`）：CDP + `chrome_profile` 附着、固化 Playwright 脚本与静态导入门禁
+   - 有界面 Chrome 浏览器源（`type: browser`）：CDP + `chrome_profile` 附着、固化 Playwright 脚本与静态导入门禁、重放故障自愈与隔离 worktree 自动评审 PR
    - 可选原位更新（`update_existing: true`）与缓存语义
 3. **[个人画像（Persona）、级联过滤与报告流水线](pipelines-and-personas.md)**
    - 版本化 Persona 种子、标签自动抽取、点赞/点踩反馈与提案演化

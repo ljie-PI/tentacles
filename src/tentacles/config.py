@@ -52,6 +52,14 @@ def chrome_profile_name(value: str) -> str:
     return value.strip()
 
 
+def _branch_name(value: str) -> str:
+    """A git branch (or branch prefix) that `git worktree`/`git push` accept verbatim."""
+    name = value.strip()
+    if not name or name.startswith("-") or any(char.isspace() for char in name) or ".." in name:
+        raise ValueError("must be a git branch name without whitespace, a leading '-' or '..'")
+    return name
+
+
 class StorageSpec(BaseModel):
     """冷热分层：热库保留窗口，以及按自然年归档库的位置。"""
 
@@ -104,7 +112,7 @@ class SourceSpec(BaseModel):
 
 
 class BrowserPiSpec(BaseModel):
-    """Agent settings for browser exploration (#82); validated, not yet used."""
+    """Agent settings for browser exploration and self-healing (#82, #83)."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -115,7 +123,7 @@ class BrowserPiSpec(BaseModel):
 
 
 class BrowserPrSpec(BaseModel):
-    """Script self-healing publication settings (#83); validated, not yet used."""
+    """Review-branch publication of distilled and self-healed scripts (#83)."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -123,6 +131,17 @@ class BrowserPrSpec(BaseModel):
     base_branch: str = "master"
     branch_prefix: str = "auto/browser-source-"
     labels: list[str] = Field(default_factory=lambda: ["ready-for-human"])
+
+    _base_branch = field_validator("base_branch")(_branch_name)
+    _branch_prefix = field_validator("branch_prefix")(_branch_name)
+
+    @field_validator("labels")
+    @classmethod
+    def _label_names(cls, value: list[str]) -> list[str]:
+        labels = [label.strip() for label in value if label.strip()]
+        if not labels:
+            raise ValueError("must name at least one PR label such as ready-for-human")
+        return list(dict.fromkeys(labels))
 
 
 class BrowserSpec(BaseModel):

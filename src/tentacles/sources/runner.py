@@ -44,17 +44,21 @@ def _fetch_failure(spec: SourceSpec, exc: Exception) -> DiagnosticEvent:
 
 async def fetch_source(spec: SourceSpec, operation: RunOperation, *, store: Store, http: HttpPool,
                        imap_factory: ImapFactory = connect_imap, timezone: str = 'UTC',
-                       models: ModelRegistry | None = None, config: AppConfig | None = None) -> None:
+                       models: ModelRegistry | None = None, config: AppConfig | None = None,
+                       distill: bool = False) -> None:
     """The lifecycle owns errors, cancellation and terminal state.
 
     Share its accumulator so even billed responses drained during cancellation
     remain attached to this Run. Store calls stay off the shared event loop.
+    `distill` is the explicit refresh of `sources distill`: a browser source
+    re-explores even though its script exists.
     """
     ctx = FetchContext(http=http, now=operation.started_at, imap_factory=imap_factory, timezone=timezone,
                        seen_links=lambda urls: store.seen_links(spec.id, urls), models=models,
                        metrics=operation.metrics,
                        classify_links=lambda urls: store.classify_links(spec.id, urls),
-                       config=config, record_error=operation.record_error, run_id=operation.run_id)
+                       config=config, record_error=operation.record_error, run_id=operation.run_id,
+                       distill=distill)
     state = await run_store_call(store.get_source_state, spec.id)
     source = build_source(spec)
     try:

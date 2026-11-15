@@ -52,6 +52,8 @@ class FetchContext:
     run_id: int = 0
     # Per-target failure diagnostics, wired straight to the owning RunOperation.
     record_error: Callable[[DiagnosticEvent], None] = discard_diagnostic
+    # Explicit `sources distill`: explore again even when a fixed script already exists.
+    distill: bool = False
 
 
 @dataclass

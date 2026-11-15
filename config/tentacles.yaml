@@ -84,16 +84,16 @@ browser:
   chrome_user_data_dir: null              # 可选 Chrome User Data 根目录（auto_launch 时必填）
   default_profile: Default                # 默认 Chrome Profile 目录名（如 Default、Profile 1）
   scripts_dir: ../scripts/browser_sources # 固化 Playwright 脚本目录；相对本文件解析
-  pi:                                     # 冷启动探索与脚本提炼所用的 Agent 模型
+  pi:                                     # 冷启动探索、提炼与重放自愈所用的 Agent 模型
     binary: pi
     model: anthropic/claude-sonnet-4-6
     reasoning_level: high                 # off | minimal | low | medium | high | xhigh | max
     timeout: 300
-  pr:                                     # 预留：#83 脚本自愈后自动提 PR（当前仅校验）
-    enabled: true
-    base_branch: master
-    branch_prefix: auto/browser-source-
-    labels: [ready-for-human]
+  pr:                                     # 提炼/自愈脚本的评审分支与 GitHub PR（需本机 gh 已登录）
+    enabled: true                         # false：只提交到本机评审分支，不 push、不调 gh
+    base_branch: master                   # PR 目标分支（绝不直接推它）
+    branch_prefix: auto/browser-source-   # 最终分支：<prefix><source_id>，同源复用一个分支
+    labels: [ready-for-human]             # gh pr create --label，至少一个
 
 # 信息源。通用字段：id（唯一）、type、schedule（抓取频率：30m / 2h / 1d 等间隔，
 # 或 @hourly/@daily/@weekly、5 段 cron 表达式）、name（可选显示名）、enabled（默认 true）。

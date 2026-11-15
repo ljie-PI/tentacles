@@ -15,12 +15,13 @@
    - 直接修改画像与关键词（`persona set`）、带乐观锁并发保护（`--expected-version`）
    - 基于反馈与指令预览演化提案并管道应用（`persona evolve --dry-run | persona apply`）及版本回滚
 3. **[触发采集、流水线与运维状态速查](operations-reference.md)**
-   - 手动抓取信息源（`sources fetch`）、触发过滤/成稿（`pipelines filter/run`）、执行周期 `tick`
+   - 手动抓取信息源（`sources fetch`）、显式重提炼浏览器脚本（`sources distill <ID>`）、触发过滤/成稿（`pipelines filter/run`）、执行周期 `tick`
    - 检查配置（`config check`）、调度进度（`scheduler status`）与运行计费账本（`runs list`）
    - 回滚安全的故障账本（`errors list --unresolved`、`errors show`、`runs show`）、`error_code` 速查表与 `failed_targets` 排障工作流
    - `browser_replay` 阶段的排障现场（栈帧 + A11y 快照 + 失败瞬间 `current_url`）
    - 存储运维：`storage status / reindex / archive`（体积与行数、FTS 重建、按自然年冷归档与 `--include-archive` 跨年检索）
    - `browser_distill` 阶段的冷启动排障（`stats.browser_mode`、`trajectory_path`、`pi_rpc_failed` / `pi_script_rejected`）
+   - `browser_heal` / `script_pr` 自愈与评审 PR 排障（`pi_heal_exhausted`、`git_or_pr_failed`、`pr_status` / `pr_url`）
 
 ---
 
