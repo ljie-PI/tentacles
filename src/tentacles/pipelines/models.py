@@ -7,6 +7,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
+from tentacles.diagnostics import FailedTargetRef
 from tentacles.llm.types import TokenUsage, UsageTotals
 
 
@@ -59,6 +60,8 @@ class PipelineOutcome(BaseModel):
     report_id: str | None = None
     stats: dict[str, Any] = Field(default_factory=dict)
     error: str | None = None
+    error_count: int = 0
+    failed_targets: list[FailedTargetRef] = Field(default_factory=list)
 
 
 @dataclass(frozen=True)

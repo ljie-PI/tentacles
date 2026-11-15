@@ -4,13 +4,18 @@ the REST API returns them, so both adapters share one contract."""
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any, Generic, Literal, TypeVar
+from typing import TYPE_CHECKING, Any, Generic, Literal, TypeVar
 
 from pydantic import BaseModel, Field, computed_field
 
+from tentacles.diagnostics import FailedTargetRef
 from tentacles.models import Item, ItemKind
 from tentacles.pipelines.models import Evaluation, StageScore, PipelineOutcome
 from tentacles.llm.types import TokenUsage as TokenUsage
+
+if TYPE_CHECKING:
+    from tentacles.diagnostics import RunErrorRecord
+    from tentacles.store import RunRecord
 
 T = TypeVar("T")
 
@@ -51,6 +56,8 @@ class FetchOutcome(BaseModel):
     updated: int = 0
     error: str | None = None
     stats: dict[str, Any] = {}
+    error_count: int = 0
+    failed_targets: list[FailedTargetRef] = Field(default_factory=list)
 
 
 class TickOutcome(BaseModel):
@@ -66,6 +73,8 @@ class TickOutcome(BaseModel):
     report_id: str | None = None
     stats: dict[str, Any] = Field(default_factory=dict)
     error: str | None = None
+    error_count: int = 0
+    failed_targets: list[FailedTargetRef] = Field(default_factory=list)
 
     @classmethod
     def of_fetch(cls, outcome: FetchOutcome) -> 'TickOutcome':
@@ -137,6 +146,44 @@ class RunView(BaseModel):
     stats: dict[str, Any]
     cost: float | None
     error: str | None
+
+    @classmethod
+    def of(cls, record: RunRecord) -> "RunView":
+        return cls.model_validate(record, from_attributes=True)
+
+
+class ErrorEventView(BaseModel):
+    """One diagnostics-ledger row as listed: no debug context, to stay scannable."""
+
+    id: int
+    run_id: int
+    occurred_at: datetime
+    phase: str
+    severity: str
+    source_id: str | None
+    pipeline_id: str | None
+    page_url: str | None
+    target_url: str | None
+    item_id: str | None
+    external_id: str | None
+    error_code: str
+    http_status: int | None
+    exception_type: str | None
+    message: str
+    retryable: bool
+    resolved_at: datetime | None
+
+    @classmethod
+    def of(cls, record: RunErrorRecord) -> "ErrorEventView":
+        return cls.model_validate(record, from_attributes=True)
+
+
+class ErrorEventDetail(ErrorEventView):
+    debug_context: dict[str, Any] = Field(default_factory=dict)
+
+
+class RunDetail(RunView):
+    errors: list[ErrorEventView] = Field(default_factory=list)
 
 
 class ModelView(BaseModel):

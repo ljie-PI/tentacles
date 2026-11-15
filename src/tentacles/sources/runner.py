@@ -7,6 +7,8 @@ from typing import TYPE_CHECKING
 
 from tentacles.asyncutil import run_store_call
 from tentacles.config import SourceSpec
+from tentacles.diagnostics import DiagnosticEvent, classify_failure, stack_frames
+from tentacles.errors import TentaclesError
 from tentacles.net import HttpPool
 from tentacles.runs import RunOperation
 from tentacles.sources.base import FetchContext, build_source
@@ -18,6 +20,21 @@ if TYPE_CHECKING:
 
 # 其他来源在这段时间内报道过的近似标题视为同一条（跨来源转载）
 CROSS_SOURCE_WINDOW = timedelta(hours=48)
+
+
+def _page_url(spec: SourceSpec) -> str | None:
+    """The configured entry address a top-level source failure points at."""
+    url = spec.options.get('url')
+    return url if isinstance(url, str) and url else None
+
+
+def _fetch_failure(spec: SourceSpec, exc: Exception) -> DiagnosticEvent:
+    """Record what a whole-source failure could not classify any further."""
+    error_code, retryable = classify_failure(exc)
+    message = exc.message if isinstance(exc, TentaclesError) else f'source fetch failed ({type(exc).__name__})'
+    return DiagnosticEvent(phase='fetch_page', error_code=error_code, message=message, retryable=retryable,
+                           source_id=spec.id, page_url=_page_url(spec), exception_type=type(exc).__name__,
+                           debug_context={'exception': stack_frames(exc)})
 
 
 async def fetch_source(spec: SourceSpec, operation: RunOperation, *, store: Store, http: HttpPool,
@@ -34,7 +51,13 @@ async def fetch_source(spec: SourceSpec, operation: RunOperation, *, store: Stor
                        classify_links=lambda urls: store.classify_links(spec.id, urls))
     state = await run_store_call(store.get_source_state, spec.id)
     source = build_source(spec)
-    result = await source.fetch(state.cursor, ctx)
+    try:
+        result = await source.fetch(state.cursor, ctx)
+    except Exception as exc:
+        # The Run's ledger outlives this batch: the event is collected before
+        # the failure reaches RunLifecycle's rollback-and-cleanup path.
+        operation.record_error(_fetch_failure(spec, exc))
+        raise
     for item in result.items:
         item.fetched_at = ctx.now
     title_since = ctx.now - CROSS_SOURCE_WINDOW if source.dedup_titles else None
