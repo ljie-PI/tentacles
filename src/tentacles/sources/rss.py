@@ -59,7 +59,7 @@ def entry_to_item(entry, source_id: str, *, page_url: str, allow_partial: bool =
     # Opted-in stable identities may carry updates without a usable new-item
     # title. Store resolves them under its write lock and rejects unknown ones.
     partial = allow_partial and bool((entry.get("id") or "").strip())
-    if (not title and not partial) or not (link or page_url or entry.get("id")):
+    if (not title and not partial) or not (link or entry.get("id")):
         return None
     content = entry.content[0].value if entry.get("content") else ""
     summary = entry.get("summary") or entry.get("description") or content
