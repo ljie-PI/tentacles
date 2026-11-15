@@ -276,7 +276,8 @@ sources:
 
 **计费提醒**：冷启动的探索 + 提炼 + 修正回合都发真实模型请求，Token 与费用实时累加到当轮 `Run`
 （`tentacles runs show <run_id>` 的 `stats.usage` / `stats.cost`，`tentacles runs list` 汇总可见）；
-脚本落盘后每轮都是零 Token 重放。`pi` 自身的凭据/MCP 配置不参与：子进程只拿到当前进程环境加上两个桥接变量。
+脚本落盘后每轮都是零 Token 重放。子进程继承当前进程的环境（`pi` 自己的服务商凭据仍按 `pi` 的配置/环境生效），
+但扩展发现、MCP 服务器、技能与 prompt 模板均被关闭，只多拿到两个桥接变量。
 
 ### 固化脚本规范
 
