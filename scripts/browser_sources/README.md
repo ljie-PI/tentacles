@@ -38,7 +38,13 @@ async def extract(page: Page, *, page_url: str, max_items: int,
 - 不含 `subprocess`、`os`、`socket`、`shutil` 等任何其他模块（相对导入同样拦截）；
 - 不调用 `__import__`、`eval`、`exec`、`compile`、`open`、`getattr`、`setattr`、`input`、
   `breakpoint`、`globals`/`locals`/`vars`、`exit`/`quit` 等（含 `obj.open(...)` 形式的同名方法调用）；
-- 不访问 `__dunder__` 属性。
+- 不访问 `__dunder__` 属性；
+- 不访问 `load_script`、`read_text`、`open`、`Path`、`import_module`、`__import__`、`eval`、
+  `exec`、`compile`、`getattr` 这些属性或同名导入（含 `bc.Path`、`from x import load_script`
+  这类写法）：门禁只看得到名字，无法核验它解析到什么；
+- 白名单里的 `tentacles.*` 模块只放纯数据契约：`tentacles.sources.browser_contract`
+  只导出 `BrowserExtractOutput` / `RawBrowserItem`，门禁与加载器在
+  `tentacles.sources.browser_script`，脚本不可导入。
 
 被拦截的脚本不会执行，直接以 `script_assertion_failed` 记账。
 

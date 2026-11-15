@@ -26,8 +26,9 @@ from tentacles.errors import ConfigError, UpstreamError
 from tentacles.models import Item, ItemObservation, LinkDisposition, normalize_url
 from tentacles.sources.base import FetchContext, FetchResult, Source, register
 from tentacles.sources.browser_contract import (
-    BrowserExtractOutput, ExtractScript, RawBrowserItem, ScriptGateError, load_script,
+    BrowserExtractOutput, ExtractScript, RawBrowserItem, ScriptGateError,
 )
+from tentacles.sources.browser_script import load_script
 from tentacles.sources.browser_session import page_snapshot, work_tab
 from tentacles.text import truncate
 from tentacles.timeutil import to_utc

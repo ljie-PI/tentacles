@@ -158,8 +158,9 @@ per-target failures, so the adapter never reaches the Store or the ledger direct
 Session policy stays in `sources/browser_session.py` (one headed work tab per
 `(cdp_url, chrome_profile)`, attached over CDP or launched headed, profile verified from
 `chrome://version`, tab closed on every exit path, never `browser.close()`), and script
-policy stays in `sources/browser_contract.py` (an `ast.parse` import/call allowlist gate
-before `exec`, plus the `BrowserExtractOutput` contract). A fixed script must not own the
+policy stays in `sources/browser_script.py` (an `ast.parse` import/call allowlist gate
+before `exec`) and `sources/browser_contract.py` (the `BrowserExtractOutput` contract,
+kept pure data because a script imports it). A fixed script must not own the
 tab lifecycle: only the runtime can capture the failure site, so timeouts, script errors
 and zero-item results become `browser_replay` events whose `debug_context` carries the
 URL, title, A11y excerpt and traceback.
