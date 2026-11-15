@@ -43,7 +43,7 @@ from pathlib import Path
 from typing import Any, Literal, Sequence
 
 from tentacles.config import BrowserPrSpec
-from tentacles.diagnostics import clip, redact_text
+from tentacles.diagnostics import REDACTED, clip, redact_text
 
 log = logging.getLogger(__name__)
 
@@ -67,7 +67,7 @@ _PROVIDER_KEYS: tuple[tuple[re.Pattern[str], str], ...] = (
 )
 # The parameter names that always carry a credential, whatever the syntax around them.
 _CREDENTIAL_NAME = (r"(?:api[_-]?key|apikey|access[_-]?token|token|secret|signature|sig|"
-                    r"password|passwd|session(?:id)?|csrf|authorization|cookie)")
+                    r"password|passwd|session(?:id|_id|token)|csrf|authorization|cookie)")
 # `name = "literal"` where the name itself claims to be a credential.
 _CREDENTIAL_ASSIGNMENT = re.compile(
     r"(?i)(?<![A-Za-z0-9])[A-Za-z0-9_.-]*?"
@@ -261,10 +261,15 @@ async def _fetch(repo: Path, remote: str, ref: str) -> None:
         log.warning("browser: cannot fetch %s/%s (%s)", remote, ref, _reason(result))
 
 
+def _short_ref(ref: str) -> str:
+    """A branch name without its `refs/heads/` prefix, so the guard cannot be sidestepped."""
+    return ref[len("refs/heads/"):] if ref.startswith("refs/heads/") else ref
+
+
 def _review_refspec(branch: str, *, base: str) -> str:
     """The only push destination this module allows, and never the base branch."""
     destination = f"refs/heads/{branch}"
-    if branch == base or destination == f"refs/heads/{base}":
+    if _short_ref(branch) == _short_ref(base):
         raise ScriptPrError(
             f"refusing to push {destination}: it is the base branch {base!r}")
     return destination
@@ -433,26 +438,29 @@ def _pr_body(*, source_id: str, reason: str, detail: str, script_name: str) -> s
 def sensitive_findings(text: str, secrets: Sequence[str] = ()) -> list[str]:
     """Credential-like content that must never reach a pushed commit or a PR body."""
     findings: list[str] = []
-    if _BEARER.search(text):
+    # An already-redacted value is not a leak: `{"token": "[REDACTED]"}` is what a
+    # correctly redacted body looks like, so the marker is removed before scanning.
+    scanned = text.replace(REDACTED, "")
+    if _BEARER.search(scanned):
         findings.append("a bearer token")
-    if _COOKIE.search(text):
+    if _COOKIE.search(scanned):
         findings.append("a cookie value")
-    if _EMAIL.search(text):
+    if _EMAIL.search(scanned):
         findings.append("an email address")
-    if _HOME_PATH.search(text):
+    if _HOME_PATH.search(scanned):
         findings.append("a local user path")
-    if _sk_key(text):
+    if _sk_key(scanned):
         findings.append("an API key")
-    findings.extend(reason for pattern, reason in _PROVIDER_KEYS if pattern.search(text))
-    if _CREDENTIAL_ASSIGNMENT.search(text):
+    findings.extend(reason for pattern, reason in _PROVIDER_KEYS if pattern.search(scanned))
+    if _CREDENTIAL_ASSIGNMENT.search(scanned):
         findings.append("a hard-coded credential")
-    if _CREDENTIAL_QUERY.search(text):
+    if _CREDENTIAL_QUERY.search(scanned):
         findings.append("a credential in a URL query")
-    if _CREDENTIAL_HEADER.search(text):
+    if _CREDENTIAL_HEADER.search(scanned):
         findings.append("a hard-coded credential header")
-    if any(secret and secret in text for secret in secrets):
+    if any(secret and secret in scanned for secret in secrets):
         findings.append("a configured secret")
-    return findings
+    return list(dict.fromkeys(findings))
 
 
 def _sk_key(text: str) -> bool:
