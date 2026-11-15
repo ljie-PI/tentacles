@@ -14,7 +14,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from tentacles.errors import UpstreamError
 from tentacles.models import Item, ItemObservation
 from tentacles.sources.base import FetchContext, FetchResult, Source, register
-from tentacles.text import html_to_text, truncate
+from tentacles.text import content_sha1, html_to_text, truncate
 
 
 class RssOptions(BaseModel):
@@ -53,27 +53,40 @@ def _entry_published(entry) -> datetime | None:
     return None
 
 
-def entry_to_item(entry, source_id: str, *, allow_partial: bool = False) -> Item | None:
+def entry_to_item(entry, source_id: str, *, page_url: str, allow_partial: bool = False) -> Item | None:
     link = (entry.get("link") or "").strip()
     title = (entry.get("title") or "").strip()
     # Opted-in stable identities may carry updates without a usable new-item
     # title. Store resolves them under its write lock and rejects unknown ones.
     partial = allow_partial and bool((entry.get("id") or "").strip())
-    if (not title and not partial) or not (link or entry.get("id")):
+    if (not title and not partial) or not (link or page_url or entry.get("id")):
         return None
     content = entry.content[0].value if entry.get("content") else ""
     summary = entry.get("summary") or entry.get("description") or content
+    body = html_to_text(content or summary)
     return Item(
         source_id=source_id,
         kind="rss",
         external_id=(entry.get("id") or "").strip(),  # 为空时 Item 用规范化后的 url
         url=link,
+        page_url=page_url,
         title=title,
         author=entry.get("author") or "",
         summary=truncate(html_to_text(summary), 2000),
-        content=html_to_text(content or summary),
+        content=body,
         published=_entry_published(entry),
+        meta=_entry_meta(entry, link, body),
     )
+
+
+def _entry_meta(entry, link: str, body: str) -> dict[str, Any]:
+    """Entry-page provenance kept next to the (truncated) stored body."""
+    meta: dict[str, Any] = {"full_content_sha1": content_sha1(body)}
+    comments = str(entry.get("comments") or "").strip()
+    if comments and comments != link:
+        # 聚合外链帖：url 是外链原文，讨论页单独保留
+        meta["comments_url"] = comments
+    return meta
 
 
 def entry_observation(entry, item: Item, *, feed_version: str = "") -> ItemObservation:
@@ -96,15 +109,20 @@ def entry_observation(entry, item: Item, *, feed_version: str = "") -> ItemObser
     summary_key = next((key for key in ("summary", "description") if key in entry), None)
     if isinstance(entry, feedparser.FeedParserDict) and "summary_detail" not in entry:
         summary_key = None  # feedparser also synthesizes summary from content
+    body: str | None = None
     if summary_key is not None:
         summary = entry[summary_key]
         fields["summary"] = None if summary is None else truncate(html_to_text(summary), 2000)
         if feed_version.startswith("rss") and "content" not in entry:
-            fields["content"] = None if summary is None else html_to_text(summary)
+            body = None if summary is None else html_to_text(summary)
+            fields["content"] = body
     if "content" in entry:
-        body = entry["content"]
-        value = body[0].get("value") if body else None
-        fields["content"] = None if value is None else html_to_text(value)
+        body_entry = entry["content"]
+        value = body_entry[0].get("value") if body_entry else None
+        body = None if value is None else html_to_text(value)
+        fields["content"] = body
+    if body is not None:
+        fields["meta"] = _entry_meta(entry, item.url, body)
     if any(key in entry for key in ("published", "updated", "published_parsed", "updated_parsed")):
         # Malformed nonempty dates are not successful observations.
         if item.published is not None or not (entry.get("published") or entry.get("updated")):
@@ -151,7 +169,8 @@ class RssSource(Source):
         items, too_old = [], 0
         observations: list[ItemObservation] = []
         for entry in parsed.entries:
-            item = entry_to_item(entry, self.spec.id, allow_partial=self.spec.update_existing)
+            item = entry_to_item(entry, self.spec.id, page_url=opts.url,
+                                 allow_partial=self.spec.update_existing)
             if item is None:
                 continue
             if cutoff and item.published and item.published < cutoff:
