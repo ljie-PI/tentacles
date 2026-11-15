@@ -124,6 +124,8 @@ tentacles --json persona evolve default --instruction "多关注机器人" --dry
 ```
 
 - 如果在生成提案到执行 `apply` 之间，Persona 的基准版本 `base_version` 已被其他操作改动，`apply` 会安全拒绝并返回退出码 `4`（`conflict`）。
+- 提案**省略** `hard_exclude`（或显式给 `null`）表示**保留**当前版本的硬排除词，只有显式写
+  `"hard_exclude": []` 才清空；`include` / `exclude` 仍必须给出完整的新列表。
 
 ### 第三步（可选）：对近期条目按新画像重新打分
 

@@ -184,6 +184,8 @@ class PersonaManager:
     def _proposal_edit(proposal: PersonaProposal, edit: PersonaEdit) -> None:
         edit.profile, edit.tags = proposal.profile, proposal.tags
         edit.include_replace, edit.exclude_replace = proposal.include, proposal.exclude
+        # An absent hard_exclude (`None`) preserves the stored set; only an
+        # explicit [] replaces it with nothing.
         edit.hard_exclude_replace = proposal.hard_exclude
         edit.note = proposal.summary
         edit.run_stats['feedback_count'] = proposal.feedback_count

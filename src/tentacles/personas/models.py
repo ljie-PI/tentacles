@@ -127,7 +127,9 @@ class EvolutionContent(BaseModel):
     tags: list[InterestTag] = Field(min_length=5, max_length=20)
     include: list[str] = Field(max_length=100)
     exclude: list[str] = Field(max_length=100)
-    hard_exclude: list[str] = Field(default_factory=list, max_length=100)
+    # Omitted (`None`) preserves the stored hard excludes; only an explicit []
+    # clears them, so a proposal that predates the field cannot delete them.
+    hard_exclude: list[str] | None = Field(default=None, max_length=100)
     summary: str = Field(min_length=1, max_length=2000)
 
     def check_profile_length(self, limit: int) -> None:
@@ -153,7 +155,9 @@ class EvolutionContent(BaseModel):
 
     @field_validator('include', 'exclude', 'hard_exclude')
     @classmethod
-    def _bounded_keywords(cls, values: list[str]) -> list[str]:
+    def _bounded_keywords(cls, values: list[str] | None) -> list[str] | None:
+        if values is None:
+            return None
         values = keywords(values)
         if any(len(value) > 256 for value in values):
             raise ValueError('keywords are too long')

@@ -997,7 +997,7 @@ export interface components {
             /** Feedback Count */
             feedback_count: number;
             /** Hard Exclude */
-            hard_exclude?: string[];
+            hard_exclude?: string[] | null;
             /** Include */
             include: string[];
             /** Name */
