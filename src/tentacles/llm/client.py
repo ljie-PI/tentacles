@@ -10,7 +10,8 @@ import httpx
 
 from tentacles.errors import ConfigError, UpstreamError
 from tentacles.llm.config import ModelSpec
-from tentacles.llm.decision_protocol import normalize_answers, validate_questions, response_metadata
+from tentacles.llm.decision_protocol import (MissingDecisionAnswers, normalize_answers, response_metadata,
+                                             validate_questions)
 from tentacles.net import HttpPool
 from tentacles.schemas import Completion, DecisionCompletion, TokenUsage
 from tentacles.llm.retry import ModelCredentialsError, ModelHTTPError, RequestGate, retry_after_seconds, retry_delay
@@ -161,7 +162,14 @@ class DecisionModel(ModelClient):
                 on_completion(result)
             if not valid:
                 raise ValueError('invalid decision response metadata')
-            answers = normalize_answers(data['answers'], questions)
-            return DecisionCompletion(answers=answers, model=data['model'], usage=result.usage, cost=result.cost)
+            raw = data['answers']
         except (KeyError, TypeError, ValueError, AttributeError):
             raise UpstreamError(f'model {self.name!r}: invalid decision response') from None
+        try:
+            answers = normalize_answers(raw, questions)
+        except ValueError:
+            # A dropped or mismatched answer is a payload problem, not a lost cause:
+            # the caller may still rescue the batch by halving it.
+            raise MissingDecisionAnswers(f'model {self.name!r}: decision response omitted answers') from None
+        return DecisionCompletion(answers=answers, model=metadata['model'],
+                                  usage=result.usage, cost=result.cost)

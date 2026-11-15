@@ -7,6 +7,7 @@ from typing import Any
 from tentacles.errors import UpstreamError
 from tentacles.llm.client import DecisionModel
 from tentacles.llm.decision_batch import DecisionBatchError, DecisionInput, decide_many, decide_packed
+from tentacles.llm.decision_protocol import MissingDecisionAnswers
 from tentacles.llm.registry import ModelRegistry
 from tentacles.llm.retry import ModelHTTPError, RequestGate
 from tentacles.models import Item
@@ -25,6 +26,18 @@ _REFUSED_STATUSES = {400, 413}
 
 class _PackingRefused(Exception):
     """The endpoint refused this packed payload."""
+    code = 'packing_refused'
+    single_message = 'endpoint refused a single-question request'
+
+
+class _AnswersIncomplete(Exception):
+    """The packed response omitted answers for questions it was asked."""
+    code = 'answers_incomplete'
+    single_message = 'a single-question response still omitted its answer'
+
+
+# 打包请求可以缩小的两种失败：端点拒收，或只答了其中一部分问题。
+_PAYLOAD_FAILURES = (_PackingRefused, _AnswersIncomplete)
 
 
 @dataclass
@@ -115,6 +128,8 @@ async def _packed_scores(model: DecisionModel, members: list[tuple[int, Item]], 
     try:
         first = await decide_packed(model, _state(rendered, members, stage), relevance,
                                     progress.metrics, gate)
+    except MissingDecisionAnswers:
+        raise _AnswersIncomplete() from None
     except UpstreamError as exc:
         if _refused(exc):
             raise _PackingRefused() from None
@@ -148,13 +163,12 @@ async def _packed_scores(model: DecisionModel, members: list[tuple[int, Item]], 
 async def _packed_chunk(model: DecisionModel, chunk: list[tuple[int, Item]], rendered: str,
                         labels: dict[str, InterestTag], stage: SemanticSpec, index: int,
                         progress: StageBatch, gate: RequestGate) -> _ChunkResult:
-    """Pack one chunk, halving a refused payload once before giving up on packing."""
+    """Pack one chunk, halving a payload the endpoint refuses or answers only partly."""
     try:
         return _ChunkResult(await _packed_scores(model, chunk, rendered, labels, stage, index, progress, gate))
-    except _PackingRefused:
+    except _PAYLOAD_FAILURES as exc:
         if len(chunk) < 2:
-            return _ChunkResult([_failure(index, stage, 'packing_refused',
-                                          stage_message='endpoint refused a single-question request')])
+            return _ChunkResult([_failure(index, stage, exc.code, stage_message=exc.single_message)])
     except UpstreamError as exc:
         return _ChunkResult(_failures(chunk, stage, index, exc))
     midpoint = len(chunk) // 2
@@ -162,15 +176,15 @@ async def _packed_chunk(model: DecisionModel, chunk: list[tuple[int, Item]], ren
     scores: list[StageScore] = []
     try:
         scores.extend(await _packed_scores(model, halves[0], rendered, labels, stage, index, progress, gate))
-    except _PackingRefused:
-        # One retry level only: an endpoint that refuses halves cannot pack at all.
+    except _PAYLOAD_FAILURES:
+        # One retry level only: an endpoint that cannot pack halves cannot pack at all.
         result = await _windowed_chunk(model, chunk, rendered, labels, stage, index, progress)
         return _ChunkResult(result.scores, packed=False, error=result.error, status=result.status)
     except UpstreamError as exc:
         return _ChunkResult(_failures(chunk, stage, index, exc))
     try:
         scores.extend(await _packed_scores(model, halves[1], rendered, labels, stage, index, progress, gate))
-    except _PackingRefused:
+    except _PAYLOAD_FAILURES:
         # Keep the half that already answered; the stage stops packing from here.
         tail = await _windowed_chunk(model, halves[1], rendered, labels, stage, index, progress)
         return _ChunkResult(scores + tail.scores, packed=False, error=tail.error, status=tail.status)

@@ -34,9 +34,11 @@ dispatch branches to the cascade, manager, or configuration validation.
   `defaults.models.decision`, the others keep `defaults.models.filter`). The two
   executors share `batch_size` and `summary_chars`; `relevance_type` and
   `jev_batch_mode` only apply to the Decisions executor, which packs one shared
-  persona per batch, halves a payload the endpoint refuses with 400/413 once, and
+  persona per batch, halves a payload the endpoint refuses with 400/413 or answers
+  only partly (a dropped answer surfaces as `MissingDecisionAnswers`) once, and
   then falls back to one request per item for the rest of the stage. A refused
-  second step (interest tags) keeps the step-one relevance verdicts.
+  second step (interest tags) keeps the step-one relevance verdicts; only items
+  that genuinely fail stay `score=None` item errors in the ledger.
 - `FilterBatch.checkpoint` is how a stage's finished work reaches disk mid-Run:
   it receives the evaluations of one completed chunk and the manager publishes
   them through `RunOperation.checkpoint` → `Store.checkpoint_run`, under the same
