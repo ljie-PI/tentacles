@@ -62,10 +62,16 @@ ERROR_PHASES: dict[str, tuple[str, ...]] = {
 ERROR_CODES: tuple[str, ...] = tuple(ERROR_PHASES)
 
 _SENSITIVE_NAMES = frozenset({
-    'authorization', 'proxy-authorization', 'cookie', 'set-cookie', 'x-api-key', 'api-key',
+    'authorization', 'proxy-authorization', 'cookie', 'cookies', 'set-cookie', 'x-api-key', 'api-key',
     'x-auth-token', 'token', 'key', 'sig', 'signature', 'password', 'passwd', 'secret',
     'api_key', 'apikey', 'access_token', 'refresh_token', 'client_secret', 'auth',
+    'session', 'sessionid', 'csrf', 'bearer',
 })
+# Request/response header maps a triage snapshot may carry under these keys.
+_HEADER_KEYS = frozenset({'headers', 'request_headers', 'response_headers'})
+# HTTP statuses worth retrying; every 5xx is retried too.
+_RETRYABLE_STATUS = frozenset({408, 429})
+_HTTP_STATUS = re.compile(r'\bHTTP(?:\s*/\s*[\d.]+)?[\s:=]*([1-5]\d\d)\b', re.IGNORECASE)
 # Only features an Agent can act on survive a captured response: content type,
 # redirect target, backoff hint, edge/CDN markers and rate-limit counters.
 _SAFE_HEADERS = frozenset({'content-type', 'location', 'retry-after', 'server', 'cf-mitigated'})
@@ -158,23 +164,38 @@ class RunErrorDetail(RunErrorRecord):
     debug_context: dict[str, Any]
 
 
-def classify_failure(exc: BaseException) -> tuple[str, bool]:
-    """Best-effort `(error_code, retryable)` for a top-level source failure.
+def classify_failure(exc: BaseException) -> tuple[str, bool, int | None]:
+    """Best-effort `(error_code, retryable, http_status)` for a top-level source failure.
 
     Source adapters re-raise transport problems as `UpstreamError` with the
-    cause suppressed, so the chained context is inspected too: that is what
-    separates a retryable connect/timeout from a deterministic defect.
+    cause suppressed but the readable reason in the message, so each hop is
+    asked for an HTTP status first and the chained context is inspected too:
+    that is what separates a retryable 5xx/timeout from a deterministic defect.
     """
     current: BaseException | None = exc
     seen: set[int] = set()
     while current is not None and id(current) not in seen and len(seen) < 4:
         seen.add(id(current))
+        status = _exception_status(current)
+        if status is not None:
+            return 'http_status_error', status in _RETRYABLE_STATUS or status >= 500, status
         if isinstance(current, (httpx.TimeoutException, TimeoutError)):
-            return 'network_timeout', True
+            return 'network_timeout', True, None
         if isinstance(current, (httpx.TransportError, ConnectionError, OSError)):
-            return 'connection_failed', True
+            return 'connection_failed', True, None
         current = current.__cause__ or current.__context__
-    return 'unexpected_exception', False
+    return 'unexpected_exception', False, None
+
+
+def _exception_status(exc: BaseException) -> int | None:
+    """The upstream HTTP status an exception carries in its attributes or text."""
+    for holder in (exc, getattr(exc, 'response', None)):
+        for attribute in ('status_code', 'status'):
+            value = getattr(holder, attribute, None)
+            if isinstance(value, int) and 100 <= value <= 599:
+                return value
+    match = _HTTP_STATUS.search(str(exc))
+    return int(match.group(1)) if match else None
 
 
 def configured_secrets(config: AppConfig) -> list[str]:
@@ -193,19 +214,21 @@ def configured_secrets(config: AppConfig) -> list[str]:
     return list(dict.fromkeys(secrets))
 
 
-def _option_secrets(value: Any, name: str = '') -> list[str]:
+def _option_secrets(value: Any, name: str = '', sensitive: bool = False) -> list[str]:
+    """Every credential value below `value`; a sensitive key claims its whole subtree."""
     found: list[str] = []
+    sensitive = sensitive or _sensitive_name(name)
     if isinstance(value, Mapping):
         for key, item in value.items():
-            found.extend(_option_secrets(item, str(key)))
+            found.extend(_option_secrets(item, str(key), sensitive))
         return found
     if isinstance(value, (list, tuple)):
         for item in value:
-            found.extend(_option_secrets(item, name))
+            found.extend(_option_secrets(item, name, sensitive))
         return found
     if not isinstance(value, str) or not value:
         return found
-    if _sensitive_name(name):
+    if sensitive:
         found.append(value)
         found.extend(part for part in value.split() if part.lower() not in _AUTH_SCHEMES)
     if '://' in value:
@@ -247,7 +270,8 @@ def _sensitive_name(name: str) -> bool:
 
 
 def redact_text(text: str, secrets: Iterable[str] = ()) -> str:
-    """Replace every configured credential value verbatim."""
+    """Replace configured credential values and sensitive query values in text."""
+    text = _URL_IN_TEXT.sub(lambda match: redact_url(match.group(0)), text)
     for secret in secrets:
         if secret:
             text = text.replace(secret, REDACTED)
@@ -294,12 +318,15 @@ def redact_debug_context(context: Mapping[str, Any], secrets: Iterable[str] = ()
 
 def _sanitize(value: Any, secrets: tuple[str, ...]) -> Any:
     if isinstance(value, Mapping):
-        return {str(name): REDACTED if _sensitive_name(str(name)) else _sanitize(item, secrets)
+        return {str(name): REDACTED if _sensitive_name(str(name))
+                else redact_headers(item, secrets) if str(name).lower() in _HEADER_KEYS
+                and isinstance(item, Mapping)
+                else _sanitize(item, secrets)
                 for name, item in value.items()}
     if isinstance(value, (list, tuple)):
         return [_sanitize(item, secrets) for item in value]
     if isinstance(value, str):
-        return redact_text(_URL_IN_TEXT.sub(lambda match: redact_url(match.group(0)), value), secrets)
+        return redact_text(value, secrets)
     if value is None or isinstance(value, (bool, int, float)):
         return value
     return redact_text(str(value), secrets)

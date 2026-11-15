@@ -34,10 +34,11 @@ def _page_url(spec: SourceSpec) -> str | None:
 
 def _fetch_failure(spec: SourceSpec, exc: Exception) -> DiagnosticEvent:
     """Record what a whole-source failure could not classify any further."""
-    error_code, retryable = classify_failure(exc)
+    error_code, retryable, http_status = classify_failure(exc)
     message = exc.message if isinstance(exc, TentaclesError) else f'source fetch failed ({type(exc).__name__})'
     return DiagnosticEvent(phase='fetch_page', error_code=error_code, message=message, retryable=retryable,
-                           source_id=spec.id, page_url=_page_url(spec), exception_type=type(exc).__name__,
+                           http_status=http_status, source_id=spec.id, page_url=_page_url(spec),
+                           exception_type=type(exc).__name__,
                            debug_context={'exception': stack_frames(exc)})
 
 
