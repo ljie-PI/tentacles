@@ -9,6 +9,15 @@
 
 ---
 
+## 0. 入库统一规则（所有信息源）
+
+- **正文截断**：`content` 在入库时统一截断到 **1000 units**（1 个 CJK 字符 = 1 unit，1 个连续非 CJK 字母/数字词元 = 1 unit，标点与空白不计入）；超过时 `content_truncated` 为 `true`。
+- **摘要上限**：`summary` 不超过 **300 units**（网页 `mode: page` 的版本 diff 保留换行）。
+- **原文可达性**：非邮件条目（`rss` / `web` / `browser`）必须保留合法的 `http(s)` 单条原文 `url` 或入口 `page_url`；两者都缺失的条目按无效条目跳过（计入运行统计 `invalid_url`，不入库）。
+- **入口页与原文**：RSS 的 `page_url` 是 Feed 地址，Web 是列表或监控页地址；聚合外链帖（如 Hacker News）的讨论页写入 `meta.comments_url`，`url` 仍保留外链原文，需要完整原文时顺着链接回访即可。
+
+---
+
 ## 1. RSS / Atom 订阅（`type: rss`）
 
 ```yaml
@@ -27,6 +36,7 @@ sources:
 
 - 自动处理条件 GET（`ETag` / `Last-Modified`，返回 `304 Not Modified` 时零解析开销）。
 - 新增入库时执行多级去重：同源同 `external_id`、规范化 URL（剥离 `utm_*`、`spm`、`fbclid` 等追踪参数与 `#fragment`）、标题+摘要哈希指纹，以及 48 小时内跨源近似标题去重。
+- 每条条目保留入口 `page_url`（即该 Feed 地址）；条目带 `<comments>` 等讨论链接且与本条 `url` 不同时，将讨论页写入 `meta.comments_url`。
 
 ---
 
@@ -112,6 +122,7 @@ sources:
 ```
 
 - 对区域清洗文本计算完整哈希；内容变化时生成一条 `identity_policy="revision"` 的新版本条目，`summary` 为增删行 `unified_diff`（最多 2000 字符），`external_id` 为 `规范化URL#<内容哈希>`，不会被普通文章 URL 去重吞掉。
+- 版本条目的 `page_url` 为监控页地址；`content` 同样受 1000 units 入库截断，完整快照保留在源游标中用于下次 diff。
 
 ### 模式 C：`mode: llm`（杂乱页面模型结构化抽取）
 
@@ -130,6 +141,7 @@ sources:
 
 - **防幻觉机制**：先剔除导航/脚本/页脚，提取“有界文本 + 页面真实存在的规范化链接集合”发给模型；模型返回的 JSON 中凡是不在真实页面链接集合内的编造链接一律丢弃（计入 `stats.dropped_links`）。
 - **付费缓存**：页面有效文本、链接集合及模型配置未发生变化时，后续轮次直接命中持久游标缓存，**零模型调用**（单纯轮换 API Key 不会使缓存失效）。
+- 抽取出的每条条目都保留入口 `page_url`（即该列表页地址）与自己的原文 `url`。
 
 ---
 
@@ -145,6 +157,7 @@ sources:
    - `mode: llm` 开启更新后会缓存已校验的条目描述，页面未变时零抽取模型费用，仅在 `fetch_content: true` 时重抓详情页。
 4. **对下游过滤与报告的影响**：
    - 正文或核心字段发生实质变化后，条目保留原 `id` 与首次 `fetched_at`，设置 `updated_at`，递增修订号并**自动使旧评分失效**；
+   - 正文入库时已截断到 1000 units，为感知截断范围之外的实质更新，RSS 与 Web 详情在 `meta.full_content_sha1` 记录**截断前全文哈希**；哈希变化同样触发原位更新；
    - 该条目会按 `updated_at` 重新进入 Pipeline 时间窗口参与重评（**若开启了付费过滤器可能产生重评模型费用**）；
    - **消费账本保持不变**：已被某条 Pipeline 写入过报告的条目，即使更新重评后也不会在同一 Pipeline 中重复生成报告。
    - 抓取结果中满足 `stats.fetched = new + updated + dup`。

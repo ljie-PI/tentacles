@@ -28,8 +28,12 @@ function Detail({ id, close, persona, feedbackDisabled }: { id: string; close: (
     {item && <>
       <p className="muted">{item.source_id} · {formatTime(item.published || item.fetched_at)}</p>
       <p className="muted small">首次抓取：{formatTime(item.fetched_at)}{item.updated_at && <> · <span className="tag">已更新</span> {formatTime(item.updated_at)}</>}</p>
-      {safeUrl(item.url) && <a className="external-link" href={safeUrl(item.url)} target="_blank" rel="noopener noreferrer">在原站阅读 ↗</a>}
+      <p className="drawer-links">
+        {safeUrl(item.url) && <a className="external-link" href={safeUrl(item.url)} target="_blank" rel="noopener noreferrer">在原站阅读 ↗</a>}
+        {safeUrl(item.page_url) && <a className="external-link" href={safeUrl(item.page_url)} target="_blank" rel="noopener noreferrer">来源列表页 ↗</a>}
+      </p>
       <FeedbackButtons itemId={item.id} persona={persona} disabled={feedbackDisabled} />
+      {item.content_truncated && <Notice>正文已截断至 1000 字/词，完整内容请打开原站链接阅读。</Notice>}
       <div className="item-content">{item.content || item.summary || '此条目没有正文。'}</div>
       {(item.evaluations || []).length > 0 && <section className="evaluations"><h3>Pipeline 评估</h3>{(item.evaluations || []).map(e => <div key={`${e.pipeline_id}-${e.persona_version}`}><strong>{e.pipeline_id}</strong><ScoreBadge score={e.score} /><span className="tag">{e.stage} · {e.passed ? '通过' : '未通过'}</span><p>{e.reason}</p></div>)}</section>}
     </>}

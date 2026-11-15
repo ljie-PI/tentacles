@@ -99,7 +99,8 @@ td button { white-space: nowrap; }
 .drawer-top { display: flex; justify-content: space-between; align-items: center; gap: 10px; }
 .drawer-top .eyebrow { margin: 0; }
 .drawer h2 { font-size: 26px; line-height: 1.5; margin: 30px 0 15px; overflow-wrap: anywhere; }
-.external-link { display: inline-block; color: var(--ring); font-size: 13px; margin: 8px 0 28px; }
+.drawer-links { display: flex; flex-wrap: wrap; gap: 18px; margin: 8px 0 28px; }
+.external-link { display: inline-block; color: var(--ring); font-size: 13px; }
 .item-content { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 14px; line-height: 2; border-top: 1px solid var(--border); padding-top: 25px; }
 .evaluations { margin-top: 35px; border-top: 1px solid var(--border); padding-top: 12px; font-size: 12px; }
 .evaluations .badge { margin-left: 12px; }
