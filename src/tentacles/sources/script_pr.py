@@ -59,11 +59,21 @@ _PROVIDER_KEYS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"\bAIza[0-9A-Za-z_-]{20,}"), "a Google API key"),
     (re.compile(r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}"), "a JWT"),
 )
+# The parameter names that always carry a credential, whatever the syntax around them.
+_CREDENTIAL_NAME = (r"(?:api[_-]?key|apikey|access[_-]?token|token|secret|signature|sig|"
+                    r"password|passwd|session(?:id)?|csrf|authorization|cookie)")
 # `name = "literal"` where the name itself claims to be a credential.
 _CREDENTIAL_ASSIGNMENT = re.compile(
     r"(?i)(?<![A-Za-z0-9])[A-Za-z0-9_.-]*?"
     r"(?:api[_-]?key|apikey|token|secret|password|passwd|authorization|cookie)"
     r"['\"]?\s*[:=]\s*(?P<quote>['\"])(?P<value>[^'\"\n]{12,})(?P=quote)")
+# `https://x.test/?api_key=0123…` and every other unquoted position: only a
+# credential-named query parameter with a non-trivial value is refused, so
+# `page=2`, `utm_source=rss` and `id=123` stay publishable.
+_CREDENTIAL_QUERY = re.compile(rf"(?i)[?&]{_CREDENTIAL_NAME}=[^\s&#\"']{{12,}}")
+# `{"authorization": "Bearer abc123"}`: a credential-named header or field, quoted.
+_CREDENTIAL_HEADER = re.compile(
+    rf"(?i)['\"]?{_CREDENTIAL_NAME}['\"]?\s*:\s*(?P<quote>['\"])[^'\"\n]{{8,}}(?P=quote)")
 
 
 class ScriptPrError(Exception):
@@ -429,6 +439,10 @@ def sensitive_findings(text: str, secrets: Sequence[str] = ()) -> list[str]:
     findings.extend(reason for pattern, reason in _PROVIDER_KEYS if pattern.search(text))
     if _CREDENTIAL_ASSIGNMENT.search(text):
         findings.append("a hard-coded credential")
+    if _CREDENTIAL_QUERY.search(text):
+        findings.append("a credential in a URL query")
+    if _CREDENTIAL_HEADER.search(text):
+        findings.append("a hard-coded credential header")
     if any(secret and secret in text for secret in secrets):
         findings.append("a configured secret")
     return findings
