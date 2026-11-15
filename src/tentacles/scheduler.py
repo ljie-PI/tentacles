@@ -106,11 +106,16 @@ class Scheduler:
                 last_run_at=task.last_run_at, last_status=task.last_status, last_error=task.last_error))
         return views
 
-    async def fetch_sources(self, ids: list[str] | None = None) -> list[FetchOutcome]:
-        """Explicit IDs bypass enablement and due checks, but never bypass leases."""
+    async def fetch_sources(self, ids: list[str] | None = None, *,
+                            distill: bool = False) -> list[FetchOutcome]:
+        """Explicit IDs bypass enablement and due checks, but never bypass leases.
+
+        `distill` is the explicit `sources distill` refresh: a browser source
+        explores again even though its fixed script already exists.
+        """
         specs = ([self._config.source(i) for i in dict.fromkeys(ids)] if ids
                  else [s for s in self._config.sources if s.enabled])
-        return await self._fetch_batch(specs, due_only=False)
+        return await self._fetch_batch(specs, due_only=False, distill=distill)
 
     async def tick(self) -> list[TickOutcome]:
         """Drain fetches, defer busy dependencies, then drain filters and runs."""
@@ -130,11 +135,12 @@ class Scheduler:
                     outcomes.append(TickOutcome.of_pipeline(role, result))
         return outcomes
 
-    async def _fetch_task(self, spec: SourceSpec, http: HttpPool, *, due_only: bool) -> FetchOutcome | None:
+    async def _fetch_task(self, spec: SourceSpec, http: HttpPool, *, due_only: bool,
+                          distill: bool = False) -> FetchOutcome | None:
         async def work(op: RunOperation) -> None:
             await fetch_source(spec, op, store=self._store, http=http, imap_factory=self._imap_factory,
                                timezone=self._config.app.timezone, models=self._models,
-                               config=self._config)
+                               config=self._config, distill=distill)
 
         result = await self._runs.execute(self.task('fetch', spec.id), work, due_only=due_only,
             failure_message=lambda exc: exc.message if isinstance(exc, TentaclesError)
@@ -149,12 +155,13 @@ class Scheduler:
                             error=result.error, stats=stats, error_count=result.error_count,
                             failed_targets=result.failed_targets)
 
-    async def _fetch_batch(self, specs: list[SourceSpec], *, due_only: bool) -> list[FetchOutcome]:
+    async def _fetch_batch(self, specs: list[SourceSpec], *, due_only: bool,
+                           distill: bool = False) -> list[FetchOutcome]:
         sem = asyncio.Semaphore(FETCH_CONCURRENCY)
         async with HttpPool(self._transport) as http:
             async def one(spec):
                 async with sem:
-                    return await self._fetch_task(spec, http, due_only=due_only)
+                    return await self._fetch_task(spec, http, due_only=due_only, distill=distill)
 
             tasks = [asyncio.create_task(one(s)) for s in specs]
             return [result for result in await gather_draining(tasks) if result is not None]

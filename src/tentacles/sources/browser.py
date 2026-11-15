@@ -4,15 +4,20 @@ The script lives in the repository (`browser.scripts_dir`), passes a static AST
 gate, and only ever sees one isolated work tab in the configured Chrome profile.
 A source without a script yet is a cold start: the exploration Agent drives that
 tab, its trajectory is recorded, and the distilled script has to pass the static
-gate plus a standalone trial run before it is installed here.
-Whatever happens, that tab is reclaimed and every failure site lands in the
-`run_errors` ledger under `browser_replay` (or `browser_distill`) phase.
+gate plus a standalone trial run before it is installed here. A script that no
+longer replays (error, timeout or zero entries) wakes one healing session that
+has to pass the same gates; only then is the old text replaced. Every installed
+script is offered to the review branch of `script_pr`. Whatever happens, that
+tab is reclaimed and every failure site lands in the `run_errors` ledger under
+`browser_replay`, `browser_heal`, `browser_distill` or `script_pr`.
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any, ClassVar, Literal, Type, cast
@@ -26,16 +31,19 @@ from tentacles.asyncutil import run_store_call
 from tentacles.config import (
     AppConfig, BrowserPiSpec, ReasoningLevel, chrome_profile_name, reject_headless,
 )
-from tentacles.diagnostics import DiagnosticEvent, configured_secrets, stack_frames
+from tentacles.diagnostics import DiagnosticEvent, clip, configured_secrets, stack_frames
 from tentacles.errors import ConfigError
 from tentacles.models import Item, ItemObservation, LinkDisposition, normalize_url
 from tentacles.sources.base import DiagnosedError, FetchContext, FetchResult, Source, register
 from tentacles.sources.browser_contract import (
     BrowserExtractOutput, ExtractScript, RawBrowserItem, ScriptGateError,
 )
+from tentacles.sources.browser_heal import HealFailed, HealRequest, heal
 from tentacles.sources.browser_script import load_script
 from tentacles.sources.browser_session import page_snapshot, work_tab
 from tentacles.sources.distiller import DistillFailed, DistillRequest, distill
+from tentacles.sources.script_pr import ScriptPublication, publish_script
+from tentacles.sources.trajectory import meta_path
 from tentacles.text import truncate
 from tentacles.timeutil import to_utc
 
@@ -101,7 +109,7 @@ class BrowserSource(Source):
         if config is None:
             raise ConfigError('browser sources need the loaded application config (the `browser` block)')
         script = _script_path(config, self.spec.id, opts)
-        if not script.exists():
+        if ctx.distill or not script.exists():
             return await self._distill(script, opts, ctx, cursor)
         try:
             extract = load_script(script)
@@ -113,19 +121,18 @@ class BrowserSource(Source):
             raise DiagnosedError(exc.message) from None
         try:
             output, snapshot = await self._replay(extract, opts, config)
-        except _ReplayFailed as failure:
-            return self._failed(opts, ctx, script=script, exc=failure.error, snapshot=failure.snapshot,
-                                timeout=failure.timeout)
+        except _ReplayBroken as broken:
+            self._record_replay(opts, ctx, broken.failure)
+            return await self._heal(script, opts, ctx, cursor, broken.failure)
         raw_items = output.items[:opts.max_items]
-        replay_stats: dict[str, Any] = {'browser_mode': 'replay'}
         if not raw_items:
-            self._record(ctx, opts, error_code='script_assertion_failed', severity='warning',
-                         message=f'replay script {script.name} returned no items',
-                         target_url=output.page_url, snapshot=snapshot)
-            return FetchResult([], _cursor(opts, script, 0),
-                               {'entries': 0, 'no_items': True, **replay_stats})
+            # A page that yields nothing is a broken script too: the site may have
+            # moved its container, so this round heals instead of silently no-oping.
+            failure = _ReplayFailure(error=None, snapshot=snapshot, empty=True)
+            self._record_replay(opts, ctx, failure, target_url=output.page_url)
+            return await self._heal(script, opts, ctx, cursor, failure)
         return await self._items(raw_items, output, opts, ctx, cursor, script,
-                                 extra_stats=replay_stats)
+                                 extra_stats={'browser_mode': 'replay'})
 
     async def _distill(self, script: Path, opts: BrowserOptions, ctx: FetchContext,
                        cursor: dict[str, Any]) -> FetchResult:
@@ -155,6 +162,10 @@ class BrowserSource(Source):
             return FetchResult([], cursor, {'entries': 0, **stats})
         stats['trajectory_path'] = str(distilled.trajectory)
         stats['script_path'] = str(distilled.path)
+        await self._publish_script(
+            distilled.path, opts, ctx, stats, reason='distill',
+            detail=(f'distilled from {distilled.steps} trajectory step(s); the standalone trial '
+                    f'returned {len(distilled.output.items)} entries in {distilled.trial_seconds:.1f}s'))
         raw_items = distilled.output.items[:opts.max_items]
         return await self._items(raw_items, distilled.output, opts, ctx, cursor, distilled.path,
                                  extra_stats=stats)
@@ -168,13 +179,13 @@ class BrowserSource(Source):
                     extract(page, page_url=opts.page_url, max_items=opts.max_items,
                             timeout_ms=int(opts.timeout * 1000)), timeout=opts.timeout)
             except (PlaywrightTimeoutError, asyncio.TimeoutError) as exc:
-                raise _ReplayFailed(exc, await page_snapshot(page), timeout=True) from None
+                raise _ReplayBroken(_ReplayFailure(exc, await page_snapshot(page), timeout=True)) from None
             except Exception as exc:
-                raise _ReplayFailed(exc, await page_snapshot(page)) from None
+                raise _ReplayBroken(_ReplayFailure(exc, await page_snapshot(page))) from None
             try:
                 return BrowserExtractOutput.model_validate(output), await page_snapshot(page)
             except Exception as exc:
-                raise _ReplayFailed(exc, await page_snapshot(page)) from None
+                raise _ReplayBroken(_ReplayFailure(exc, await page_snapshot(page))) from None
 
     async def _items(self, raw_items: list[RawBrowserItem], output: BrowserExtractOutput,
                      opts: BrowserOptions, ctx: FetchContext, cursor: dict[str, Any], script: Path,
@@ -208,19 +219,71 @@ class BrowserSource(Source):
         seen = await run_store_call(ctx.seen_links, urls) if ctx.seen_links is not None else set()
         return [item for item in items if item.url not in seen], {url: 'skip' for url in seen}
 
-    def _failed(self, opts: BrowserOptions, ctx: FetchContext, *, script: Path, exc: BaseException,
-                snapshot: dict[str, Any], timeout: bool = False) -> FetchResult:
-        """Record the replay failure; `on_detail_error` decides the batch outcome."""
-        message = (f'browser replay timed out ({type(exc).__name__})' if timeout
-                   else f'browser replay script failed ({type(exc).__name__})')
-        self._record(ctx, opts, error_code='playwright_selector_timeout' if timeout else 'script_assertion_failed',
-                     message=message, exc=exc, snapshot=snapshot,
-                     target_url=_failed_target(opts, snapshot))
-        if opts.on_detail_error == 'fail_batch':
-            # The concrete failure is already recorded, so the runner must not add
-            # its generic whole-source row on top of it.
-            raise DiagnosedError(f'browser replay failed for {script.name} ({type(exc).__name__})')
-        return FetchResult([], _cursor(opts, script, 0), {'entries': 0, 'replay_failed': True})
+    async def _heal(self, script: Path, opts: BrowserOptions, ctx: FetchContext,
+                    cursor: dict[str, Any], failure: _ReplayFailure) -> FetchResult:
+        """One healing session; a failed repair keeps the old script and fails the run."""
+        config = cast(AppConfig, ctx.config)
+        stats: dict[str, Any] = {'browser_mode': 'heal'}
+        request = HealRequest(
+            source_id=self.spec.id, run_id=ctx.run_id, page_url=opts.page_url, task=opts.task,
+            max_items=opts.max_items, timeout=opts.timeout, chrome_profile=opts.chrome_profile,
+            script_path=script, pi=_pi_spec(config, opts), old_source=_read_script(script),
+            failure=failure.describe(), snapshot=failure.snapshot,
+            meta=_local_meta(config, self.spec.id))
+        try:
+            healed = await heal(request, config=config, on_usage=ctx.metrics.record,
+                                secrets=configured_secrets(config))
+        except HealFailed as exc:
+            stats['browser_heal_failed'] = True
+            trajectory = exc.context.get('trajectory_path')
+            if isinstance(trajectory, str) and trajectory:
+                stats['trajectory_path'] = trajectory
+            self._record(ctx, opts, phase='browser_heal', error_code='pi_heal_exhausted',
+                         message=exc.message, exc=exc.error,
+                         snapshot={**failure.snapshot, **exc.context},
+                         target_url=_failed_target(opts, failure.snapshot))
+            # A fixed script that no longer replays is not a per-item skip: the run
+            # fails so the consumed pi cost and the ledger row stay visible.
+            raise DiagnosedError(
+                f'browser script self-healing failed for {self.spec.id} ({exc.message})') from None
+        stats['trajectory_path'] = str(healed.trajectory)
+        stats['script_path'] = str(healed.path)
+        stats['heal_attempts'] = healed.attempts
+        await self._publish_script(
+            healed.path, opts, ctx, stats, reason='heal',
+            detail=(f'repaired after {healed.attempts} trial attempt(s); the standalone trial '
+                    f'returned {len(healed.output.items)} entries in {healed.trial_seconds:.1f}s'))
+        raw_items = healed.output.items[:opts.max_items]
+        return await self._items(raw_items, healed.output, opts, ctx, cursor, healed.path,
+                                 extra_stats=stats)
+
+    async def _publish_script(self, script: Path, opts: BrowserOptions, ctx: FetchContext,
+                              stats: dict[str, Any], *, reason: str, detail: str) -> None:
+        """Offer the installed script as a review PR; a failure only degrades the round."""
+        config = cast(AppConfig, ctx.config)
+        publication: ScriptPublication = await publish_script(
+            script, source_id=self.spec.id, spec=config.browser.pr, reason=reason,
+            detail=detail, secrets=configured_secrets(config))
+        stats['pr_status'] = publication.status
+        if publication.branch:
+            stats['pr_branch'] = publication.branch
+        if publication.pr_url:
+            stats['pr_url'] = publication.pr_url
+        if publication.status != 'error':
+            return
+        self._record(ctx, opts, phase='script_pr', error_code='git_or_pr_failed', severity='warning',
+                     message=f'cannot publish the {reason} script of {self.spec.id!r}: {publication.detail}',
+                     snapshot={'pr_branch': publication.branch, 'pr_status': publication.status},
+                     target_url=opts.page_url)
+
+    def _record_replay(self, opts: BrowserOptions, ctx: FetchContext, failure: _ReplayFailure,
+                       *, target_url: str | None = None) -> None:
+        """Record the replay failure site before the healing session starts."""
+        self._record(ctx, opts,
+                     error_code='playwright_selector_timeout' if failure.timeout else 'script_assertion_failed',
+                     message=failure.message(), exc=failure.error, snapshot=failure.snapshot,
+                     severity='warning' if failure.empty else 'error',
+                     target_url=target_url or _failed_target(opts, failure.snapshot))
 
     def _record(self, ctx: FetchContext, opts: BrowserOptions, *, error_code: str, message: str,
                 snapshot: dict[str, Any], target_url: str, exc: BaseException | None = None,
@@ -237,12 +300,43 @@ class BrowserSource(Source):
             debug_context=context))
 
 
-class _ReplayFailed(Exception):
-    """Internal carrier: the failing page state captured before its tab closed."""
+class _ReplayBroken(Exception):
+    """Internal control flow: the replay failed, carrying the captured failure site."""
 
-    def __init__(self, error: BaseException, snapshot: dict[str, Any], *, timeout: bool = False) -> None:
-        super().__init__(str(error))
-        self.error, self.snapshot, self.timeout = error, snapshot, timeout
+    def __init__(self, failure: _ReplayFailure) -> None:
+        super().__init__(failure.message())
+        self.failure = failure
+
+
+@dataclass(frozen=True)
+class _ReplayFailure:
+    """Internal carrier: the failing page state captured before its tab closed.
+
+    An empty result (`error is None, empty=True`) is a failure too: a page that
+    yields nothing no longer tells a fixed script apart from a site change.
+    """
+
+    error: BaseException | None
+    snapshot: dict[str, Any]
+    timeout: bool = False
+    empty: bool = False
+
+    def message(self) -> str:
+        if self.empty:
+            return 'browser replay script returned no items'
+        name = type(self.error).__name__
+        if self.timeout:
+            return f'browser replay timed out ({name})'
+        return f'browser replay script failed ({name})'
+
+    def describe(self) -> str:
+        """What the healing prompt reads: the failure, bounded, never a whole page."""
+        if self.empty:
+            return 'the replay script completed but returned no items'
+        detail = clip(str(self.error), 500)
+        if self.timeout:
+            return f'the replay timed out ({type(self.error).__name__}): {detail}'
+        return f'the replay raised {type(self.error).__name__}: {detail}'
 
 
 def _item(source_id: str, page_url: str, raw: RawBrowserItem, script: Path) -> Item:
@@ -305,6 +399,23 @@ def _pi_spec(config: AppConfig, opts: BrowserOptions) -> BrowserPiSpec:
                          model=override.model or base.model,
                          reasoning_level=override.reasoning_level or base.reasoning_level,
                          timeout=override.timeout or base.timeout)
+
+
+def _read_script(script: Path) -> str:
+    """The installed script the healing session must repair (bounded by its prompt)."""
+    try:
+        return script.read_text(encoding="utf-8")
+    except (OSError, UnicodeError):
+        return ""
+
+
+def _local_meta(config: AppConfig, source_id: str) -> dict[str, Any]:
+    """The local-only meta file of the installed script, or nothing when absent."""
+    try:
+        raw = json.loads(meta_path(config.data_dir, source_id).read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return {}
+    return raw if isinstance(raw, dict) else {}
 
 
 def _failed_target(opts: BrowserOptions, snapshot: dict[str, Any]) -> str:

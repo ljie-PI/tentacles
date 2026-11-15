@@ -207,6 +207,20 @@ class TentaclesService:
         """Fetch the named sources (even disabled ones), or every enabled source."""
         return await self.scheduler.fetch_sources(ids)
 
+    async def distill_source(self, source_id: str) -> FetchOutcome:
+        """Re-explore and re-distill one `type: browser` script on demand.
+
+        The explicit refresh of `tentacles sources distill`: unlike a normal
+        fetch it explores even though a fixed script already exists, so an
+        Agent can refresh a page whose structure changed without waiting for a
+        replay to fail.
+        """
+        spec = self.config.source(source_id)
+        if spec.type != 'browser':
+            raise ConfigError(
+                f'sources distill needs a `type: browser` source ({source_id!r} is {spec.type!r})')
+        return (await self.scheduler.fetch_sources([source_id], distill=True))[0]
+
     async def tick(self) -> list[TickOutcome]:
         """Drain concurrent fetches, then due filters, then due pipeline runs."""
         return await self.scheduler.tick()

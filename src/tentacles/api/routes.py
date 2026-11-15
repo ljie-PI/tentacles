@@ -35,6 +35,17 @@ async def fetch_source(source_id: str, svc: Service):
     return result
 
 
+@router.post('/sources/{source_id}/distill', response_model=FetchOutcome)
+async def distill_source(source_id: str, svc: Service):
+    """Explicit refresh: explore again and re-distill this browser source's script."""
+    result = await svc.distill_source(source_id)
+    if result.status == 'busy':
+        raise Busy('source is already running')
+    if result.status == 'error':
+        raise UpstreamError('source distill failed; see run history')
+    return result
+
+
 @router.get('/items', response_model=Page[ItemView])
 def items(svc: Service, sources: Annotated[list[str] | None, Query()] = None,
           kinds: Annotated[list[ItemKind] | None, Query()] = None,

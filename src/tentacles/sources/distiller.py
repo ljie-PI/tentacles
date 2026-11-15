@@ -143,13 +143,13 @@ async def _distill_script(request: DistillRequest, config: AppConfig, pi: PiRpcC
     try:
         for round_index in range(MAX_CORRECTION_ROUNDS + 1):
             reply = await pi.ask(feedback or prompt, timeout=request.pi.timeout)
-            source = _python_block(reply)
+            source = python_block(reply)
             failure: DistillFailed | None
             if source is None:
                 failure = DistillFailed(
                     _GATE_ERROR_CODE, "your answer contained no ```python block, so there was no script to verify")
             else:
-                output, seconds, failure = await _gate(candidate, request, config, source)
+                output, seconds, failure = await verify_candidate(candidate, request, config, source)
                 if failure is None:
                     assert output is not None
                     return source, output, seconds
@@ -157,7 +157,7 @@ async def _distill_script(request: DistillRequest, config: AppConfig, pi: PiRpcC
             last_problem = failure.message
             log.warning("browser: distilled script for %s rejected (round %d): %s",
                         request.source_id, round_index + 1, clip(failure.message, 200))
-            feedback = _correction_prompt(failure.message, failure.context)
+            feedback = correction_prompt(DISTILL_RULES, failure.message, failure.context)
         raise DistillFailed(
             _GATE_ERROR_CODE,
             f"no distilled script for {request.source_id!r} passed the replay gate "
@@ -168,9 +168,13 @@ async def _distill_script(request: DistillRequest, config: AppConfig, pi: PiRpcC
         candidate.unlink(missing_ok=True)
 
 
-async def _gate(candidate: Path, request: DistillRequest, config: AppConfig, source: str
-                ) -> tuple[BrowserExtractOutput | None, float, DistillFailed | None]:
-    """Run both gates on one candidate; the merged loader is the static contract."""
+async def verify_candidate(candidate: Path, request: DistillRequest, config: AppConfig, source: str
+                           ) -> tuple[BrowserExtractOutput | None, float, DistillFailed | None]:
+    """Run both gates on one candidate; the merged loader is the static contract.
+
+    The cold start and the self-healing path share this seam, so a repaired
+    script is held to exactly the standard a distilled one already passed.
+    """
     candidate.parent.mkdir(parents=True, exist_ok=True)
     candidate.write_text(source, encoding="utf-8")
     try:
@@ -255,22 +259,12 @@ def _host(host: str) -> str:
 
 def _publish(data_dir: Path, request: DistillRequest, recorder: TrajectoryRecorder, *, source: str,
              output: BrowserExtractOutput, seconds: float) -> DistilledScript:
-    """Write the script and its local metadata only after both gates passed."""
-    path = request.script_path
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix(".py.tmp")
-    temporary.write_text(source, encoding="utf-8")
-    temporary.replace(path)
-    try:
-        load_script(path)
-    except ScriptGateError as exc:  # pragma: no cover - the same text passed Gate 1
-        raise ConfigError(f"distilled script {path.name} failed its final gate: {exc.message}") from None
-    selectors = _script_selectors(source, recorder.steps)
-    meta = write_meta(data_dir, BrowserSourceMeta(
-        source_id=request.source_id, script=path.name, page_url=request.page_url,
-        items=len(output.items), selectors=selectors, steps=len(recorder.steps),
-        trial_seconds=seconds, model=request.pi.model, reasoning_level=request.pi.reasoning_level,
-        trajectory=str(recorder.path), distilled_at=datetime.now(timezone.utc)))
+    """Install the gated script and its local metadata, then describe the result."""
+    selectors = script_selectors(source, recorder.steps)
+    path, meta = install_script(
+        data_dir, source_id=request.source_id, script_path=request.script_path,
+        page_url=request.page_url, source=source, output=output, seconds=seconds,
+        selectors=selectors, steps=len(recorder.steps), pi=request.pi, trajectory=recorder.path)
     log.info("browser: distilled %s from %d trajectory step(s) into %s",
              request.source_id, len(recorder.steps), path)
     return DistilledScript(path=path, trajectory=recorder.path, output=output, source=source,
@@ -278,7 +272,33 @@ def _publish(data_dir: Path, request: DistillRequest, recorder: TrajectoryRecord
                            meta=meta)
 
 
-def _script_selectors(source: str, steps: Sequence[TrajectoryStep]) -> list[str]:
+def install_script(data_dir: Path, *, source_id: str, script_path: Path, page_url: str, source: str,
+                   output: BrowserExtractOutput, seconds: float, selectors: Sequence[str], steps: int,
+                   pi: BrowserPiSpec, trajectory: Path) -> tuple[Path, Path]:
+    """Write a script that already passed both gates, plus its local-only metadata.
+
+    Only the cold start and the healing path call this, and only after the static
+    gate and the standalone trial passed: the atomic replace is what makes the
+    new text the next replay. `data_dir` stays local and ignored; nothing here
+    touches the repository or the Store.
+    """
+    script_path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = script_path.with_suffix(".py.tmp")
+    temporary.write_text(source, encoding="utf-8")
+    temporary.replace(script_path)
+    try:
+        load_script(script_path)
+    except ScriptGateError as exc:  # pragma: no cover - the same text passed Gate 1
+        raise ConfigError(f"distilled script {script_path.name} failed its final gate: {exc.message}") from None
+    meta = write_meta(data_dir, BrowserSourceMeta(
+        source_id=source_id, script=script_path.name, page_url=page_url,
+        items=len(output.items), selectors=list(selectors), steps=steps,
+        trial_seconds=seconds, model=pi.model, reasoning_level=pi.reasoning_level,
+        trajectory=str(trajectory), distilled_at=datetime.now(timezone.utc)))
+    return script_path, meta
+
+
+def script_selectors(source: str, steps: Sequence[TrajectoryStep]) -> list[str]:
     """The observed selector candidates the fixed script actually kept."""
     kept: list[str] = []
     for step in steps:
@@ -307,7 +327,7 @@ Rules:
 
 
 def _exploration_prompt(request: DistillRequest) -> str:
-    return _bounded("\n".join([
+    return bounded_prompt("\n".join([
         EXPLORATION_RULES,
         "",
         f"Source id: {request.source_id}",
@@ -319,10 +339,7 @@ def _exploration_prompt(request: DistillRequest) -> str:
     ]))
 
 
-DISTILL_RULES = """\
-You are writing the fixed Playwright script that replaces your exploration run.
-Return exactly one ```python block and nothing else.
-
+SCRIPT_CONTRACT = """\
 The script must define exactly this entry point:
 
     async def extract(page: Page, *, page_url: str, max_items: int,
@@ -353,10 +370,13 @@ Make it a reliable replay, not a transcript of one lucky run:
 - skip promoted, placeholder and skeleton nodes; never hard-code today's date, a
   fixed item count or a one-off hashed class name."""
 
+DISTILL_RULES = ("You are writing the fixed Playwright script that replaces your exploration run.\n"
+                 "Return exactly one ```python block and nothing else.\n\n" + SCRIPT_CONTRACT)
+
 
 def _distillation_prompt(request: DistillRequest, steps: Sequence[TrajectoryStep],
                          samples: Sequence[Mapping[str, Any]]) -> str:
-    return _bounded("\n".join([
+    return bounded_prompt("\n".join([
         DISTILL_RULES,
         "",
         f"Source id: {request.source_id}",
@@ -374,9 +394,10 @@ def _distillation_prompt(request: DistillRequest, steps: Sequence[TrajectoryStep
     ]))
 
 
-def _correction_prompt(problem: str, snapshot: Mapping[str, Any] | None) -> str:
-    return _bounded("\n".join([
-        DISTILL_RULES,
+def correction_prompt(rules: str, problem: str, snapshot: Mapping[str, Any] | None) -> str:
+    """One corrective turn: the rules, the failure and the page it happened on."""
+    return bounded_prompt("\n".join([
+        rules,
         "",
         "The script you just produced did not pass the verification gate.",
         f"Failure: {clip(problem, 1500)}",
@@ -393,11 +414,12 @@ def _steps_json(steps: Sequence[TrajectoryStep]) -> str:
     return json.dumps([step.as_dict() for step in window], ensure_ascii=False, default=str)
 
 
-def _bounded(prompt: str) -> str:
+def bounded_prompt(prompt: str) -> str:
+    """Cut one prompt to the model budget, marking the cut."""
     return prompt if len(prompt) <= MAX_PROMPT_CHARS else prompt[: MAX_PROMPT_CHARS - 1] + "…"
 
 
-def _python_block(reply: str) -> str | None:
+def python_block(reply: str) -> str | None:
     """The last fenced block of the answer: the model's script, nothing around it."""
     marker = reply.rfind("```")
     if marker < 0:

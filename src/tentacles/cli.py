@@ -496,6 +496,16 @@ def sources_fetch(ctx: typer.Context,
         [[r.source_id, r.status, r.new, r.updated, r.dup, r.error] for r in rows])))
 
 
+@sources_app.command("distill")
+def sources_distill(ctx: typer.Context,
+                    source_id: str = typer.Argument(..., help="有界面浏览器源 id")) -> None:
+    """显式重提炼有界面浏览器源的固化脚本，并按 browser.pr 配置提 PR。"""
+    _run(ctx, lambda s: s.distill_source(source_id), lambda result, out, when: out.print(_table(
+        "Distill", ["source", "status", "new", "updated", "pr", "pr url", "error"],
+        [[result.source_id, result.status, result.new, result.updated,
+          result.stats.get('pr_status'), result.stats.get('pr_url'), result.error]])))
+
+
 # ---- scheduler --------------------------------------------------------------
 
 @app.command("tick")
