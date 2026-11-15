@@ -22,7 +22,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from tentacles.asyncutil import run_store_call
 from tentacles.config import AppConfig, ReasoningLevel, chrome_profile_name, reject_headless
 from tentacles.diagnostics import DiagnosticEvent, stack_frames
-from tentacles.errors import ConfigError, UpstreamError
+from tentacles.errors import ConfigError
 from tentacles.models import Item, ItemObservation, LinkDisposition, normalize_url
 from tentacles.sources.base import DiagnosedError, FetchContext, FetchResult, Source, register
 from tentacles.sources.browser_contract import (
@@ -173,7 +173,9 @@ class BrowserSource(Source):
                      message=message, exc=exc, snapshot=snapshot,
                      target_url=_failed_target(opts, snapshot))
         if opts.on_detail_error == 'fail_batch':
-            raise UpstreamError(f'browser replay failed for {script.name} ({type(exc).__name__})')
+            # The concrete failure is already recorded, so the runner must not add
+            # its generic whole-source row on top of it.
+            raise DiagnosedError(f'browser replay failed for {script.name} ({type(exc).__name__})')
         return FetchResult([], _cursor(opts, script, 0), {'entries': 0, 'replay_failed': True})
 
     def _record(self, ctx: FetchContext, opts: BrowserOptions, *, error_code: str, message: str,
