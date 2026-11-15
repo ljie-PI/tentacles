@@ -90,7 +90,7 @@ browser:
     reasoning_level: high                 # off | minimal | low | medium | high | xhigh | max
     timeout: 300
   pr:                                     # 提炼/自愈脚本的评审分支与 GitHub PR（需本机 gh 已登录）
-    enabled: true                         # false：只保存本地脚本，不跑 git/gh
+    enabled: true                         # false：只提交到本机评审分支，不 push、不调 gh
     base_branch: master                   # PR 目标分支（绝不直接推它）
     branch_prefix: auto/browser-source-   # 最终分支：<prefix><source_id>，同源复用一个分支
     labels: [ready-for-human]             # gh pr create --label，至少一个

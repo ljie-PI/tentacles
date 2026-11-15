@@ -11,7 +11,9 @@ tree or index; the worktree and its scratch directory are removed on every path.
 
 A `git`/`gh` failure is a result, not an exception: the script is already
 installed and the fetched items still belong in the Store, so the caller records
-`git_or_pr_failed` and keeps the round. Only a byte-identical script is a no-op.
+`git_or_pr_failed` and keeps the round. `browser.pr.enabled: false` keeps the
+local half (one commit on the review branch) and skips push and `gh`. Only a
+byte-identical script is a no-op.
 """
 
 from __future__ import annotations
@@ -77,8 +79,6 @@ async def publish_script(script: Path, *, source_id: str, spec: BrowserPrSpec, r
     fetched items and records the degradation itself.
     """
     branch = f"{spec.branch_prefix}{source_id}"
-    if not spec.enabled:
-        return ScriptPublication("disabled", branch, detail="browser.pr.enabled is false")
     try:
         text = script.read_text(encoding="utf-8")
     except (OSError, UnicodeError):
@@ -92,11 +92,52 @@ async def publish_script(script: Path, *, source_id: str, spec: BrowserPrSpec, r
     try:
         repo = await _repo_root(script)
         relative = _relative_script(repo, script)
+        if not spec.enabled:
+            return await _publish_local(repo, relative, text, branch=branch, spec=spec,
+                                        source_id=source_id, reason=reason)
         return await _publish(repo, relative, text, body, branch=branch, spec=spec,
                               source_id=source_id, reason=reason)
     except ScriptPrError as exc:
         log.warning("browser: cannot publish the script PR for %s (%s)", source_id, exc)
         return ScriptPublication("error", branch, detail=str(exc))
+
+
+async def _publish_local(repo: Path, relative: str, text: str, *, branch: str,
+                         spec: BrowserPrSpec, source_id: str, reason: str) -> ScriptPublication:
+    """`browser.pr.enabled: false`: version the script locally, never reach the remote."""
+    start = await _local_start(repo, branch=branch, base=spec.base_branch)
+    parent = Path(tempfile.mkdtemp(prefix="tentacles-script-pr-"))
+    worktree = parent / "worktree"
+    try:
+        await _git(repo, "worktree", "add", "--detach", str(worktree), start)
+        if await _stage_one(worktree, relative, text):
+            return ScriptPublication("disabled", branch,
+                                     detail="browser.pr.enabled is false; the script is unchanged")
+        await _git(worktree, "commit", "--no-verify", "-m", _commit_message(source_id, reason))
+        commit = await _git(worktree, "rev-parse", "HEAD")
+        await _git(repo, "branch", "--force", branch, commit.out.strip())
+        return ScriptPublication(
+            "disabled", branch,
+            detail=f"browser.pr.enabled is false; committed to the local {branch} branch")
+    finally:
+        await _remove_worktree(repo, worktree, parent)
+
+
+async def _local_start(repo: Path, *, branch: str, base: str) -> str:
+    """A local-only commit starts from its own branch, else the base, else HEAD."""
+    for ref in (branch, base, f"origin/{base}", "HEAD"):
+        if await _git_ok(repo, "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}"):
+            return ref
+    raise ScriptPrError(f"neither {branch} nor {base} nor HEAD exists")
+
+
+async def _stage_one(worktree: Path, relative: str, text: str) -> bool:
+    """Write and stage the single allowed path; True when it already matches."""
+    target = worktree / relative
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(text, encoding="utf-8")
+    await _git(worktree, "add", "--", relative)
+    return bool(await _git_ok(worktree, "diff", "--cached", "--quiet"))
 
 
 async def _publish(repo: Path, relative: str, text: str, body: str, *, branch: str,
@@ -112,11 +153,7 @@ async def _publish(repo: Path, relative: str, text: str, body: str, *, branch: s
     body_file.write_text(body, encoding="utf-8")
     try:
         await _git(repo, "worktree", "add", "--detach", str(worktree), start)
-        target = worktree / relative
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(text, encoding="utf-8")
-        await _git(worktree, "add", "--", relative)
-        if await _git_ok(worktree, "diff", "--cached", "--quiet"):
+        if await _stage_one(worktree, relative, text):
             return ScriptPublication("unchanged", branch, pr_url=open_pr.url if open_pr else None,
                                      detail=f"{relative} already matches {start}")
         await _git(worktree, "commit", "--no-verify", "-m", _commit_message(source_id, reason))

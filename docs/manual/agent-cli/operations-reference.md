@@ -253,7 +253,7 @@ tentacles --json errors list --phase script_pr --since 7d
 tentacles --json runs show <RUN_ID> | jq '.stats | {browser_mode, heal_attempts, pr_status, pr_url, pr_branch}'
 ```
 
-`stats.pr_status` 取值：`created`（新建 PR）/ `updated`（在已开放 PR 追加并评论）/ `unchanged`（与评审分支一致）/ `disabled`（`browser.pr.enabled: false`）/ `error`（已记 `git_or_pr_failed`）。
+`stats.pr_status` 取值：`created`（新建 PR）/ `updated`（在已开放 PR 追加并评论）/ `unchanged`（与评审分支一致）/ `disabled`（`browser.pr.enabled: false`：只提交到本机评审分支，不 push、不调 `gh`）/ `error`（已记 `git_or_pr_failed`）。
 
 ### `browser_replay` 阶段的排障现场（`type: browser` 有界面浏览器源）
 

@@ -293,6 +293,7 @@ sources:
   commit + `gh pr comment`）。PR 固定打上 `ready-for-human` 等配置标签且正文声明“机器生成、需人工 review”；
   绝不强推、绝不直接推 `base_branch`、绝不提交 `data/` 下的轨迹与 meta。`gh` 未登录/离线时只软降级：
   脚本与条目照常保留，`stats.pr_status = "error"` 并记 `git_or_pr_failed`（成功时报告 `pr_status` / `pr_url`）。
+  `browser.pr.enabled: false` 时仍会把脚本提交到**本机**评审分支（不 push、不调 `gh`，`pr_status = "disabled"`）。
 - **主动重提炼**：`tentacles --json sources distill <ID>`（等价 `POST /api/sources/<id>/distill`）跳过“脚本已存在就重放”，
   强制再探索一遍；与评审分支内容一致时为 `pr_status = "unchanged"`，因此重复执行幂等。
 - 完整字段说明见[信息源配置手册](docs/manual/user/sources.md#5-有界面浏览器源type-browser)与

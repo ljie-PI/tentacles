@@ -17,6 +17,7 @@
 脚本在本地生效后还会在系统临时目录的一次性 `git worktree` 中**只提交本目录的这一个 `.py` 文件**到
 `auto/browser-source-<id>` 分支并开/更新 GitHub PR（`browser.pr` 配置）。同一源的已开放 PR 会追加 commit +
 评论，不会重复开单；`gh` 未登录或无推送权限时只软降级（`script_pr` / `git_or_pr_failed`），不影响采集。
+`browser.pr.enabled: false` 时跳过 push 与 `gh`，但仍把脚本提交到本机 `auto/browser-source-<id>` 分支。
 自动生成的脚本同样是需要评审的仓库代码：它由 Agent 写出，合入前请人工过一遍选择器与字段映射。
 
 页面结构大改但旧脚本尚未报错时，用 `tentacles --json sources distill <ID>` 主动重提炼（幂等）。

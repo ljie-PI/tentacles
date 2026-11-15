@@ -273,7 +273,7 @@ sources:
 - PR 标题/正文明确标注 **machine-generated，需人工 review**；提交前还会扫描脚本与正文，若出现 Cookie、Bearer Token、邮箱或本机用户路径则中止推送并记账。
 - 前置条件：本机 `git` 有可写远端，`gh` 已登录（`gh auth status`）。软降级：`gh` 未登录、离线或无推送权限时不影响脚本保存与当轮入库，
   `stats.pr_status = "error"` 且写入 `run_errors`（`phase: script_pr`, `severity: warning`, `error_code: git_or_pr_failed`），可稍后手工补提。
-- `stats.pr_status` 取值：`created`（新建 PR）、`updated`（在已开放 PR 追加）、`unchanged`（脚本与评审分支完全一致，不重复提交）、`disabled`（`browser.pr.enabled: false`）、`error`（软降级）；成功时另有 `stats.pr_url` 与 `stats.pr_branch`。
+- `stats.pr_status` 取值：`created`（新建 PR）、`updated`（在已开放 PR 追加）、`unchanged`（脚本与评审分支完全一致，不重复提交）、`disabled`（`browser.pr.enabled: false`：只提交到本机评审分支，不 push、不开 PR）、`error`（软降级）；成功时另有 `stats.pr_url` 与 `stats.pr_branch`。
 
 ### 显式重提炼（`sources distill`）
 
