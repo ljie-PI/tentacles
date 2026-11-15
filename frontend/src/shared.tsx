@@ -4,7 +4,7 @@ export function Notice({ children, error = false }: { children: ReactNode; error
   return <div className={`notice ${error ? 'error' : ''}`} role={error ? 'alert' : 'status'}>{children}</div>
 }
 
-export function Drawer({ title, close, children }: { title: string; close: () => void; children: ReactNode }) {
+export function Drawer({ title, eyebrow = '条目详情', close, children }: { title: string; eyebrow?: string; close: () => void; children: ReactNode }) {
   const ref = useRef<HTMLDialogElement>(null)
   useEffect(() => {
     const dialog = ref.current
@@ -14,7 +14,7 @@ export function Drawer({ title, close, children }: { title: string; close: () =>
     return () => { dialog?.close(); document.body.style.overflow = previous }
   }, [])
   return <dialog ref={ref} className="drawer" aria-labelledby="drawer-title" onCancel={close}>
-    <header className="drawer-top"><span className="eyebrow">条目详情</span><button autoFocus onClick={close} aria-label="关闭详情">关闭 ×</button></header>
+    <header className="drawer-top"><span className="eyebrow">{eyebrow}</span><button autoFocus onClick={close} aria-label="关闭详情">关闭 ×</button></header>
     <h2 id="drawer-title">{title}</h2>{children}
   </dialog>
 }
