@@ -160,7 +160,9 @@ Session policy stays in `sources/browser_session.py` (one headed work tab per
 `chrome://version`, tab closed on every exit path, never `browser.close()`), and script
 policy stays in `sources/browser_script.py` (an `ast.parse` import/call allowlist gate
 before `exec`) and `sources/browser_contract.py` (the `BrowserExtractOutput` contract,
-kept pure data because a script imports it). A fixed script must not own the
-tab lifecycle: only the runtime can capture the failure site, so timeouts, script errors
-and zero-item results become `browser_replay` events whose `debug_context` carries the
-URL, title, A11y excerpt and traceback.
+kept pure data because a script imports it). Disabling that work tab's HTTP cache over CDP
+(`Network.setCacheDisabled`) is a deliberate replay-freshness decision: a replay must read
+the live page, so it pays a per-tab reload cost instead of trusting the user's Chrome
+cache. A fixed script must not own the tab lifecycle: only the runtime can capture the
+failure site, so timeouts, script errors and zero-item results become `browser_replay`
+events whose `debug_context` carries the URL, title, A11y excerpt and traceback.
