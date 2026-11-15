@@ -330,6 +330,11 @@ def _migrate_v15(conn: sqlite3.Connection) -> None:
 
 
 def _migrate_v16(conn: sqlite3.Connection) -> None:
+    # 硬排除与软 exclude 分离：存量 persona 版本没有硬排除词。
+    conn.execute("ALTER TABLE persona_versions ADD COLUMN hard_exclude TEXT NOT NULL DEFAULT '[]'")
+
+
+def _migrate_v17(conn: sqlite3.Connection) -> None:
     # 外部内容 FTS5 表：只存倒排索引，正文仍留在 items，触发器保证任何写入路径都同步。
     conn.execute("""CREATE VIRTUAL TABLE items_fts USING fts5(
         title, summary, author, content,
@@ -352,7 +357,7 @@ def _migrate_v16(conn: sqlite3.Connection) -> None:
     conn.execute("INSERT INTO items_fts (items_fts) VALUES ('rebuild')")
 
 
-MIGRATIONS: list[Callable[[sqlite3.Connection], None]] = [_migrate_v1, _migrate_v2, _migrate_v3, _migrate_v4, _migrate_v5, _migrate_v6, _migrate_v7, _migrate_v8, _migrate_v9, _migrate_v10, _migrate_v11, _migrate_v12, _migrate_v13, _migrate_v14, _migrate_v15, _migrate_v16]
+MIGRATIONS: list[Callable[[sqlite3.Connection], None]] = [_migrate_v1, _migrate_v2, _migrate_v3, _migrate_v4, _migrate_v5, _migrate_v6, _migrate_v7, _migrate_v8, _migrate_v9, _migrate_v10, _migrate_v11, _migrate_v12, _migrate_v13, _migrate_v14, _migrate_v15, _migrate_v16, _migrate_v17]
 
 _ITEM_COLUMNS = ("id, source_id, kind, external_id, url, page_url, title, author, summary, content,"
                  " content_truncated, published, fetched_at, fingerprint, meta, identity_policy,"
@@ -682,11 +687,14 @@ class Store:
 
     def _insert_persona(self, view: PersonaView) -> None:
         self._conn.execute(
-            "INSERT INTO persona_versions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO persona_versions (name, version, profile, tags, include_keywords, exclude_keywords,"
+            " source, note, created_at, tag_status, tag_error, hard_exclude)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (view.name, view.version, view.profile,
              json.dumps([tag.model_dump() for tag in view.tags], ensure_ascii=False),
              json.dumps(view.include, ensure_ascii=False), json.dumps(view.exclude, ensure_ascii=False),
-             view.source, view.note, to_iso(view.created_at), view.tag_status, view.tag_error))
+             view.source, view.note, to_iso(view.created_at), view.tag_status, view.tag_error,
+             json.dumps(view.hard_exclude, ensure_ascii=False)))
 
     # ---- scheduler tasks ---------------------------------------------------
 
@@ -1371,6 +1379,8 @@ class RunWriter:
                     edit_keywords(old.include if old else [], edit.include_add, edit.include_remove),
             exclude=keywords(edit.exclude_replace) if edit.exclude_replace is not None else
                     edit_keywords(old.exclude if old else [], edit.exclude_add, edit.exclude_remove),
+            hard_exclude=keywords(edit.hard_exclude_replace) if edit.hard_exclude_replace is not None else
+                    edit_keywords(old.hard_exclude if old else [], edit.hard_exclude_add, edit.hard_exclude_remove),
             source=edit.source, note=edit.note, created_at=to_utc(self._now),
             tag_status=edit.tag_status, tag_error=edit.tag_error)
         self._store._insert_persona(view)
@@ -1519,7 +1529,8 @@ def _row_to_item(r: sqlite3.Row) -> Item:
 def _row_to_persona(row: sqlite3.Row) -> PersonaView:
     return PersonaView(name=row['name'], version=row['version'], profile=row['profile'],
                        tags=json.loads(row['tags']), include=json.loads(row['include_keywords']),
-                       exclude=json.loads(row['exclude_keywords']), source=row['source'], note=row['note'],
+                       exclude=json.loads(row['exclude_keywords']), hard_exclude=json.loads(row['hard_exclude']),
+                       source=row['source'], note=row['note'],
                        created_at=from_iso(row['created_at']), tag_status=row['tag_status'],
                        tag_error=row['tag_error'])
 

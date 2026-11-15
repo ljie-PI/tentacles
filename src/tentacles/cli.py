@@ -269,7 +269,8 @@ def reports_show(ctx: typer.Context, report_id: str = typer.Argument(...)) -> No
 def _render_persona(view, out: Console, when: TimeFmt) -> None:
     out.print(Text(f"{view.name} v{view.version} · {view.source} · {when(view.created_at)}", style="bold"))
     out.print(Markdown(view.profile))
-    out.print(Text(f"include: {', '.join(view.include)}\nexclude: {', '.join(view.exclude)}"))
+    out.print(Text(f"include: {', '.join(view.include)}\nexclude: {', '.join(view.exclude)}"
+                   f"\nhard exclude: {', '.join(view.hard_exclude)}"))
     if view.tags:
         out.print(_table("Interest tags", ["tag", "description"],
                          [[tag.tag, tag.description] for tag in view.tags]))
@@ -319,8 +320,10 @@ def persona_set(
     stdin: bool = typer.Option(False, "--stdin", help="从标准输入读取 profile"),
     include: Optional[list[str]] = typer.Option(None, "--include", help="增加 include 关键词，可重复"),
     remove_include: Optional[list[str]] = typer.Option(None, "--remove-include", help="删除 include 关键词，可重复"),
-    exclude: Optional[list[str]] = typer.Option(None, "--exclude", help="增加 exclude 关键词，可重复"),
-    remove_exclude: Optional[list[str]] = typer.Option(None, "--remove-exclude", help="删除 exclude 关键词，可重复"),
+    exclude: Optional[list[str]] = typer.Option(None, "--exclude", help="增加软排除关键词，可重复"),
+    remove_exclude: Optional[list[str]] = typer.Option(None, "--remove-exclude", help="删除软排除关键词，可重复"),
+    hard_exclude: Optional[list[str]] = typer.Option(None, "--hard-exclude", help="增加无条件淘汰的硬排除特征，可重复"),
+    remove_hard_exclude: Optional[list[str]] = typer.Option(None, "--remove-hard-exclude", help="删除硬排除特征，可重复"),
     note: Optional[str] = typer.Option(None, help="版本备注"),
     skip_tags: bool = typer.Option(False, help="跳过标签模型调用，保留已有标签"),
     expected_version: Optional[int] = typer.Option(None, min=0, help="可选并发校验；0 表示预期名称不存在"),
@@ -339,6 +342,7 @@ def persona_set(
                 raise ConfigError(f'cannot read UTF-8 profile file {profile_file}') from None
         return service.set_persona(name, profile=profile, include_add=include, include_remove=remove_include,
                                    exclude_add=exclude, exclude_remove=remove_exclude,
+                                   hard_exclude_add=hard_exclude, hard_exclude_remove=remove_hard_exclude,
                                    note=note, skip_tags=skip_tags, expected_version=expected_version)
     _run(ctx, apply, _render_persona)
 

@@ -996,6 +996,8 @@ export interface components {
             exclude: string[];
             /** Feedback Count */
             feedback_count: number;
+            /** Hard Exclude */
+            hard_exclude?: string[];
             /** Include */
             include: string[];
             /** Name */
@@ -1026,6 +1028,10 @@ export interface components {
             exclude_remove?: string[];
             /** Expected Version */
             expected_version: number;
+            /** Hard Exclude Add */
+            hard_exclude_add?: string[];
+            /** Hard Exclude Remove */
+            hard_exclude_remove?: string[];
             /** Include Add */
             include_add?: string[];
             /** Include Remove */
@@ -1051,6 +1057,8 @@ export interface components {
             created_at: string;
             /** Exclude */
             exclude?: string[];
+            /** Hard Exclude */
+            hard_exclude?: string[];
             /** Include */
             include?: string[];
             /** Name */

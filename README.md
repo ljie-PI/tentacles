@@ -224,6 +224,7 @@ tentacles persona list
 tentacles persona show default
 tentacles persona set default --file ./my-interests.md --note "调整优先级"
 tentacles persona set default --include 机器人 --remove-exclude 科学 --note "更新关键词"
+tentacles persona set default --hard-exclude 限时特惠 --remove-hard-exclude 扫码加群 --note "收紧硬排除"
 cat ./my-interests.md | tentacles persona set work --stdin --skip-tags
 tentacles persona history default
 tentacles persona rollback default 1 --note "恢复初始方向"
@@ -294,7 +295,10 @@ tentacles reports show REPORT_ID
 消费记录独立于 Persona 版本，同一 pipeline 中的条目只消费一次。报告失败时保留未报告状态，修复问题后可以重试。
 报告存入 SQLite，同时按 pipeline 写入 `reports_dir` 下的 Markdown 文件（新文件默认私有权限）。
 
-关键词在标题和摘要中不区分大小写匹配，exclude 优先（0 分）、include 为 1 分，否则 0.5。
+关键词在标题和摘要中不区分大小写匹配：命中 `hard_exclude` 无条件 0 分淘汰；只命中软 `exclude` 也是 0 分；
+但软 `exclude` 与正向词（`include` 或兴趣标签）同时命中时给 0.55 分转交下一关语义精判（`guard_ambiguous_exclude: false` 可关闭）；
+仅正向命中给 1.0 分（配置了 `accept_above: 1.0` 时）或 0.85 分，均未命中 0.5 分。
+每条评估都记录实际命中的具体词项（`match_points`）。
 可启用有执行时限的正则匹配。级联保留每阶段分数、理由及统计；最后阶段出错的条目不缓存，之后可以重试。
 `items list --pipeline ... --rejected` 查看淘汰结果；`items show ID` 包含各 pipeline 的最新评估。
 `items list --persona ... --min-score ... --topic ...` 可不指定 pipeline 直接按画像、匹配分与主题筛选。

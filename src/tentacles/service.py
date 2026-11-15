@@ -143,10 +143,13 @@ class TentaclesService:
     async def set_persona(self, name: str, *, profile: str | None = None, skip_tags: bool = False,
                           include_add: list[str] | None = None, include_remove: list[str] | None = None,
                           exclude_add: list[str] | None = None, exclude_remove: list[str] | None = None,
+                          hard_exclude_add: list[str] | None = None, hard_exclude_remove: list[str] | None = None,
                           note: str | None = None, expected_version: int | None = None) -> PersonaView:
         return await self.personas.set(name, profile=profile, skip_tags=skip_tags,
                                        include_add=include_add, include_remove=include_remove,
-                                       exclude_add=exclude_add, exclude_remove=exclude_remove, note=note, expected_version=expected_version)
+                                       exclude_add=exclude_add, exclude_remove=exclude_remove,
+                                       hard_exclude_add=hard_exclude_add, hard_exclude_remove=hard_exclude_remove,
+                                       note=note, expected_version=expected_version)
 
     # ---- models -------------------------------------------------------------
 

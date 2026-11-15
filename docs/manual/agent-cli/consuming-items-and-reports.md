@@ -92,7 +92,7 @@
   - `topics`：命中的 Persona 兴趣标签列表，即条目的主题归类（`tags` 为兼容别名，二者取值一致）。
   - `match_score`：`0.0 ~ 1.0` 的最终归一化兴趣匹配分数（`score` 为兼容别名）。
   - `match_level`：可读分档，由 `match_score` 与 `passed` 派生：`>= 0.8` 为 `high`、`>= 0.5` 为 `medium`、其余已评估为 `low`；`passed` 为 `false` 时一律 `rejected`；未评估为 `unscored`。
-  - `match_points`：与兴趣匹配的具体点（字符串列表）。当前由评估的 `reason` 派生（`reason` 为兼容别名）；无结构化匹配点时等于 `[reason]`。
+  - `match_points`：与兴趣匹配的具体点（字符串列表）。`keyword` 阶段作为决定阶段时会写入实际命中的具体词项（如 `触发硬排除特征：限时特惠`、`命中排除词「广告」，受正向兴趣「开源、算法」豁免转交语义精筛`）；其他阶段未提供结构化匹配点时等于 `[reason]`（`reason` 为兼容别名）。
   - `pipeline_id` / `persona_version` / `passed` / `stage`：提供该评估的 Pipeline、Persona 版本、通过与否及最终决定阶段。
   - `reason` / `stage_scores`：最终阶段的简短判定理由与级联中走过的每个阶段的完整打分轨迹与模型原始答案（例如 JEV `decision` 阶段在 `details.answers` 中包含 `noul` 概率、`raw_score`、`confidence` 或各标签 `probabilities`）。
 - **评估的有效性**：只有 `input_revision == content_revision`（评估针对当前正文）的评估才会被关联；正文更新后旧评估自动失效，条目回到 `match_level: "unscored"`，直到重新过滤。

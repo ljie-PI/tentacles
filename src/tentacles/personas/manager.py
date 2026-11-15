@@ -48,7 +48,7 @@ class PersonaManager:
                         raise ConfigError(f'personas.{name}.profile_file: cannot read UTF-8 profile file {path}') from None
                 assert profile is not None
                 return PersonaView(name=name, version=1, profile=profile, include=seed.include,
-                                   exclude=seed.exclude, source='seed', note=seed.note,
+                                   exclude=seed.exclude, hard_exclude=seed.hard_exclude, source='seed', note=seed.note,
                                    created_at=to_utc(self._clock()))
             return load
         self._store.seed_personas([(name, loader(name, seed)) for name, seed in config.personas.items()])
@@ -101,6 +101,7 @@ class PersonaManager:
         old = self.get(name, version)
         edit = PersonaEdit(name=old.name, profile=old.profile, tags=old.tags,
                            include_replace=old.include, exclude_replace=old.exclude,
+                           hard_exclude_replace=old.hard_exclude,
                            source='rollback', expected_version=_expected_version(expected_version), note=note if note is not None else f'rollback to version {version}',
                            tag_status='skipped', run_stats={'rollback_from': version})
         return await self._save(edit)
@@ -108,14 +109,19 @@ class PersonaManager:
     async def set(self, name: str, *, profile: str | None = None, skip_tags: bool = False,
                   include_add: list[str] | None = None, include_remove: list[str] | None = None,
                   exclude_add: list[str] | None = None, exclude_remove: list[str] | None = None,
+                  hard_exclude_add: list[str] | None = None, hard_exclude_remove: list[str] | None = None,
                   note: str | None = None, expected_version: int | None = None) -> PersonaView:
-        if profile is None and not any((include_add, include_remove, exclude_add, exclude_remove)) and note is None:
+        if (profile is None and note is None
+                and not any((include_add, include_remove, exclude_add, exclude_remove,
+                             hard_exclude_add, hard_exclude_remove))):
             raise ConfigError('provide a profile, keyword change, or note')
         try:
             edit = PersonaEdit(name=persona_name(name), profile=profile, note=note or '',
                                expected_version=_expected_version(expected_version),
                                include_add=keywords(include_add or []), include_remove=keywords(include_remove or []),
                                exclude_add=keywords(exclude_add or []), exclude_remove=keywords(exclude_remove or []),
+                               hard_exclude_add=keywords(hard_exclude_add or []),
+                               hard_exclude_remove=keywords(hard_exclude_remove or []),
                                tag_status='skipped' if skip_tags else 'unchanged')
         except ValueError as exc:
             raise ConfigError(str(exc)) from None
@@ -178,6 +184,7 @@ class PersonaManager:
     def _proposal_edit(proposal: PersonaProposal, edit: PersonaEdit) -> None:
         edit.profile, edit.tags = proposal.profile, proposal.tags
         edit.include_replace, edit.exclude_replace = proposal.include, proposal.exclude
+        edit.hard_exclude_replace = proposal.hard_exclude
         edit.note = proposal.summary
         edit.run_stats['feedback_count'] = proposal.feedback_count
 
