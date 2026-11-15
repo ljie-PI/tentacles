@@ -29,6 +29,8 @@ from tentacles.timeutil import parse_duration, parse_since, utcnow
 # 近期活动保护窗口：即使早于热库保留期，最近 N 天更新过的条目也留在热库
 ACTIVITY_DAYS = 30
 ARCHIVE_PREFIX = 'tentacles-'
+# SQLite 的 LIMIT/OFFSET 只接受 64 位整数；超出它的分页窗口本页必然为空
+_WINDOW_LIMIT = 2 ** 63 - 1
 
 
 def archive_path(archive_dir: Path, year: int) -> Path:
@@ -106,7 +108,7 @@ class ArchiveManager:
         数据库的限制。BM25 分值是库内统计量：跨库归并时按各库返回的分值排序，
         只有 1–2 字短词（没有倒排分值）才退回发布时间倒序。
         """
-        window = q.offset + q.limit
+        window = min(q.offset + q.limit, _WINDOW_LIMIT)
         hits, total = self.store.list_items(replace(q, limit=window, offset=0))
         merged: list[tuple[int | None, ItemHit]] = [(None, hit) for hit in hits]
         for year in archive_years(self.directory):
