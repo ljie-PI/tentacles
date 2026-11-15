@@ -462,7 +462,7 @@ def items_list(
     source: Optional[list[str]] = typer.Option(None, "--source", "-s", help="按信息源筛选，可重复"),
     since: Optional[str] = typer.Option(None, help="起始时间：时长（如 24h）或 ISO 时间"),
     until: Optional[str] = typer.Option(None, help="截止时间：时长或 ISO 时间"),
-    search: Optional[str] = typer.Option(None, "--search", "-q", help="在标题、摘要、作者中搜索"),
+    search: Optional[str] = typer.Option(None, "--search", "-q", help="在标题、摘要、作者、正文中搜索"),
     limit: int = typer.Option(50, help="每页条数（1–500）"),
     offset: int = typer.Option(0, help="偏移量"),
     pipeline: Optional[str] = typer.Option(None, help="按 pipeline 的最新评估筛选"),
@@ -472,6 +472,7 @@ def items_list(
     topic: Optional[str] = typer.Option(None, "--topic", help="只看命中该主题标签的条目"),
     passed: bool = typer.Option(False, "--passed", help="只看通过的条目，需要 --pipeline"),
     rejected: bool = typer.Option(False, "--rejected", help="只看淘汰的条目，需要 --pipeline"),
+    sort: str = typer.Option("time", help="排序：time（发布时间倒序）或 relevance（BM25，需配合 --search）"),
 ) -> None:
     """列出条目，按发布时间倒序；未传 --pipeline/--persona 时关联最新一次有效评估。"""
     def query(service: TentaclesService):
@@ -480,7 +481,7 @@ def items_list(
         return service.list_items(sources=source, since=since, until=until, search=search,
                                   limit=limit, offset=offset, pipeline=pipeline, persona=persona,
                                   passed=True if passed else False if rejected else None,
-                                  min_score=min_score, topic=topic)
+                                  min_score=min_score, topic=topic, sort=sort)
 
     def render(page, out: Console, when: TimeFmt) -> None:
         columns = ["id", "source", "published", "updated", "title"]
@@ -494,6 +495,48 @@ def items_list(
             rows.append(row)
         out.print(_table(f"Items ({page.offset + 1}-{page.offset + len(page.items)} / {page.total})", columns, rows))
     _run(ctx, query, render)
+
+
+@items_app.command("search")
+def items_search(
+    ctx: typer.Context,
+    query: str = typer.Argument(..., help="检索词，按空白分词；>=3 字词项走 FTS5 索引，1–2 字短词逐个比对"),
+    source: Optional[list[str]] = typer.Option(None, "--source", "-s", help="按信息源筛选，可重复"),
+    since: Optional[str] = typer.Option(None, help="起始时间：时长（如 24h）或 ISO 时间"),
+    until: Optional[str] = typer.Option(None, help="截止时间：时长或 ISO 时间"),
+    limit: int = typer.Option(50, help="每页条数（1–500）"),
+    offset: int = typer.Option(0, help="偏移量"),
+    pipeline: Optional[str] = typer.Option(None, help="按 pipeline 的最新评估筛选"),
+    persona: Optional[str] = typer.Option(None, help="按使用该画像的 pipeline 的最新评估筛选"),
+    min_score: Optional[float] = typer.Option(None, "--min-score", min=0.0, max=1.0,
+                                              help="只看匹配分不低于该值的条目"),
+    topic: Optional[str] = typer.Option(None, "--topic", help="只看命中该主题标签的条目"),
+    passed: bool = typer.Option(False, "--passed", help="只看通过的条目，需要 --pipeline"),
+    rejected: bool = typer.Option(False, "--rejected", help="只看淘汰的条目，需要 --pipeline"),
+    sort: str = typer.Option("relevance", help="排序：relevance（BM25 相关性）或 time"),
+) -> None:
+    """按相关性检索条目，返回 BM25 排名分与命中高亮摘录。"""
+    def run(service: TentaclesService):
+        if passed and rejected:
+            raise ConfigError('choose either --passed or --rejected')
+        return service.search_items(query, sources=source, since=since, until=until,
+                                    limit=limit, offset=offset, pipeline=pipeline, persona=persona,
+                                    passed=True if passed else False if rejected else None,
+                                    min_score=min_score, topic=topic, sort=sort)
+
+    def render(page, out: Console, when: TimeFmt) -> None:
+        columns = ["id", "source", "published", "bm25", "title", "snippet"]
+        if pipeline is not None or persona is not None:
+            columns += ["score", "topics"]
+        rows = []
+        for item in page.items:
+            row = [item.id, item.source_id, when(item.published or item.fetched_at), item.bm25_rank,
+                   item.title, item.snippet]
+            if pipeline is not None or persona is not None:
+                row += [item.match_score, ', '.join(item.topics)]
+            rows.append(row)
+        out.print(_table(f"Matches ({page.offset + 1}-{page.offset + len(page.items)} / {page.total})", columns, rows))
+    _run(ctx, run, render)
 
 
 @items_app.command("show")
