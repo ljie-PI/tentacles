@@ -482,10 +482,107 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/storage/archive": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Storage Archive */
+        post: operations["storage_archive_api_storage_archive_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/storage/reindex": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Storage Reindex */
+        post: operations["storage_reindex_api_storage_reindex_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/storage/status": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Storage Status */
+        get: operations["storage_status_api_storage_status_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        /**
+         * ArchiveExempt
+         * @description 早于截止时间却仍留在热库的条目数；三个原因互不重叠。
+         */
+        ArchiveExempt: {
+            /** Active Feedback */
+            active_feedback: number;
+            /** Recent Activity */
+            recent_activity: number;
+            /** Unresolved Errors */
+            unresolved_errors: number;
+        };
+        /**
+         * ArchiveSnapshot
+         * @description 一个年度冷归档库的体积与行数。
+         */
+        ArchiveSnapshot: {
+            /** Bytes */
+            bytes: number;
+            /** Evaluations */
+            evaluations: number;
+            /** Fts Indexed Rows */
+            fts_indexed_rows: number;
+            /** Items */
+            items: number;
+            /** Path */
+            path: string;
+            /** Year */
+            year: number;
+        };
+        /**
+         * ArchiveYear
+         * @description 一个自然年的归档结果（dry-run 时是计划迁出量）。
+         */
+        ArchiveYear: {
+            /** Bytes */
+            bytes: number;
+            /** Evaluations */
+            evaluations: number;
+            /** Items */
+            items: number;
+            /** Path */
+            path: string;
+            /** Year */
+            year: number;
+        };
         /** DisplaySettings */
         DisplaySettings: {
             /** Timezone */
@@ -724,6 +821,8 @@ export interface components {
         };
         /** ItemDetail */
         ItemDetail: {
+            /** Archive Year */
+            archive_year?: number | null;
             /** Author */
             author: string;
             /**
@@ -824,6 +923,8 @@ export interface components {
         };
         /** ItemView */
         ItemView: {
+            /** Archive Year */
+            archive_year?: number | null;
             /** Author */
             author: string;
             /**
@@ -1169,6 +1270,20 @@ export interface components {
             /** Sources */
             sources: string[];
         };
+        /**
+         * ReindexedDatabase
+         * @description 一次 FTS5 rebuild/optimize 的处理量。
+         */
+        ReindexedDatabase: {
+            /** Path */
+            path: string;
+            /** Rows */
+            rows: number;
+            /** Seconds */
+            seconds: number;
+            /** Year */
+            year: number | null;
+        };
         /** ReportView */
         ReportView: {
             /** Cost */
@@ -1332,6 +1447,88 @@ export interface components {
             tags?: string[];
             /** Type */
             type: string;
+        };
+        /**
+         * StorageArchive
+         * @description `storage archive` 的搬迁结果与豁免统计。
+         */
+        StorageArchive: {
+            /**
+             * Cutoff
+             * Format: date-time
+             */
+            cutoff: string;
+            /** Deferred */
+            deferred: number;
+            /** Dry Run */
+            dry_run: boolean;
+            /** Evaluations */
+            evaluations: number;
+            exempt: components["schemas"]["ArchiveExempt"];
+            /** Items */
+            items: number;
+            /** Seconds */
+            seconds: number;
+            /** Vacuumed */
+            vacuumed: boolean;
+            /** Years */
+            years?: components["schemas"]["ArchiveYear"][];
+        };
+        /** StorageArchiveRequest */
+        StorageArchiveRequest: {
+            /** Before */
+            before?: string | null;
+            /**
+             * Dry Run
+             * @default false
+             */
+            dry_run: boolean;
+            /**
+             * Vacuum
+             * @default false
+             */
+            vacuum: boolean;
+        };
+        /** StorageReindex */
+        StorageReindex: {
+            /** Databases */
+            databases?: components["schemas"]["ReindexedDatabase"][];
+            /** Optimize */
+            optimize: boolean;
+            /** Rows */
+            rows: number;
+            /** Seconds */
+            seconds: number;
+        };
+        /**
+         * StorageStatus
+         * @description 活跃热库的体积、各表行数、条目时间范围与全部年度冷库清单。
+         */
+        StorageStatus: {
+            /** Archive Dir */
+            archive_dir: string;
+            /** Archives */
+            archives?: components["schemas"]["ArchiveSnapshot"][];
+            /** Db Bytes */
+            db_bytes: number;
+            /** Fts Indexed Rows */
+            fts_indexed_rows: number;
+            /** Hot Retention Days */
+            hot_retention_days: number;
+            /** Newest Item At */
+            newest_item_at: string | null;
+            /** Oldest Item At */
+            oldest_item_at: string | null;
+            /** Path */
+            path: string;
+            /** Schema Version */
+            schema_version: number;
+            /** Tables */
+            tables: {
+                [key: string]: number;
+            };
+            /** Wal Bytes */
+            wal_bytes: number;
         };
         /** TaskView */
         TaskView: {
@@ -1728,6 +1925,7 @@ export interface operations {
                 min_score?: number | null;
                 topic?: string | null;
                 sort?: string;
+                include_archive?: boolean;
             };
             header?: never;
             path?: never;
@@ -1811,7 +2009,9 @@ export interface operations {
     };
     item_api_items__item_id__get: {
         parameters: {
-            query?: never;
+            query?: {
+                include_archive?: boolean;
+            };
             header?: never;
             path: {
                 item_id: string;
@@ -3961,6 +4161,262 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["FetchOutcome"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Bad Gateway */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    storage_archive_api_storage_archive_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": components["schemas"]["StorageArchiveRequest"] | null;
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["StorageArchive"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Bad Gateway */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    storage_reindex_api_storage_reindex_post: {
+        parameters: {
+            query?: {
+                optimize?: boolean;
+                include_archive?: boolean;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["StorageReindex"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Bad Gateway */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    storage_status_api_storage_status_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["StorageStatus"];
                 };
             };
             /** @description Bad Request */

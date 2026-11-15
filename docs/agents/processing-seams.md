@@ -158,6 +158,17 @@ trigram index over the four searchable columns, kept in sync by SQL triggers rat
 than by the write paths. `Store.list_items` is that seam: three or more character
 terms come from the index, shorter ones are matched natively per column, so callers
 must not build their own `LIKE` scans to narrow a listing.
+Schema 18 adds the `archived_identities` tombstone table. `archive.py`
+(`ArchiveManager`) owns the two-phase yearly cold archive: it writes complete copies
+into `data/archive/tentacles-YYYY.db` (opened through `Store`, so the cold database
+carries the same schema and its own `items_fts`) and `Store.import_archived` verifies
+rows and index before `Store.archive_move` tombstones identities and deletes the hot
+rows in one transaction. Cold databases are sealed out of WAL mode so a plain
+read-only `Store(read_only=True)` never creates side files. `--include-archive`
+queries each database separately and merges in memory, which keeps cross-year reads
+independent of SQLite's ten-database `ATTACH` limit. Dedup reads `archived_identities`
+through the same identity rules as live rows, so an archived article can never return
+as `new`.
 Pipeline activity is `COALESCE(updated_at, fetched_at)` with expression indexes;
 the Feed deliberately retains `COALESCE(published, fetched_at)`. Filter captures
 the input revision before scoring, and evaluation/report publication validates it
@@ -189,3 +200,18 @@ the live page, so it pays a per-tab reload cost instead of trusting the user's C
 cache. A fixed script must not own the tab lifecycle: only the runtime can capture the
 failure site, so timeouts, script errors and zero-item results become `browser_replay`
 events whose `debug_context` carries the URL, title, A11y excerpt and traceback.
+
+A `type: browser` source without a fixed script is a cold start, and that policy lives in
+the same three modules plus `sources/pi_rpc.py`, `sources/browser_bridge.py`,
+`sources/trajectory.py` and `sources/distiller.py`. The Agent is one controlled
+`pi --mode rpc` child (ephemeral session, no discovery, no built-in tools, model and
+thinking level pinned on the command line); its only tools are the ones the shipped
+`sources/browser_bridge.js` extension registers, each of which arrives back as one
+loopback JSON request so the fetching process — not the Agent — owns the page, the
+trajectory and the ledger. Every step is recorded to a local, redacted
+`data/trajectories/<id>/<run>.jsonl` before the next one runs, and provider usage is
+forwarded to the owning `Run` as it arrives. A distilled script is repository code even
+when an Agent wrote it, so it is written only after the same static gate and a standalone
+trial on a fresh real `BrowserContext`, with one corrective turn; otherwise the failure
+lands as `browser_distill` and no script exists for the next round to replay. The search
+for a script is a filesystem check (`<scripts_dir>/<id>.py`), never a database flag.

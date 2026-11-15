@@ -48,6 +48,8 @@ class FetchContext:
     metrics: UsageTotals = field(default_factory=UsageTotals)
     classify_links: Callable[[list[str]], dict[str, LinkDisposition]] | None = None
     config: AppConfig | None = None
+    # The owning Run, so a local artifact (e.g. a browser trajectory) can be named after it.
+    run_id: int = 0
     # Per-target failure diagnostics, wired straight to the owning RunOperation.
     record_error: Callable[[DiagnosticEvent], None] = discard_diagnostic
 

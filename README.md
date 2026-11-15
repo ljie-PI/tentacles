@@ -64,10 +64,14 @@ tentacles items list --since 24h  # 查看最近 24 小时的条目
 | `tentacles items list` | 列出条目（含截断正文、`page_url` 与最新评估），可按来源、时间、关键词、`--persona`、`--min-score`、`--topic` 筛选，支持分页与 `--sort time\|relevance` |
 | `tentacles items search QUERY` | 全文检索条目：默认按 BM25 相关性排序（标题权重最高），返回 `bm25_rank` 与命中高亮 `snippet`；支持与 `items list` 一致的筛选与分页 |
 | `tentacles items show ID` | 查看条目详情（正文、来源元数据与各 Pipeline 最新评估） |
+| `tentacles items list/search/show ... --include-archive` | 跨年只读查询：与各年度冷归档库归并分页，结果用 `archive_year` 标注年份 |
 | `tentacles tick` | 先并发抓取，再依次过滤、依次运行到期 pipeline |
 | `tentacles scheduler status` | 查看任务频率、到期时间、运行状态 |
 | `tentacles pipelines list/filter/run ID` | 查看 pipeline、只过滤或生成报告 |
 | `tentacles reports list/show ID` | 查看报告列表和全文 |
+| `tentacles storage status` | 热库与各年度冷库的体积、WAL 体积、各表行数与 FTS 行数 |
+| `tentacles storage reindex [--optimize] [--include-archive]` | 在线重建（或合并）FTS5 全文索引 |
+| `tentacles storage archive [--before T] [--dry-run] [--vacuum]` | 把超过 `hot_retention_days` 的条目按自然年搬进冷库 |
 | `tentacles runs list` | 查看运行记录 |
 | `tentacles runs show RUN_ID` | 查看单次运行的统计与本次记录的故障列表 |
 | `tentacles errors list` | 检索故障账本，支持 `--unresolved`、`--source`、`--pipeline`、`--phase`、`--error-code`、`--run-id`、`--since/--until` 与分页 |
@@ -87,6 +91,25 @@ tentacles --json items list --persona default --min-score 0.8 --topic 人工智�
 # 按相关性检索，拿回 BM25 排名分与命中高亮摘录
 tentacles --json items search '广告推荐 AI' --limit 20
 ```
+
+## 冷归档：单活跃热库 + 按年冷库
+
+`data/tentacles.db` 始终是唯一的在线库——7 天深度聚类、30 天反馈回溯、跨月原位更新与外键完整性都不拆分。
+超过 `app.storage.hot_retention_days`（默认 365 天）的历史条目可以按发布年份搬进 `data/archive/tentacles-YYYY.db`
+（每个冷库自带 `items_fts`），热库只留下极窄的去重墓碑 `archived_identities`，因此归档后旧文不会被任何源重新当成新条目：
+
+```bash
+# 空跑：只统计会迁出与豁免的条目，不改任何文件
+tentacles --json storage archive --dry-run
+# 正式归档（先写冷库并校验，再在一个热库事务里写墓碑、删冷行），并回收空间
+tentacles --json storage archive --before 365d --vacuum
+# 跨年检索：热库 + 全部冷库归并分页，archive_year 标注年份
+tentacles --json items search 'iPhone' --include-archive
+```
+
+仍有未决错误、处于反馈窗口内、或最近 30 天还有更新的条目会自动留在热库；中途被打断时热库要么全有要么全无，
+重跑幂等。配置与运维细节见 [配置手册](docs/manual/user/configuration-and-models.md#5-存储冷热分层与年度冷归档appstorage)
+与 [Agent CLI 手册](docs/manual/agent-cli/operations-reference.md#7-存储状态索引重建与冷归档storage)。
 
 ## RSS / Atom 与 Web list / llm 原位更新（可选）
 
@@ -217,9 +240,15 @@ tentacles items list --source reddit-localllama
 ```yaml
 browser:
   cdp_url: http://127.0.0.1:9222          # connect_over_cdp 附着的调试端点
+  webbridge_url: http://127.0.0.1:10086   # 冷启动探索的一次性工具桥接地址（仅回环）
   auto_launch: false                      # 端口无人监听时是否自动拉起有界面 Chrome
   default_profile: Default                # 默认 Chrome Profile，源级 chrome_profile 可覆盖
   scripts_dir: ../scripts/browser_sources # 固化脚本目录（相对本文件）
+  pi:                                     # 冷启动探索与提炼的 Agent 模型
+    binary: pi
+    model: anthropic/claude-sonnet-4-6
+    reasoning_level: high
+    timeout: 300
 
 sources:
   - id: reddit-localllama
@@ -241,7 +270,13 @@ sources:
   路径必须落在 `browser.scripts_dir` 内，`../../` 越界在 `config check` 阶段即报错。
 - **失败可排障**：重放超时/脚本失败/返回 0 条都会写入 `run_errors` 的 `browser_replay` 阶段，
   带上失败瞬间的 `current_url`、`page_title`、精简 A11y 快照与脚本栈帧（`errors show`）。
-- 无脚本时的 `pi` 自动探索与脚本自愈提 PR 分别属于后续工单；`browser.pi` / `browser.pr` 目前只做 schema 校验。
+- **冷启动自动提炼**：当 `scripts/browser_sources/<id>.py` 还不存在时，本轮按 `browser.pi`（`binary` / `model` /
+  `reasoning_level` / `timeout`）拉起受控 `pi --mode rpc` 探索页面，把每一步动作与页面决策上下文写入
+  `data/trajectories/<id>/<run_id>.jsonl`（本地、脱敏、不入 Git），再从轨迹提炼固定脚本；提炼出的脚本必须先通过
+  同一套 AST 门禁**且在真实工作 Tab 上独立试跑成功**（最多一次修正）才会写入仓库，选择器摘要写到
+  `data/browser_sources/<id>.meta.json`。`stats.browser_mode = "distill"` 时报告 `trajectory_path` /
+  `script_path`，Token 与费用归入当轮 Run；未通过则不写脚本并在 `run_errors` 的 `browser_distill` 阶段留现场。
+- 脚本报错自愈与自动提 PR 属于后续工单（`browser.pr` 目前只做 schema 校验）。
 - 完整字段说明见[信息源配置手册](docs/manual/user/sources.md#5-有界面浏览器源type-browser)与
   [脚本契约](scripts/browser_sources/README.md)，排障见 [Agent CLI 运维速查](docs/manual/agent-cli/operations-reference.md)。
 

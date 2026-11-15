@@ -184,6 +184,22 @@ def _browser_errors(options: Mapping[str, Any], where: str, browser: Mapping[str
     return errors
 
 
+def _storage_errors(app: Mapping[str, Any], config_path: Path) -> list[ConfigIssue]:
+    """The archive directory must be its own place, never the live data directory or its parent."""
+    storage = _mapping(app.get('storage'))
+    data_dir = _path(app.get('data_dir', str(AppSpec().data_dir)), config_path)
+    raw = storage.get('archive_dir')
+    archive_dir = _path(raw, config_path) if raw is not None else (
+        data_dir / 'archive' if data_dir is not None else None)
+    if archive_dir is None:
+        return [ConfigIssue('app.storage.archive_dir', 'invalid archive directory path')]
+    if data_dir is not None and (archive_dir == data_dir or archive_dir in data_dir.parents):
+        return [ConfigIssue('app.storage.archive_dir', 'must not be app.data_dir or contain it')]
+    if archive_dir.exists() and not archive_dir.is_dir():
+        return [ConfigIssue('app.storage.archive_dir', 'must be a directory')]
+    return []
+
+
 def _source_options(data: Mapping[str, Any], where: str, *, config_path: Path | None = None,
                     browser: Mapping[str, Any] | None = None) -> tuple[BaseModel | None, list[ConfigIssue]]:
     from tentacles.sources import SOURCE_TYPES
@@ -254,6 +270,7 @@ def validate_config(config: AppConfig | Mapping[str, Any], existing_personas: Co
         AppConfig.model_validate(data)
     except ValidationError as exc:
         errors.extend(_schema_errors(exc))
+    errors.extend(_storage_errors(_mapping(data.get('app')), config_path))
 
     models: dict[str, ModelSpec] = {}
     for name, value in _mapping(data.get('models')).items():

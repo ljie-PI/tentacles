@@ -129,6 +129,8 @@ class ItemView(BaseModel):
     stage_scores: list[StageScore] = Field(default_factory=list)
     # 命中高亮摘录：只有带检索词的列表与检索命令返回，其余为 null
     snippet: str | None = None
+    # 来自冷归档库时是那个自然年，来自热库时为 null
+    archive_year: int | None = None
 
     @model_validator(mode="after")
     def _mirror_aliases(self) -> "ItemView":
@@ -157,9 +159,10 @@ class ItemView(BaseModel):
         return "medium" if self.match_score >= 0.5 else "low"
 
     @classmethod
-    def of(cls, item: Item, evaluation: Evaluation | None = None, *, snippet: str | None = None) -> "ItemView":
+    def of(cls, item: Item, evaluation: Evaluation | None = None, *, snippet: str | None = None,
+           archive_year: int | None = None) -> "ItemView":
         return cls.model_validate({**item.model_dump(), **(evaluation.model_dump() if evaluation else {}),
-                                   "snippet": snippet})
+                                   "snippet": snippet, "archive_year": archive_year})
 
 
 class ItemSearchView(ItemView):
@@ -170,9 +173,10 @@ class ItemSearchView(ItemView):
 
     @classmethod
     def of(cls, item: Item, evaluation: Evaluation | None = None, *, snippet: str | None = None,
-           bm25_rank: float | None = None) -> "ItemSearchView":
+           bm25_rank: float | None = None, archive_year: int | None = None) -> "ItemSearchView":
         return cls.model_validate({**item.model_dump(), **(evaluation.model_dump() if evaluation else {}),
-                                   "snippet": snippet or "", "bm25_rank": bm25_rank})
+                                   "snippet": snippet or "", "bm25_rank": bm25_rank,
+                                   "archive_year": archive_year})
 
 
 class ItemDetail(ItemView):
@@ -265,3 +269,78 @@ class DecisionCompletion(BaseModel):
     model: str
     usage: TokenUsage
     cost: float | None = Field(default=None, ge=0, allow_inf_nan=False)
+
+
+class ArchiveSnapshot(BaseModel):
+    """一个年度冷归档库的体积与行数。"""
+
+    year: int
+    path: str
+    bytes: int
+    items: int
+    evaluations: int
+    fts_indexed_rows: int
+
+
+class StorageStatus(BaseModel):
+    """活跃热库的体积、各表行数、条目时间范围与全部年度冷库清单。"""
+
+    path: str
+    db_bytes: int
+    wal_bytes: int
+    schema_version: int
+    tables: dict[str, int]
+    fts_indexed_rows: int
+    oldest_item_at: datetime | None
+    newest_item_at: datetime | None
+    hot_retention_days: int
+    archive_dir: str
+    archives: list[ArchiveSnapshot] = Field(default_factory=list)
+
+
+class ReindexedDatabase(BaseModel):
+    """一次 FTS5 rebuild/optimize 的处理量。"""
+
+    path: str
+    year: int | None
+    rows: int
+    seconds: float
+
+
+class StorageReindex(BaseModel):
+    optimize: bool
+    rows: int
+    seconds: float
+    databases: list[ReindexedDatabase] = Field(default_factory=list)
+
+
+class ArchiveYear(BaseModel):
+    """一个自然年的归档结果（dry-run 时是计划迁出量）。"""
+
+    year: int
+    path: str
+    items: int
+    evaluations: int
+    bytes: int
+
+
+class ArchiveExempt(BaseModel):
+    """早于截止时间却仍留在热库的条目数；三个原因互不重叠。"""
+
+    recent_activity: int
+    active_feedback: int
+    unresolved_errors: int
+
+
+class StorageArchive(BaseModel):
+    """`storage archive` 的搬迁结果与豁免统计。"""
+
+    dry_run: bool
+    cutoff: datetime
+    vacuumed: bool
+    items: int
+    evaluations: int
+    deferred: int
+    years: list[ArchiveYear] = Field(default_factory=list)
+    exempt: ArchiveExempt
+    seconds: float

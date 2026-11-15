@@ -54,7 +54,7 @@ async def fetch_source(spec: SourceSpec, operation: RunOperation, *, store: Stor
                        seen_links=lambda urls: store.seen_links(spec.id, urls), models=models,
                        metrics=operation.metrics,
                        classify_links=lambda urls: store.classify_links(spec.id, urls),
-                       config=config, record_error=operation.record_error)
+                       config=config, record_error=operation.record_error, run_id=operation.run_id)
     state = await run_store_call(store.get_source_state, spec.id)
     source = build_source(spec)
     try:

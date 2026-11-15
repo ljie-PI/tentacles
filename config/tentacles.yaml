@@ -9,6 +9,9 @@ app:
   timezone: Asia/Shanghai     # 展示与 cron 计算使用的时区；数据库内一律存 UTC
   data_dir: ../data           # SQLite 数据库位置
   reports_dir: ../reports     # 报告输出目录
+  storage:                    # 冷热分层：`tentacles --json storage` 运维命令的默认值
+    hot_retention_days: 365   # 热库保留天数；`storage archive` 默认把更早的条目按自然年搬进冷库
+    archive_dir: ../data/archive  # 年度冷库目录（tentacles-YYYY.db），相对本文件解析
 
 # 命名模型：不填写 key 也可以校验配置、抓取 RSS；实际调用时才报 upstream。
 # provider: openai（包括 DeepSeek/Moonshot/Ollama/vLLM）、anthropic、openrouter。
@@ -75,13 +78,13 @@ personas:
 # 前置条件、Profile 核验与脚本规范见 docs/manual/user/sources.md 与 scripts/browser_sources/README.md。
 browser:
   cdp_url: http://127.0.0.1:9222          # Chrome Remote Debugging 端点（connect_over_cdp 附着）
-  webbridge_url: http://127.0.0.1:10086   # 预留：供 #82 探索期桥接的本地地址
+  webbridge_url: http://127.0.0.1:10086   # 冷启动探索的一次性本地工具桥接端点（仅回环地址）
   auto_launch: false                      # CDP 无人监听时是否自动拉起有界面 Chrome（绝不传 --headless）
   chrome_executable: null                 # 可选显式 Chrome 可执行文件路径
   chrome_user_data_dir: null              # 可选 Chrome User Data 根目录（auto_launch 时必填）
   default_profile: Default                # 默认 Chrome Profile 目录名（如 Default、Profile 1）
   scripts_dir: ../scripts/browser_sources # 固化 Playwright 脚本目录；相对本文件解析
-  pi:                                     # 预留：#82/#83 的探索与自愈模型（当前仅校验）
+  pi:                                     # 冷启动探索与脚本提炼所用的 Agent 模型
     binary: pi
     model: anthropic/claude-sonnet-4-6
     reasoning_level: high                 # off | minimal | low | medium | high | xhigh | max

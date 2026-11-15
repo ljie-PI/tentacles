@@ -40,7 +40,6 @@ function Detail({ id, close, persona, feedbackDisabled }: { id: string; close: (
       <FeedbackButtons itemId={item.id} persona={persona} disabled={feedbackDisabled} />
       {item.content_truncated && <Notice>正文已截断至 1000 字/词，完整内容请打开原站链接阅读。</Notice>}
       <div className="item-content">{item.content || item.summary || '此条目没有正文。'}</div>
-      {(item.match_points || []).length > 0 && <section className="evaluations"><h3>匹配点</h3><MatchPoints points={item.match_points} /></section>}
       {(item.evaluations || []).length > 0 && <section className="evaluations"><h3>Pipeline 评估</h3>{(item.evaluations || []).map(e => <div key={`${e.pipeline_id}-${e.persona_version}`}><strong>{e.pipeline_id}</strong><ScoreBadge score={e.score} /><span className="tag">{e.stage} · {e.passed ? '通过' : '未通过'}</span>{(e.tags || []).map(tag => <span className="tag" key={tag}>{tag}</span>)}<MatchPoints points={e.match_points} /></div>)}</section>}
     </>}
   </Drawer>
