@@ -15,6 +15,14 @@ dispatch branches to the cascade, manager, or configuration validation.
   error, not a rejection. `batch.error` stops the cascade without discarding
   completed decisions. Exceptions and cancellation must leave known charges
   available to the manager's `finally` block.
+  `keyword` is the zero-cost Stage: it reports every hit word in
+  `details.matched_include/matched_exclude/matched_hard_exclude` plus readable
+  `details.match_points`. `hard_exclude` always rejects; a soft `exclude` plus a
+  positive hit scores 0.55, which is above the usual rejection threshold and
+  below any `accept_above`, so the entry reaches the next semantic stage instead
+  of being cached as a 0.0 rejection. The cascade copies only the deciding
+  stage's `match_points` into the evaluation; aggregating several stages belongs
+  to the semantic-stage work, not to this seam.
 - A Processor returns location-free `ReportDraft` values, possibly empty, and
   records completions through the provided callback. It owns content, citations,
   provenance, creation time and report-local usage, not final IDs or paths.
@@ -97,7 +105,9 @@ Schema 13 adds source-scoped alias mappings without changing existing identities
 schema 12 preserves existing rows with revision 1 and null content-update time.
 Schema 14 adds `items.page_url`, `items.content_truncated` and
 `evaluations.match_points` and backfills stored bodies and summaries to the unit
-caps; schema 15 adds the `run_errors` diagnostics ledger.
+caps; schema 15 adds the `run_errors` diagnostics ledger; schema 16 adds
+`persona_versions.hard_exclude` with an empty default, so existing versions stay
+readable and only hard-exclude-less seeds start empty.
 Pipeline activity is `COALESCE(updated_at, fetched_at)` with expression indexes;
 the Feed deliberately retains `COALESCE(published, fetched_at)`. Filter captures
 the input revision before scoring, and evaluation/report publication validates it
