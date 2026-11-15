@@ -13,12 +13,13 @@ import httpx
 from tentacles.config import AppConfig, load_config
 from tentacles.config_validation import validate_config
 from tentacles.errors import ConfigError, ConfigValidationError, NotFound, UpstreamError
+from tentacles.archive import ArchiveManager
 from tentacles.net import HttpPool
 from tentacles.llm.registry import ModelRegistry
 from tentacles.llm.config import Stage
 from tentacles.llm.json import extract_json
-from tentacles.schemas import ConfigCheck, ErrorEventDetail, ErrorEventView, FetchOutcome, ItemDetail, ItemSearchView, ItemView, Page, RunDetail, RunView, SourceView, TaskView, ModelView, Completion, ModelTest, TickOutcome
-from tentacles.store import ItemQuery, RunErrorQuery, Store
+from tentacles.schemas import ConfigCheck, ErrorEventDetail, ErrorEventView, FetchOutcome, ItemDetail, ItemSearchView, ItemView, Page, RunDetail, RunView, SourceView, TaskView, ModelView, Completion, ModelTest, TickOutcome, StorageArchive, StorageReindex, StorageStatus
+from tentacles.store import ItemHit, ItemQuery, RunErrorQuery, Store
 from tentacles.personas.manager import PersonaManager
 from tentacles.personas.models import FeedbackView, PersonaProposal, PersonaView
 from tentacles.pipelines.models import PipelineOutcome, ReportView, PipelineView
@@ -40,6 +41,7 @@ class TentaclesService:
         self.config = config
         self.store = store
         self._clock = clock
+        self.archive = ArchiveManager(config, store, clock=clock)
         self._model_http = HttpPool(transport)
         self.models = ModelRegistry(config.models, config.defaults, self._model_http, clock=clock)
         self.personas = PersonaManager(store, self.models, clock, config.persona_update)
@@ -219,29 +221,39 @@ class TentaclesService:
                    search: str | None = None, limit: int = 50, offset: int = 0,
                    pipeline: str | None = None, persona: str | None = None, passed: bool | None = None,
                    min_score: float | None = None, topic: str | None = None,
-                   sort: str = 'time') -> Page[ItemView]:
+                   sort: str = 'time', include_archive: bool = False) -> Page[ItemView]:
         q = self._item_query(sources=sources, kinds=kinds, since=since, until=until, search=search,
                              limit=limit, offset=offset, pipeline=pipeline, persona=persona,
                              passed=passed, min_score=min_score, topic=topic, sort=sort)
-        hits, total = self.store.list_items(q)
-        views = [ItemView.of(hit.item, hit.evaluation, snippet=hit.snippet or None) for hit in hits]
+        hits, total = self._item_hits(q, include_archive)
+        views = [ItemView.of(hit.item, hit.evaluation, snippet=hit.snippet or None, archive_year=year)
+                 for year, hit in hits]
         return Page[ItemView](items=views, total=total, limit=q.limit, offset=q.offset)
 
     def search_items(self, query: str, *, sources: list[str] | None = None, kinds: list[str] | None = None,
                      since: str | datetime | None = None, until: str | datetime | None = None,
                      limit: int = 50, offset: int = 0, pipeline: str | None = None,
                      persona: str | None = None, passed: bool | None = None, min_score: float | None = None,
-                     topic: str | None = None, sort: str = 'relevance') -> Page[ItemSearchView]:
+                     topic: str | None = None, sort: str = 'relevance',
+                     include_archive: bool = False) -> Page[ItemSearchView]:
         """Rank Items against one query; the same filters as `list_items` apply."""
         if not query.strip():
             raise ConfigError('search query must not be empty')
         q = self._item_query(sources=sources, kinds=kinds, since=since, until=until, search=query,
                              limit=limit, offset=offset, pipeline=pipeline, persona=persona,
                              passed=passed, min_score=min_score, topic=topic, sort=sort)
-        hits, total = self.store.list_items(q)
+        hits, total = self._item_hits(q, include_archive)
         views = [ItemSearchView.of(hit.item, hit.evaluation, snippet=hit.snippet,
-                                   bm25_rank=hit.bm25_rank) for hit in hits]
+                                   bm25_rank=hit.bm25_rank, archive_year=year)
+                 for year, hit in hits]
         return Page[ItemSearchView](items=views, total=total, limit=q.limit, offset=q.offset)
+
+    def _item_hits(self, q: ItemQuery, include_archive: bool) -> tuple[list[tuple[int | None, ItemHit]], int]:
+        """热库结果；`include_archive` 时与各年冷库归并后再分页。"""
+        if not include_archive:
+            hits, total = self.store.list_items(q)
+            return [(None, hit) for hit in hits], total
+        return self.archive.merge_items(q)
 
     def _item_query(self, *, sources: list[str] | None, kinds: list[str] | None,
                     since: str | datetime | None, until: str | datetime | None, search: str | None,
@@ -284,13 +296,19 @@ class TentaclesService:
                          pipeline_id=pipeline, pipeline_ids=pipeline_ids, passed=passed,
                          min_score=min_score, topic=topic or None, sort=order)
 
-    def get_item(self, item_id: str) -> ItemDetail:
+    def get_item(self, item_id: str, *, include_archive: bool = False) -> ItemDetail:
+        """单条详情；热库没有时，`include_archive` 会到各年冷库依次查找。"""
+        year: int | None = None
         item = self.store.get_item(item_id)
-        if item is None:
+        if item is not None:
+            latest, evaluations = (self.store.latest_evaluation(item_id),
+                                   self.store.item_evaluations(item_id))
+        elif include_archive and (found := self.archive.find_item(item_id)) is not None:
+            year, item, latest, evaluations = found
+        else:
             raise NotFound(f"unknown item {item_id!r}")
-        latest = self.store.latest_evaluation(item_id)
         return ItemDetail.model_validate({**item.model_dump(), **(latest.model_dump() if latest else {}),
-                                          "evaluations": self.store.item_evaluations(item_id)})
+                                          "evaluations": evaluations, "archive_year": year})
 
     def submit_feedback(self, item_id: str, *, rating: int, persona: str | None = None,
                         note: str = '') -> FeedbackView:
@@ -298,6 +316,23 @@ class TentaclesService:
 
     def get_feedback(self, item_id: str, *, persona: str | None = None) -> FeedbackView | None:
         return self.personas.get_feedback(item_id, persona=persona)
+
+    # ---- storage ------------------------------------------------------------
+
+    def storage_status(self) -> StorageStatus:
+        return self.archive.status()
+
+    def storage_reindex(self, *, optimize: bool = False, include_archive: bool = False) -> StorageReindex:
+        return self.archive.reindex(optimize=optimize, include_archive=include_archive)
+
+    def storage_archive(self, *, before: str | None = None, dry_run: bool = False,
+                        vacuum: bool = False) -> StorageArchive:
+        """把超过保留期的条目按自然年搬进冷库；`--dry-run` 纯只读。"""
+        if before is not None and not before.strip():
+            raise ConfigError('--before must be a duration like 365d or an ISO date')
+        if vacuum and dry_run:
+            raise ConfigError('--vacuum cannot be combined with --dry-run')
+        return self.archive.archive(before=before, dry_run=dry_run, vacuum=vacuum)
 
     # ---- runs ---------------------------------------------------------------
 

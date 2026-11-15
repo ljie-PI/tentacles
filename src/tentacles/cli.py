@@ -85,9 +85,11 @@ models_app = typer.Typer(help="命名模型", no_args_is_help=True, cls=_JsonErr
 persona_app = typer.Typer(help="Persona 与版本管理", no_args_is_help=True, cls=_JsonErrorsGroup)
 pipelines_app = typer.Typer(help="Pipeline 过滤与运行", no_args_is_help=True, cls=_JsonErrorsGroup)
 reports_app = typer.Typer(help="报告", no_args_is_help=True, cls=_JsonErrorsGroup)
+storage_app = typer.Typer(help="存储与冷归档", no_args_is_help=True, cls=_JsonErrorsGroup)
 errors_app = typer.Typer(help="故障诊断账本", no_args_is_help=True, cls=_JsonErrorsGroup)
 app.add_typer(pipelines_app, name="pipelines")
 app.add_typer(reports_app, name="reports")
+app.add_typer(storage_app, name="storage")
 app.add_typer(errors_app, name="errors")
 app.add_typer(persona_app, name="persona")
 app.add_typer(models_app, name="models")
@@ -262,6 +264,63 @@ def reports_show(ctx: typer.Context, report_id: str = typer.Argument(...)) -> No
     """查看报告全文及引用元数据。"""
     _run(ctx, lambda s: s.get_report(report_id),
          lambda report, out, when: out.print(Markdown(report.markdown)))
+
+
+# ---- storage ----------------------------------------------------------------
+
+@storage_app.command("status")
+def storage_status(ctx: typer.Context) -> None:
+    """热库体积、各表行数、条目时间范围与年度冷库清单。"""
+    def render(status, out: Console, when: TimeFmt) -> None:
+        out.print(Text(f"{status.path} · schema {status.schema_version}", style="bold"))
+        out.print(f"db {status.db_bytes} B · WAL {status.wal_bytes} B · 保留 {status.hot_retention_days} 天",
+                  markup=False)
+        out.print(f"条目时间范围：{when(status.oldest_item_at)} → {when(status.newest_item_at)}", markup=False)
+        out.print(_table("Tables", ["table", "rows"],
+                         [[name, count] for name, count in status.tables.items()]))
+        out.print(_table("Archives", ["year", "items", "evaluations", "fts", "bytes", "path"],
+                         [[archive.year, archive.items, archive.evaluations, archive.fts_indexed_rows,
+                           archive.bytes, archive.path] for archive in status.archives]))
+    _run(ctx, lambda s: s.storage_status(), render)
+
+
+@storage_app.command("reindex")
+def storage_reindex(ctx: typer.Context,
+                    optimize: bool = typer.Option(False, help="合并索引段，而不是全量重建"),
+                    include_archive: bool = typer.Option(False, "--include-archive", help="同时处理各年度冷库")) -> None:
+    """在线重建（或优化）FTS5 全文索引，可带上全部冷库。"""
+    def render(result, out: Console, when: TimeFmt) -> None:
+        out.print(Text(f"{'optimize' if result.optimize else 'rebuild'} · {result.rows} 行 · {result.seconds:.3f}s"))
+        out.print(_table("Reindex", ["database", "year", "rows", "seconds"],
+                         [[database.path, database.year, database.rows, f"{database.seconds:.3f}"]
+                          for database in result.databases]))
+    _run(ctx, lambda s: s.storage_reindex(optimize=optimize, include_archive=include_archive), render)
+
+
+@storage_app.command("archive")
+def storage_archive(
+    ctx: typer.Context,
+    before: Optional[str] = typer.Option(None, "--before",
+        help="截止时间：时长（如 365d）或 ISO 日期；默认按 app.storage.hot_retention_days"),
+    dry_run: bool = typer.Option(False, "--dry-run", help="只统计将迁出与豁免的条目，不创建或修改任何文件"),
+    vacuum: bool = typer.Option(False, "--vacuum", help="归档后执行 VACUUM 回收热库空间"),
+) -> None:
+    """把超过保留期的条目按自然年搬入冷归档库。"""
+    def render(result, out: Console, when: TimeFmt) -> None:
+        out.print(Text(f"{'dry-run' if result.dry_run else 'archived'} · 截止 {when(result.cutoff)} · "
+                       f"{result.items} 条 / {result.evaluations} 评估 · {result.seconds:.3f}s"))
+        out.print(_table("Archive", ["year", "items", "evaluations", "bytes", "path"],
+                         [[year.year, year.items, year.evaluations, year.bytes, year.path]
+                          for year in result.years]))
+        out.print(_table("Exempt", ["reason", "items"],
+                         [["近期活动", result.exempt.recent_activity],
+                          ["活跃反馈", result.exempt.active_feedback],
+                          ["未决错误", result.exempt.unresolved_errors]]))
+        if result.deferred:
+            out.print(Text(f"{result.deferred} 条在归档期间被更新，已留在热库", style="yellow"))
+        if result.vacuumed:
+            out.print(Text("VACUUM 已完成"))
+    _run(ctx, lambda s: s.storage_archive(before=before, dry_run=dry_run, vacuum=vacuum), render)
 
 
 # ---- persona ----------------------------------------------------------------
@@ -477,6 +536,8 @@ def items_list(
     passed: bool = typer.Option(False, "--passed", help="只看通过的条目，需要 --pipeline"),
     rejected: bool = typer.Option(False, "--rejected", help="只看淘汰的条目，需要 --pipeline"),
     sort: str = typer.Option("time", help="排序：time（发布时间倒序）或 relevance（BM25，需配合 --search）"),
+    include_archive: bool = typer.Option(False, "--include-archive",
+                                         help="连同各年度冷归档库一起查询，结果标注 archive_year"),
 ) -> None:
     """列出条目，按发布时间倒序；未传 --pipeline/--persona 时关联最新一次有效评估。"""
     def query(service: TentaclesService):
@@ -485,17 +546,22 @@ def items_list(
         return service.list_items(sources=source, since=since, until=until, search=search,
                                   limit=limit, offset=offset, pipeline=pipeline, persona=persona,
                                   passed=True if passed else False if rejected else None,
-                                  min_score=min_score, topic=topic, sort=sort)
+                                  min_score=min_score, topic=topic, sort=sort,
+                                  include_archive=include_archive)
 
     def render(page, out: Console, when: TimeFmt) -> None:
         columns = ["id", "source", "published", "updated", "title"]
         if pipeline is not None or persona is not None:
             columns += ["score", "topics", "match level", "stage"]
+        if include_archive:
+            columns.append("archive")
         rows = []
         for item in page.items:
             row = [item.id, item.source_id, when(item.published or item.fetched_at), when(item.updated_at), item.title]
             if pipeline is not None or persona is not None:
                 row += [item.match_score, ', '.join(item.topics), item.match_level, item.stage]
+            if include_archive:
+                row.append(item.archive_year)
             rows.append(row)
         out.print(_table(f"Items ({page.offset + 1}-{page.offset + len(page.items)} / {page.total})", columns, rows))
     _run(ctx, query, render)
@@ -518,6 +584,8 @@ def items_search(
     passed: bool = typer.Option(False, "--passed", help="只看通过的条目，需要 --pipeline"),
     rejected: bool = typer.Option(False, "--rejected", help="只看淘汰的条目，需要 --pipeline"),
     sort: str = typer.Option("relevance", help="排序：relevance（BM25 相关性）或 time"),
+    include_archive: bool = typer.Option(False, "--include-archive",
+                                         help="连同各年度冷归档库一起检索，结果标注 archive_year"),
 ) -> None:
     """按相关性检索条目，返回 BM25 排名分与命中高亮摘录。"""
     def run(service: TentaclesService):
@@ -526,29 +594,38 @@ def items_search(
         return service.search_items(query, sources=source, since=since, until=until,
                                     limit=limit, offset=offset, pipeline=pipeline, persona=persona,
                                     passed=True if passed else False if rejected else None,
-                                    min_score=min_score, topic=topic, sort=sort)
+                                    min_score=min_score, topic=topic, sort=sort,
+                                    include_archive=include_archive)
 
     def render(page, out: Console, when: TimeFmt) -> None:
         columns = ["id", "source", "published", "bm25", "title", "snippet"]
         if pipeline is not None or persona is not None:
             columns += ["score", "topics"]
+        if include_archive:
+            columns.append("archive")
         rows = []
         for item in page.items:
             row = [item.id, item.source_id, when(item.published or item.fetched_at), item.bm25_rank,
                    item.title, item.snippet]
             if pipeline is not None or persona is not None:
                 row += [item.match_score, ', '.join(item.topics)]
+            if include_archive:
+                row.append(item.archive_year)
             rows.append(row)
         out.print(_table(f"Matches ({page.offset + 1}-{page.offset + len(page.items)} / {page.total})", columns, rows))
     _run(ctx, run, render)
 
 
 @items_app.command("show")
-def items_show(ctx: typer.Context, item_id: str = typer.Argument(..., help="条目 id")) -> None:
+def items_show(ctx: typer.Context, item_id: str = typer.Argument(..., help="条目 id"),
+               include_archive: bool = typer.Option(False, "--include-archive",
+                                                    help="热库没有该条目时到各年度冷归档库查找")) -> None:
     """查看条目详情（含正文）。"""
     def render(d, out: Console, when: TimeFmt) -> None:
         out.print(Text(d.title, style="bold"))
         out.print(f"{d.source_id} · {when(d.published or d.fetched_at)} · {d.url}\n", markup=False)
+        if d.archive_year is not None:
+            out.print(f"归档年份：{d.archive_year}（冷库只读）", markup=False)
         if d.page_url:
             out.print(f"page: {d.page_url}", markup=False)
         if d.updated_at is not None:
@@ -556,7 +633,7 @@ def items_show(ctx: typer.Context, item_id: str = typer.Argument(..., help="条�
         if d.content_truncated:
             out.print("正文已截断至 1000 字/词，完整内容请打开 url。", markup=False)
         out.print(d.content or d.summary, markup=False)
-    _run(ctx, lambda s: s.get_item(item_id), render)
+    _run(ctx, lambda s: s.get_item(item_id, include_archive=include_archive), render)
 
 
 @items_app.command('feedback')
