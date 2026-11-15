@@ -12,7 +12,7 @@ from tentacles.llm.registry import ModelRegistry
 from tentacles.models import Item
 from tentacles.personas.models import PersonaView
 from tentacles.pipelines.config import PipelineSpec, StageSpec
-from tentacles.pipelines.models import Evaluation, ReportDraft, StageBatch
+from tentacles.pipelines.models import Evaluation, ReportDraft, StageBatch, StageScore
 from tentacles.schemas import Completion
 
 
@@ -32,6 +32,10 @@ class ModelRequirement:
 class Stage(Protocol):
     @property
     def models(self) -> tuple[ModelRequirement, ...]: ...
+
+    def item_error_code(self, scored: StageScore) -> str:
+        """The shared vocabulary code for an item this stage could not score."""
+        ...
 
     async def score(self, items: list[Item], persona: PersonaView, stage: StageSpec,
                     index: int, models: ModelRegistry, progress: StageBatch) -> StageBatch:

@@ -7,22 +7,14 @@ from typing import Any
 from tentacles.diagnostics import DiagnosticEvent
 from tentacles.models import Item
 from tentacles.personas.models import PersonaView
+from tentacles.pipelines.adapters import Stage
 from tentacles.pipelines.config import PipelineSpec, StageSpec
 from tentacles.llm.registry import ModelRegistry
 from tentacles.pipelines.registry import STAGES
 from tentacles.pipelines.models import Evaluation, StageScore, StageBatch, FilterBatch
 
 
-def _item_error_code(stage_type: str, scored: StageScore) -> str:
-    """The shared vocabulary code for an item a stage could not score."""
-    if stage_type == 'keyword':
-        return 'regex_timeout' if scored.error in {'TimeoutError', 'Timeout'} else 'unexpected_exception'
-    if stage_type == 'llm':
-        return 'llm_batch_parse_error'
-    return 'decision_item_error'
-
-
-def _record_item_error(progress: FilterBatch, spec: PipelineSpec, stage: StageSpec,
+def _record_item_error(progress: FilterBatch, spec: PipelineSpec, adapter: Stage, stage: StageSpec,
                        index: int, item: Item, scored: StageScore) -> None:
     """Leave the concrete item behind when the cascade gives up on it.
 
@@ -32,7 +24,7 @@ def _record_item_error(progress: FilterBatch, spec: PipelineSpec, stage: StageSp
     if progress.record_error is None:
         return
     progress.record_error(DiagnosticEvent(
-        phase='filter_stage', error_code=_item_error_code(stage.type, scored),
+        phase='filter_stage', error_code=adapter.item_error_code(scored),
         message=f'{stage.type} stage could not score this item'
                 + (f' ({scored.error})' if scored.error else ''),
         pipeline_id=spec.id, item_id=item.id, source_id=item.source_id,
@@ -61,7 +53,8 @@ async def filter_items(items: list[Item], persona: PersonaView, spec: PipelineSp
         last = i == len(spec.filters) - 1
         forwarded = []
         batch = progress.batches[i]
-        await STAGES[stage.type].score(pending, persona, stage, i, models, batch)
+        adapter = STAGES[stage.type]
+        await adapter.score(pending, persona, stage, i, models, batch)
         scores = batch.scores
         for item, scored in zip(pending, scores):
             traces[item.id].append(scored)
@@ -71,7 +64,7 @@ async def filter_items(items: list[Item], persona: PersonaView, spec: PipelineSp
                     counts[i]['forwarded'] += 1
                     forwarded.append(item)
                     continue
-                _record_item_error(progress, spec, stage, i, item, scored)
+                _record_item_error(progress, spec, adapter, stage, i, item, scored)
                 continue
             rejected = scored.score < stage.rejection
             accepted = not rejected and (last or stage.accept_above is not None and scored.score >= stage.accept_above)

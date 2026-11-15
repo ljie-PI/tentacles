@@ -121,7 +121,8 @@ ledger: `FetchContext.record_error`, `FilterBatch.record_error` and the
 (`exc.diagnosed`) so one failure never produces both a concrete row and a generic
 whole-source row. `filtering.filter_items` records an item error only where the
 cascade finally gives up on that item: `score=None` on the last stage, or any
-stage that aborts the batch.
+stage that aborts the batch; the code it records is the one that stage's adapter
+declares in `item_error_code`, never a branch on `stage.type`.
 
 Schema 13 adds source-scoped alias mappings without changing existing identities;
 schema 12 preserves existing rows with revision 1 and null content-update time.

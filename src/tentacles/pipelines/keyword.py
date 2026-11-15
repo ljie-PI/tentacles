@@ -74,6 +74,9 @@ def _keyword(item: Item, persona: PersonaView, stage: KeywordSpec, index: int) -
 class KeywordStage:
     models: tuple[ModelRequirement, ...] = ()
 
+    def item_error_code(self, scored: StageScore) -> str:
+        return 'regex_timeout' if scored.error in {'TimeoutError', 'Timeout'} else 'unexpected_exception'
+
     async def score(self, items: list[Item], persona: PersonaView, stage: StageSpec,
                     index: int, models: ModelRegistry, progress: StageBatch) -> StageBatch:
         assert isinstance(stage, KeywordSpec)

@@ -123,3 +123,6 @@ async def score_llm(items: list[Item], persona: PersonaView, stage: StageSpec, i
 class LLMStage:
     models = (ModelRequirement('filter', 'chat'),)
     score = staticmethod(score_llm)
+
+    def item_error_code(self, scored: StageScore) -> str:
+        return 'llm_batch_parse_error'

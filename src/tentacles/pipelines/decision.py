@@ -60,3 +60,6 @@ async def score_decisions(items: list[Item], persona: PersonaView, stage: StageS
 class DecisionStage:
     models = (ModelRequirement('decision', 'decision'),)
     score = staticmethod(score_decisions)
+
+    def item_error_code(self, scored: StageScore) -> str:
+        return 'decision_item_error'
