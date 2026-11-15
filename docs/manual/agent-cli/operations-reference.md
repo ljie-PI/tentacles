@@ -168,7 +168,7 @@ tentacles --json runs show 8
 | `--unresolved` | 仅返回 `resolved_at IS NULL`（当前仍未消警）的记录 |
 | `--source ID` | 按信息源筛选（定位某个源漏抓了哪些条目） |
 | `--pipeline ID` | 按 Pipeline 筛选（过滤/成稿阶段故障） |
-| `--phase P` | 按阶段筛选：`fetch_page`、`parse_entry`、`fetch_detail`、`imap_fetch`、`browser_replay`、`browser_heal`、`llm_extract`、`filter_stage`、`report_process`、`script_pr` |
+| `--phase P` | 按阶段筛选：`fetch_page`、`parse_entry`、`fetch_detail`、`imap_fetch`、`browser_replay`、`browser_heal`、`browser_distill`、`llm_extract`、`filter_stage`、`report_process`、`script_pr` |
 | `--error-code CODE` | 按机器错误码筛选，见下方速查表 |
 | `--run-id N` | 只看某一次运行（与 `failed_targets[].error_id` 配合可精确定位） |
 | `--since T` / `--until T` | 时间窗，接受时长（`30m`、`7d`）或 UTC ISO 时间 |
@@ -253,6 +253,29 @@ tentacles --json errors show <ERROR_ID>
 - 若同时看到 `phase: "fetch_page"` 的 `unexpected_exception`，那是整源失败的外层记录（如 Chrome 未开调试端口、
   Profile 不匹配）；`message` 里带可直接执行的启动命令。
 
+### `browser_distill` 阶段的排障现场（`type: browser` 冷启动）
+
+`scripts/browser_sources/<id>.py` 还不存在时，本轮走“受控 `pi` 探索 → 录制轨迹 → 提炼脚本 → 静态门禁 + 真实试跑”
+路径。它在 `sources fetch` 的 `stats` 中报告 `browser_mode: "distill"`，成功时额外带 `trajectory_path`（本地轨迹
+JSONL）与 `script_path`（刚写入的固化脚本）；失败时带 `browser_distill_failed: true`，不写脚本、不动旧游标。
+
+```bash
+# 冷启动成功后确认脚本落地与轨迹位置
+tentacles --json sources fetch reddit-localllama | jq '.[0].stats | {browser_mode, trajectory_path, script_path, new}'
+# 冷启动失败：拿现场
+tentacles --json errors list --source reddit-localllama --phase browser_distill --unresolved
+tentacles --json errors show <ERROR_ID>
+```
+
+| `error_code` | 含义与处理建议 |
+| :--- | :--- |
+| `pi_rpc_failed` | `pi` 子进程没能完成探索：二进制/模型/凭据/`browser.pi.timeout` 问题，源没有 `task` 文字，或 Agent 一个动作都没做。`debug_context.trajectory_path` 指向本地轨迹；`message` 会带上子进程的错误原因，必要时先手工跑一次 `pi --model <model> --thinking <level> "hello"` 验证凭据 |
+| `pi_script_rejected` | 提炼出的脚本未通过 AST 门禁或真实试跑（报错 / 超时 / 0 条 / 条目缺有效链接 / `page_url` 不是入口页），已用完 1 次修正机会。`debug_context.last_failure` 是最后一次拒绝原因，`trajectory_path` 指向本轮轨迹；看完页面结构与轨迹后调整 `task` 措辞或人工写脚本 |
+
+- 两类记录都同时把 Token 与费用留在当轮 Run 上（`tentacles --json runs show <run_id>` 的 `stats.usage` / `stats.cost`），
+  失败不代表免费：`pi` 已经完成的回合照常计费。
+- `retryable` 恒为 `false`：同一配置下一轮会重试冷启动（每轮都重新计费），需要先修正配置或 `task`。
+
 ### `runs show <RUN_ID>`
 
 在 `RunView` 全部字段之外追加 `errors: ErrorEventView[]`（同样是轻量列表，不含 `debug_context`）；运行 ID 不存在时退出码 `3`。
@@ -272,6 +295,8 @@ tentacles --json errors show <ERROR_ID>
 | `browser_replay` | `playwright_selector_timeout` | 固化 Playwright 脚本等待选择器超时（页面结构已变） |
 | `browser_replay` | `script_assertion_failed` | 脚本试跑抓到 0 条或断言不通过 |
 | `browser_heal` | `pi_heal_exhausted` | `pi` 自愈后试跑仍未通过，需要人工介入 |
+| `browser_distill` | `pi_rpc_failed` | 冷启动时受控 `pi` 子进程未完成探索（二进制/模型/超时/无 `task`） |
+| `browser_distill` | `pi_script_rejected` | 提炼脚本未通过静态门禁或真实试跑（已用过 1 次修正） |
 | `script_pr` | `git_or_pr_failed` | 脚本已生成，但推送分支或 `gh pr create` 失败 |
 | `llm_extract` | `hallucinated_link_dropped` | 模型返回了页面内不存在的链接，该条已被丢弃 |
 | `llm_extract` | `invalid_json_schema` | 模型返回违反严格 JSON Schema，本轮降级 |
@@ -285,7 +310,7 @@ tentacles --json errors show <ERROR_ID>
 | `report_process` | `citation_out_of_range` | 报告引用编号越界，已丢弃该引用 |
 | 任意阶段 | `unexpected_exception` | 未被更具体分类的失败（`retryable` 为 `false`，需查 `exception_type` 与栈帧） |
 
-> 当前版本会在抓取阶段产出 `http_status_error` / `http_redirect_blocked` / `network_timeout` / `connection_failed` / `selector_no_match` / `empty_extracted_body` / `hallucinated_link_dropped` / `invalid_json_schema` / `feed_parse_error` / `entry_unusable` / `imap_auth_failed` / `imap_message_parse_error` / `unexpected_exception`，有界面浏览器源产出 `playwright_selector_timeout` / `script_assertion_failed`，在过滤阶段产出 `decision_item_error` / `llm_batch_parse_error` / `regex_timeout` / `filter_stage_aborted`，在报告阶段产出 `summarize_batch_unparsed` / `citation_out_of_range`；`script_pr` / `pi_heal_exhausted` 等机器码是账本已预留的共享词表，由 `type: browser` 自愈与提 PR 相关实现按同一契约写入，未出现的码不会作为「未知」返回。
+> 当前版本会在抓取阶段产出 `http_status_error` / `http_redirect_blocked` / `network_timeout` / `connection_failed` / `selector_no_match` / `empty_extracted_body` / `hallucinated_link_dropped` / `invalid_json_schema` / `feed_parse_error` / `entry_unusable` / `imap_auth_failed` / `imap_message_parse_error` / `unexpected_exception`，有界面浏览器源产出 `playwright_selector_timeout` / `script_assertion_failed`（重放）与 `pi_rpc_failed` / `pi_script_rejected`（冷启动提炼），在过滤阶段产出 `decision_item_error` / `llm_batch_parse_error` / `regex_timeout` / `filter_stage_aborted`，在报告阶段产出 `summarize_batch_unparsed` / `citation_out_of_range`；`script_pr` / `pi_heal_exhausted` 等机器码是账本已预留的共享词表，由 `type: browser` 自愈与提 PR 相关实现按同一契约写入，未出现的码不会作为「未知」返回。
 
 ### 各模块的 `debug_context` 现场（实战对照）
 
