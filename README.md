@@ -1,8 +1,8 @@
 # tentacles
 
-个人信息与新闻管理系统：从多种信息源抓取内容，按个人 persona 过滤，再用 LLM 加工成日报、深度报道或邮件简报。整体设计见 [#18](https://github.com/ljie-PI/tentacles/issues/18)，实施进度见它的子 issue。
+个人信息与新闻管理系统：从多种信息源抓取内容，按个人 persona 过滤，再用 LLM 加工成日报、深度报道或邮件简报。
 
-> 已支持配置驱动的 RSS、IMAP 和网页抓取、去重入库、持久化调度、命名模型、版本化 Persona 与反馈演化，以及 keyword/decision/llm 级联过滤和 digest/deep/summarize/none 处理器。Web 端已提供 Feed、Sources、Pipelines、Reports、Runs、Settings 和 Persona 管理；实现与验证范围见 [规格核对](docs/spec-18-audit.md)。
+> 已支持配置驱动的 RSS、IMAP 和网页抓取、去重入库、持久化调度、命名模型、版本化 Persona 与反馈演化，以及 keyword/decision/llm 级联过滤和 digest/deep/summarize/none 处理器。Web 端已提供 Feed、Sources、Pipelines、Reports、Runs、Settings 和 Persona 管理；文档见 [用户手册](docs/manual/user/README.md) 与 [Agent CLI 手册](docs/manual/agent-cli/README.md)，实现与验证范围见 [规格核对](docs/agents/spec-18-audit.md)。
 
 ## 网页与 REST API
 
@@ -24,7 +24,7 @@ Pipelines（过滤／运行）、Reports（Markdown 表格与引用条目）、R
 
 默认仅监听本机；对外监听前设置 `.env` 的 `TENTACLES_SERVER_TOKEN`，并配置 HTTPS 代理。
 除了健康检查，API 均需 Bearer token（若已配置），静态网页无需鉴权。
-详细配置、路由、错误及关闭行为见 [HTTP API](docs/http-api.md) 和 [前端开发说明](frontend/README.md)。
+详细配置、路由、错误及关闭行为见 [Web 与 HTTP API 手册](docs/manual/user/server-and-web.md) 和 [前端开发说明](frontend/README.md)。
 
 ## 快速开始
 
@@ -69,7 +69,7 @@ tentacles items list --since 24h  # 查看最近 24 小时的条目
 | `tentacles reports list/show ID` | 查看报告列表和全文 |
 | `tentacles runs list` | 查看运行记录 |
 
-所有命令都支持 `--json`：stdout 只输出一个 JSON 值，日志写到 stderr，退出码按错误类型区分。给 agent 用的完整说明见 [docs/agent-cli.md](docs/agent-cli.md)。
+所有命令都支持 `--json`：stdout 只输出一个 JSON 值，日志写到 stderr，退出码按错误类型区分。给 agent 用的完整说明见 [Agent CLI 手册](docs/manual/agent-cli/README.md)。
 
 ## RSS / Atom 与 Web list / llm 原位更新（可选）
 
@@ -108,7 +108,7 @@ Web llm 缓存当前已校验的有界条目描述，不缓存详情全文；首
 有效输入、完整有效链接集合及模型/抽取配置不变时，后续额外抽取调用为零；仅 API key 轮换不失效。
 缓存命中且开启详情仍会请求本轮存在的可刷新详情；不开详情则跳过写入，不刷新时间或重新评分。
 链接移除后不再重访；源没有再次提供内容时无法更新，模型未抽取的链接也不会凭历史记录补猜。
-开启/关闭方法、空值规则与详情并发/凭据隔离见 [Web 信息源协议](docs/web-sources.md)。
+开启/关闭方法、空值规则与详情并发/凭据隔离见 [信息源配置手册](docs/manual/user/sources.md)。
 
 内容变化后，条目保留 ID、首次 `fetched_at` 和消费关系，设置 `updated_at` 并使旧评分失效。
 pipeline 的过滤、手动重评、待报告计数和排序按 `updated_at`（否则 `fetched_at`）进入窗口；
@@ -177,7 +177,7 @@ tentacles items list --source web-page
 tentacles items show ITEM_ID
 ```
 
-使用前替换 URL 与选择器；属性写法、500-id 缓存、Cookie 隔离和页面版本身份见 [Web 信息源协议](docs/web-sources.md)。
+使用前替换 URL 与选择器；属性写法、500-id 缓存、Cookie 隔离和页面版本身份见 [信息源配置手册](docs/manual/user/sources.md)。
 仅支持静态页面；非 2xx（含重定向）会失败并保留旧游标。
 杂乱页面还可用 `mode: llm`，由 extract 阶段模型从有界“文本 + 链接”中抽取；编造链接被丢弃。
 `web-llm` 示例默认关闭，启用后会发送页面内容并可能产生费用；严格 JSON、缓存与计费规则同见协议。
@@ -195,7 +195,7 @@ tentacles items show ITEM_ID
 
 OpenAI 兼容接口使用 `provider: openai` 和服务的 API 根路径 `base_url`（如 `http://localhost:11434/v1`）；
 Anthropic 使用 `provider: anthropic`，OpenRouter 用 `provider: openrouter`。
-详细字段、重试规则和 JSON 输出见 [agent 命令说明](docs/agent-cli.md)。
+详细字段、重试规则和 JSON 输出见 [基础配置与命名模型](docs/manual/user/configuration-and-models.md) 与 [Agent CLI 手册](docs/manual/agent-cli/README.md)。
 
 ## Persona 与兴趣标签
 
@@ -284,7 +284,7 @@ tentacles reports show REPORT_ID
 `pipelines filter ID --reevaluate` 会删除窗口内当前 Persona 版本的已有评估并重算，
 消费账本不会被清除，不会让已报告条目重新进入报告。
 `processor.type: none` 不调用模型、不生成文件，但将选中的条目标记为已消费。
-完整参数和自定义提示词格式见 [agent 命令说明](docs/agent-cli.md)。
+完整参数和自定义提示词格式见 [画像、过滤与报告流水线](docs/manual/user/pipelines-and-personas.md)。
 
 ## deep 重大事件深度报道
 
@@ -303,7 +303,7 @@ tentacles reports list --pipeline weekly-deep
 一次运行可能生成多份报告：`report_id` 是第一份，`stats.report_ids` 列出全部 ID。
 通过过滤、按分数选出的前 `max_items` 条全部标记为已消费，包括未达阈值或超出报道上限的事件。
 整个批次成功才发布报告和消费条目；生成或发布失败则整批保留待重试，已知模型费用仍记入运行记录。
-`none` 处理器完全不生成报告，也按同样的条目上限消费。详见 [处理器协议](docs/agent-cli.md#deep-处理器)。
+`none` 处理器完全不生成报告，也按同样的条目上限消费。详见 [画像、过滤与报告流水线](docs/manual/user/pipelines-and-personas.md)。
 
 ## summarize 邮件简报与待办
 
@@ -321,7 +321,7 @@ tentacles reports show REPORT_ID
 仍视为已报告；传输或模型调用失败则不消费本次条目，可以重试。设置 `enabled: true` 后会按
 pipeline 的频率自动运行；手动命名调用不受开关限制。确认隐私和费用后再开启。
 
-批次关联规则、截止日期排序、提示词格式和费用语义见 [summarize 协议](docs/agent-cli.md#summarize-处理器)。
+批次关联规则、截止日期排序、提示词格式和费用语义见 [画像、过滤与报告流水线](docs/manual/user/pipelines-and-personas.md)。
 
 ## Decision（JEV）过滤
 

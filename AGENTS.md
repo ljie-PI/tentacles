@@ -11,3 +11,7 @@ Default five-role vocabulary (`needs-triage`, `needs-info`, `ready-for-agent`, `
 ### Domain docs
 
 Single-context: one `GLOSSARY.md` + `docs/adr/` at the repo root. See `docs/agents/domain.md`.
+
+### Implementation plans
+
+Local feature, architecture, and refactor plans live in `docs/plans/` (gitignored; publish finalized plans to GitHub Issues). See `docs/agents/plans.md`.
