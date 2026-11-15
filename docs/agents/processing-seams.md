@@ -68,6 +68,10 @@ the identity-keyed observation map for batches without distinct same-ID fields.
 `RunWriter.upsert_items` shares that implementation so batch writes, source cursor,
 counts and Run completion commit together. Counts-only metadata is not content;
 the `to`/`cc` fields used by summarize do participate in content comparison.
+A non-email Item must keep an http(s) `url` or `page_url`: the fetch pipeline
+drops entries that have neither, counts them in `stats.invalid_url` and logs the
+rejection, so an adapter must set one of the two before publishing and must not
+rely on Store to repair it.
 
 Web list and llm share `WebSource._classify_links` and `_details`. The opt-in
 classification callback uses `Store.classify_links`: `refresh` requires this
@@ -91,12 +95,20 @@ are revisited.
 
 Schema 13 adds source-scoped alias mappings without changing existing identities;
 schema 12 preserves existing rows with revision 1 and null content-update time.
+Schema 14 adds `items.page_url`, `items.content_truncated` and
+`evaluations.match_points` and backfills stored bodies and summaries to the unit
+caps; schema 15 adds the `run_errors` diagnostics ledger.
 Pipeline activity is `COALESCE(updated_at, fetched_at)` with expression indexes;
 the Feed deliberately retains `COALESCE(published, fetched_at)`. Filter captures
 the input revision before scoring, and evaluation/report publication validates it
 under the same write lock as updates. Updates delete obsolete evaluations, not
 consumption, feedback or reports. Fresh evaluations inherit the pipeline's
 existing consumption marker even when they reject or accept the latest content.
+`Store.list_items` always attaches the latest evaluation whose `input_revision`
+matches the Item's `content_revision`, which is what the default association and
+`--min-score` / `--topic` / `--persona` rely on: a stale newest evaluation must
+never hide an older valid one, and any new ranked query must filter revisions
+before ranking, not after.
 
 A temporary no-model Stage can replace an entry in `registry.STAGES` to exercise
 item-error forwarding, rejection/acceptance and batch aborts through the same

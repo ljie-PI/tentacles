@@ -23,12 +23,19 @@ tentacles serve
 - 前端开发调试可在一个终端运行 `tentacles serve --no-scheduler`，另一个终端在 `frontend/` 下运行 `pnpm dev`（Vite 代理默认保留同源 `Host` 头）。
 
 ### Web 页面功能一览
-- **Feed**：按来源、时间、搜索词、Pipeline 及通过/淘汰状态筛选资讯，展开抽屉阅读全文与各阶段评分轨迹，直接按画像点赞/点踩。
+- **Feed**：按来源、时间、搜索词、Pipeline 及通过/淘汰状态筛选资讯，展开抽屉阅读全文与各阶段评分轨迹，直接按画像点赞/点踩；抽屉同时给出原文链接与来源入口页 `page_url`，正文被截断到 1000 字/词时显示提示。
 - **Sources**：查看各源上次抓取状态、累计条目数、下次运行时间，支持单源或全量立即抓取。
 - **Pipelines**：查看待报告条目数（`pending`），手动触发“仅过滤”或“立即生成报告”。
 - **Reports**：渲染 GFM Markdown 报告表格与引用，点击引用可跳回 Feed 原文（为保护隐私，报告渲染禁用原始 HTML 且不自动加载外部图片，图片转为安全无引荐来源链接）。
 - **Personas**：编辑画像与关键词、输入演化指令预览行级 Diff 后应用、查看不可变版本历史并一键回滚。
-- **Runs & Settings**：每 5 秒自动刷新运行记录、Token 用量与已知模型费用；在浏览器本地保存 Bearer Token、在线测试各模型连通性并查看调度循环状态。
+- **Runs & Settings**：每 5 秒自动刷新运行记录、Token 用量与已知模型费用；点开单次运行可查看本次运行的故障账本与逐条排障现场。在浏览器本地保存 Bearer Token、在线测试各模型连通性并查看调度循环状态。
+
+### 在 Runs 页排查漏抓内容
+
+1. 在 **Runs** 表里点某次运行的「故障详情」，抽屉会列出本次运行写入的所有故障事件（阶段、错误码、目标地址、是否可重试、是否已消警）；
+2. 点某条事件的「查看排障现场」才会请求 `GET /api/errors/{id}`，展开已脱敏的 `debug_context`（请求地址、HTTP 状态与特征响应头、HTML 骨架、栈帧）；
+3. 业务数据即使整批回滚也不会丢这些记录；目标在后续重试中成功获取或评估后，该条会自动标上「已消警」和消警时间；
+4. 在命令行侧，`tentacles --json errors list --unresolved` 给出当前仍然漏抓的清单，详见 **[Agent CLI 操作速查](../agent-cli/operations-reference.md)**。
 
 ---
 
@@ -100,7 +107,7 @@ OpenAPI 规范位于 `GET /api/openapi.json`（前端也可离线运行 `pnpm ge
 | `GET /api/sources` | `SourceView[]` |
 | `POST /api/sources/fetch` | 可选请求体 `{ "ids": ["id"] }`，返回 `FetchOutcome[]`（省略时抓取全部启用源） |
 | `POST /api/sources/{source_id}/fetch` | 单个 `FetchOutcome`；未知 ID `404`，运行中 `409`，抓取失败 `502` |
-| `GET /api/items` | `Page[ItemView]`；支持重复 `sources`/`kinds` 及 `since`、`until`、`search`、`pipeline`、`passed`、`limit`(1–500)、`offset` |
+| `GET /api/items` | `Page[ItemView]`；支持重复 `sources`/`kinds` 及 `since`、`until`、`search`、`pipeline`、`persona`、`passed`、`min_score`、`topic`、`limit`(1–500)、`offset` |
 | `GET /api/items/{item_id}` | `ItemDetail`（含完整正文 `content`、`meta` 与各 Pipeline 的 `evaluations`） |
 | `GET /api/items/{item_id}/feedback` | 查询指定或默认 `persona` 的最新投票 `FeedbackView \| null` |
 | `POST /api/items/{item_id}/feedback` | 提交投票：`rating` 为 `+1` 或 `-1`，可选 `persona`、`note` |
@@ -117,7 +124,12 @@ OpenAPI 规范位于 `GET /api/openapi.json`（前端也可离线运行 `pnpm ge
 | `GET /api/reports` / `GET /api/reports/{id}` | 分页报告列表 `Page[ReportView]` 与单篇报告全文 |
 | `GET /api/models` / `POST /api/models/{name}/test` | 命名模型列表（仅含 `key_configured` 布尔值）与连通性探测 `ModelTest` |
 | `GET /api/runs` | `RunView[]`（可选筛选 `kind`、`target`、`limit`） |
+| `GET /api/runs/{run_id}` | `RunDetail`：`RunView` 字段 + 本次运行关联的 `errors: ErrorEventView[]`；未知 ID `404` |
+| `GET /api/errors` | `Page[ErrorEventView]`；支持 `unresolved`、`source`、`pipeline`、`phase`、`error_code`、`run_id`、`since`、`until`、`limit`(1–500)、`offset`。列表**不含** `debug_context`，以保证高密度扫描 |
+| `GET /api/errors/{error_id}` | `ErrorEventDetail`（`ErrorEventView` 加已脱敏的 `debug_context`，序列化后 ≤ 16 KB）；未知 ID `404` |
 | `GET /api/scheduler` / `GET /api/scheduler/loop` | 持久化任务列表 `TaskView[]` 与内置轮询器循环统计 |
 | `POST /api/scheduler/tick` | 手动触发一轮到期任务 `TickOutcome[]` |
 
 错误响应统一格式为 `{"error": {"code": "...", "message": "..."}}`，状态码映射：`invalid -> 400`、`unauthorized -> 401`、`forbidden -> 403`、`not_found -> 404`、`conflict / busy -> 409`、`upstream -> 502`、`error -> 500`。
+
+`ItemView` 直接返回 `page_url`、截断后的 `content`、`content_truncated` 以及最新一次有效评估的 `topics`、`match_score`、`match_level`、`match_points`（`tags` / `score` / `reason` 为兼容别名）；`/api/items` 与 CLI `items list` 共用同一套字段与筛选语义。

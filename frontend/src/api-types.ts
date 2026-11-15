@@ -4,6 +4,40 @@
  */
 
 export interface paths {
+    "/api/errors": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Errors */
+        get: operations["errors_api_errors_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/errors/{error_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Error Detail */
+        get: operations["error_detail_api_errors__error_id__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/health": {
         parameters: {
             query?: never;
@@ -312,6 +346,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/runs/{run_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Run Detail */
+        get: operations["run_detail_api_runs__run_id__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/scheduler": {
         parameters: {
             query?: never;
@@ -447,6 +498,93 @@ export interface components {
             /** Message */
             message: string;
         };
+        /** ErrorEventDetail */
+        ErrorEventDetail: {
+            /** Debug Context */
+            debug_context?: {
+                [key: string]: unknown;
+            };
+            /** Error Code */
+            error_code: string;
+            /** Exception Type */
+            exception_type: string | null;
+            /** External Id */
+            external_id: string | null;
+            /** Http Status */
+            http_status: number | null;
+            /** Id */
+            id: number;
+            /** Item Id */
+            item_id: string | null;
+            /** Message */
+            message: string;
+            /**
+             * Occurred At
+             * Format: date-time
+             */
+            occurred_at: string;
+            /** Page Url */
+            page_url: string | null;
+            /** Phase */
+            phase: string;
+            /** Pipeline Id */
+            pipeline_id: string | null;
+            /** Resolved At */
+            resolved_at: string | null;
+            /** Retryable */
+            retryable: boolean;
+            /** Run Id */
+            run_id: number;
+            /** Severity */
+            severity: string;
+            /** Source Id */
+            source_id: string | null;
+            /** Target Url */
+            target_url: string | null;
+        };
+        /**
+         * ErrorEventView
+         * @description One diagnostics-ledger row as listed: no debug context, to stay scannable.
+         */
+        ErrorEventView: {
+            /** Error Code */
+            error_code: string;
+            /** Exception Type */
+            exception_type: string | null;
+            /** External Id */
+            external_id: string | null;
+            /** Http Status */
+            http_status: number | null;
+            /** Id */
+            id: number;
+            /** Item Id */
+            item_id: string | null;
+            /** Message */
+            message: string;
+            /**
+             * Occurred At
+             * Format: date-time
+             */
+            occurred_at: string;
+            /** Page Url */
+            page_url: string | null;
+            /** Phase */
+            phase: string;
+            /** Pipeline Id */
+            pipeline_id: string | null;
+            /** Resolved At */
+            resolved_at: string | null;
+            /** Retryable */
+            retryable: boolean;
+            /** Run Id */
+            run_id: number;
+            /** Severity */
+            severity: string;
+            /** Source Id */
+            source_id: string | null;
+            /** Target Url */
+            target_url: string | null;
+        };
         /** ErrorResponse */
         ErrorResponse: {
             error: components["schemas"]["ErrorDetail"];
@@ -465,6 +603,8 @@ export interface components {
             input_revision: number;
             /** Item Id */
             item_id: string;
+            /** Match Points */
+            match_points?: string[];
             /** Passed */
             passed: boolean;
             /** Persona Version */
@@ -483,6 +623,20 @@ export interface components {
             stage_scores?: components["schemas"]["StageScore"][];
             /** Tags */
             tags?: string[];
+        };
+        /**
+         * FailedTargetRef
+         * @description Pointer from an execution result to one persisted ledger row.
+         */
+        FailedTargetRef: {
+            /** Error Code */
+            error_code: string;
+            /** Error Id */
+            error_id: number;
+            /** External Id */
+            external_id?: string | null;
+            /** Target Url */
+            target_url?: string | null;
         };
         /** FeedbackView */
         FeedbackView: {
@@ -514,6 +668,13 @@ export interface components {
             dup: number;
             /** Error */
             error?: string | null;
+            /**
+             * Error Count
+             * @default 0
+             */
+            error_count: number;
+            /** Failed Targets */
+            failed_targets?: components["schemas"]["FailedTargetRef"][];
             /** New */
             new: number;
             /** Run Id */
@@ -565,8 +726,16 @@ export interface components {
         ItemDetail: {
             /** Author */
             author: string;
-            /** Content */
+            /**
+             * Content
+             * @default
+             */
             content: string;
+            /**
+             * Content Truncated
+             * @default false
+             */
+            content_truncated: boolean;
             /** Evaluations */
             evaluations?: components["schemas"]["Evaluation"][];
             /** External Id */
@@ -586,11 +755,25 @@ export interface components {
              * Kind
              * @enum {string}
              */
-            kind: "rss" | "email" | "web";
+            kind: "rss" | "email" | "web" | "browser";
+            /**
+             * Match Level
+             * @enum {string}
+             */
+            readonly match_level: "high" | "medium" | "low" | "rejected" | "unscored";
+            /** Match Points */
+            match_points?: string[];
+            /** Match Score */
+            match_score?: number | null;
             /** Meta */
             meta: {
                 [key: string]: unknown;
             };
+            /**
+             * Page Url
+             * @default
+             */
+            page_url: string;
             /** Passed */
             passed?: boolean | null;
             /** Persona Version */
@@ -615,6 +798,8 @@ export interface components {
             tags?: string[];
             /** Title */
             title: string;
+            /** Topics */
+            topics?: string[];
             /** Updated At */
             updated_at?: string | null;
             /** Url */
@@ -640,6 +825,16 @@ export interface components {
             /** Author */
             author: string;
             /**
+             * Content
+             * @default
+             */
+            content: string;
+            /**
+             * Content Truncated
+             * @default false
+             */
+            content_truncated: boolean;
+            /**
              * Fetched At
              * Format: date-time
              */
@@ -652,7 +847,21 @@ export interface components {
              * Kind
              * @enum {string}
              */
-            kind: "rss" | "email" | "web";
+            kind: "rss" | "email" | "web" | "browser";
+            /**
+             * Match Level
+             * @enum {string}
+             */
+            readonly match_level: "high" | "medium" | "low" | "rejected" | "unscored";
+            /** Match Points */
+            match_points?: string[];
+            /** Match Score */
+            match_score?: number | null;
+            /**
+             * Page Url
+             * @default
+             */
+            page_url: string;
             /** Passed */
             passed?: boolean | null;
             /** Persona Version */
@@ -677,6 +886,8 @@ export interface components {
             tags?: string[];
             /** Title */
             title: string;
+            /** Topics */
+            topics?: string[];
             /** Updated At */
             updated_at?: string | null;
             /** Url */
@@ -720,6 +931,17 @@ export interface components {
             name: string;
             /** Provider */
             provider: string;
+        };
+        /** Page[ErrorEventView] */
+        Page_ErrorEventView_: {
+            /** Items */
+            items: components["schemas"]["ErrorEventView"][];
+            /** Limit */
+            limit: number;
+            /** Offset */
+            offset: number;
+            /** Total */
+            total: number;
         };
         /** Page[ItemView] */
         Page_ItemView_: {
@@ -868,6 +1090,13 @@ export interface components {
         PipelineOutcome: {
             /** Error */
             error?: string | null;
+            /**
+             * Error Count
+             * @default 0
+             */
+            error_count: number;
+            /** Failed Targets */
+            failed_targets?: components["schemas"]["FailedTargetRef"][];
             /** Pipeline Id */
             pipeline_id: string;
             /** Report Id */
@@ -956,6 +1185,34 @@ export interface components {
             /** Title */
             title: string;
             usage: components["schemas"]["TokenUsage"];
+        };
+        /** RunDetail */
+        RunDetail: {
+            /** Cost */
+            cost: number | null;
+            /** Error */
+            error: string | null;
+            /** Errors */
+            errors?: components["schemas"]["ErrorEventView"][];
+            /** Finished At */
+            finished_at: string | null;
+            /** Id */
+            id: number;
+            /** Kind */
+            kind: string;
+            /**
+             * Started At
+             * Format: date-time
+             */
+            started_at: string;
+            /** Stats */
+            stats: {
+                [key: string]: unknown;
+            };
+            /** Status */
+            status: string;
+            /** Target */
+            target: string;
         };
         /** RunView */
         RunView: {
@@ -1097,6 +1354,13 @@ export interface components {
             /** Error */
             error?: string | null;
             /**
+             * Error Count
+             * @default 0
+             */
+            error_count: number;
+            /** Failed Targets */
+            failed_targets?: components["schemas"]["FailedTargetRef"][];
+            /**
              * Kind
              * @enum {string}
              */
@@ -1174,6 +1438,185 @@ export interface components {
 }
 export type $defs = Record<string, never>;
 export interface operations {
+    errors_api_errors_get: {
+        parameters: {
+            query?: {
+                unresolved?: boolean;
+                source?: string | null;
+                pipeline?: string | null;
+                phase?: string | null;
+                error_code?: string | null;
+                run_id?: number | null;
+                since?: string | null;
+                until?: string | null;
+                limit?: number;
+                offset?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Page_ErrorEventView_"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Bad Gateway */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    error_detail_api_errors__error_id__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                error_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEventDetail"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Bad Gateway */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
     health_api_health_get: {
         parameters: {
             query?: never;
@@ -1261,14 +1704,17 @@ export interface operations {
         parameters: {
             query?: {
                 sources?: string[] | null;
-                kinds?: ("rss" | "email" | "web")[] | null;
+                kinds?: ("rss" | "email" | "web" | "browser")[] | null;
                 since?: string | null;
                 until?: string | null;
                 search?: string | null;
                 limit?: number;
                 offset?: number;
                 pipeline?: string | null;
+                persona?: string | null;
                 passed?: boolean | null;
+                min_score?: number | null;
+                topic?: string | null;
             };
             header?: never;
             path?: never;
@@ -2830,6 +3276,91 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["RunView"][];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Bad Gateway */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    run_detail_api_runs__run_id__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                run_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RunDetail"];
                 };
             };
             /** @description Bad Request */

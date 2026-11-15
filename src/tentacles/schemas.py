@@ -4,13 +4,18 @@ the REST API returns them, so both adapters share one contract."""
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any, Generic, Literal, TypeVar
+from typing import TYPE_CHECKING, Any, Generic, Literal, TypeVar
 
-from pydantic import BaseModel, Field, computed_field
+from pydantic import BaseModel, Field, computed_field, model_validator
 
+from tentacles.diagnostics import FailedTargetRef
 from tentacles.models import Item, ItemKind
 from tentacles.pipelines.models import Evaluation, StageScore, PipelineOutcome
 from tentacles.llm.types import TokenUsage as TokenUsage
+
+if TYPE_CHECKING:
+    from tentacles.diagnostics import RunErrorRecord
+    from tentacles.store import RunRecord
 
 T = TypeVar("T")
 
@@ -51,6 +56,8 @@ class FetchOutcome(BaseModel):
     updated: int = 0
     error: str | None = None
     stats: dict[str, Any] = {}
+    error_count: int = 0
+    failed_targets: list[FailedTargetRef] = Field(default_factory=list)
 
 
 class TickOutcome(BaseModel):
@@ -66,6 +73,8 @@ class TickOutcome(BaseModel):
     report_id: str | None = None
     stats: dict[str, Any] = Field(default_factory=dict)
     error: str | None = None
+    error_count: int = 0
+    failed_targets: list[FailedTargetRef] = Field(default_factory=list)
 
     @classmethod
     def of_fetch(cls, outcome: FetchOutcome) -> 'TickOutcome':
@@ -95,8 +104,12 @@ class ItemView(BaseModel):
     kind: ItemKind
     title: str
     url: str
+    page_url: str = ""
     author: str
     summary: str
+    # 入库即截断到 1000 units 的正文，以及是否发生过截断
+    content: str = ""
+    content_truncated: bool = False
     published: datetime | None
     fetched_at: datetime
     updated_at: datetime | None = None
@@ -104,24 +117,50 @@ class ItemView(BaseModel):
     pipeline_id: str | None = None
     persona_version: int | None = None
     passed: bool | None = None
+    # topics / match_score / match_points 是下游 Agent 的主字段，
+    # tags / score / reason 为兼容别名，两者取值一致。
+    topics: list[str] = Field(default_factory=list)
+    match_score: float | None = None
+    match_points: list[str] = Field(default_factory=list)
     score: float | None = None
     tags: list[str] = Field(default_factory=list)
     reason: str | None = None
     stage: str | None = None
     stage_scores: list[StageScore] = Field(default_factory=list)
 
+    @model_validator(mode="after")
+    def _mirror_aliases(self) -> "ItemView":
+        if not self.topics:
+            self.topics = list(self.tags)
+        if self.match_score is None:
+            self.match_score = self.score
+        if not self.match_points and self.reason:
+            self.match_points = [self.reason]
+        if not self.reason and self.match_points:
+            self.reason = self.match_points[0]
+        return self
+
     @computed_field
     def is_updated(self) -> bool:
         return self.updated_at is not None
 
+    @computed_field
+    def match_level(self) -> Literal["high", "medium", "low", "rejected", "unscored"]:
+        if self.passed is False:
+            return "rejected"
+        if self.match_score is None:
+            return "unscored"
+        if self.match_score >= 0.8:
+            return "high"
+        return "medium" if self.match_score >= 0.5 else "low"
+
     @classmethod
-    def of(cls, item: Item) -> "ItemView":
-        return cls.model_validate(item.model_dump(include=set(cls.model_fields)))
+    def of(cls, item: Item, evaluation: Evaluation | None = None) -> "ItemView":
+        return cls.model_validate({**item.model_dump(), **(evaluation.model_dump() if evaluation else {})})
 
 
 class ItemDetail(ItemView):
     external_id: str
-    content: str
     fingerprint: str
     meta: dict[str, Any]
     evaluations: list[Evaluation] = Field(default_factory=list)
@@ -137,6 +176,44 @@ class RunView(BaseModel):
     stats: dict[str, Any]
     cost: float | None
     error: str | None
+
+    @classmethod
+    def of(cls, record: RunRecord) -> "RunView":
+        return cls.model_validate(record, from_attributes=True)
+
+
+class ErrorEventView(BaseModel):
+    """One diagnostics-ledger row as listed: no debug context, to stay scannable."""
+
+    id: int
+    run_id: int
+    occurred_at: datetime
+    phase: str
+    severity: str
+    source_id: str | None
+    pipeline_id: str | None
+    page_url: str | None
+    target_url: str | None
+    item_id: str | None
+    external_id: str | None
+    error_code: str
+    http_status: int | None
+    exception_type: str | None
+    message: str
+    retryable: bool
+    resolved_at: datetime | None
+
+    @classmethod
+    def of(cls, record: RunErrorRecord) -> "ErrorEventView":
+        return cls.model_validate(record, from_attributes=True)
+
+
+class ErrorEventDetail(ErrorEventView):
+    debug_context: dict[str, Any] = Field(default_factory=dict)
+
+
+class RunDetail(RunView):
+    errors: list[ErrorEventView] = Field(default_factory=list)
 
 
 class ModelView(BaseModel):

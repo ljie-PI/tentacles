@@ -24,7 +24,7 @@ from tentacles.asyncutil import gather_draining, run_blocking, run_store_call
 from tentacles.errors import UpstreamError
 from tentacles.models import Item, ItemObservation, LinkDisposition, normalize_url
 from tentacles.sources.base import FetchContext, FetchResult, Source, register
-from tentacles.text import html_to_text, truncate
+from tentacles.text import content_sha1, html_to_text, truncate
 from tentacles.timeutil import to_utc
 
 
@@ -260,9 +260,10 @@ class ExtractionDescriptor(BaseModel):
     summary: Annotated[str, StringConstraints(strip_whitespace=True, max_length=2000)]
     published: datetime | None = None
 
-    def item(self, source_id: str) -> Item:
-        return Item(source_id=source_id, kind='web', external_id=self.url, url=self.url, title=self.title,
-                    summary=self.summary, content=self.summary, published=self.published, meta={'web_mode': 'llm'})
+    def item(self, source_id: str, page_url: str) -> Item:
+        return Item(source_id=source_id, kind='web', external_id=self.url, url=self.url, page_url=page_url,
+                    title=self.title, summary=self.summary, content=self.summary, published=self.published,
+                    meta={'web_mode': 'llm'})
 
     def observation(self) -> ItemObservation:
         return ItemObservation(stable_external_id=True, meta={'web_mode': 'llm'},
@@ -435,7 +436,7 @@ class WebSource(Source):
                 cursor = {**cursor, 'text_hash': hashlib.sha256(page.text.encode('utf-8')).hexdigest()}
                 if not opts.fetch_content:
                     return FetchResult([], cursor, {'not_modified': True})
-                return FetchResult([entry.item(self.spec.id) for entry in previous], cursor,
+                return FetchResult([entry.item(self.spec.id, opts.url) for entry in previous], cursor,
                     {'not_modified': True, 'descriptors_cached': len(previous)},
                     [entry.observation() for entry in previous])
         cached = _seen_cache(cursor, opts.url, [])
@@ -462,7 +463,7 @@ class WebSource(Source):
         next_cursor = {**skipped_cursor, 'seen': cached}
         if self.spec.update_existing:
             next_cursor['descriptors'] = _descriptor_data(descriptors)
-        return FetchResult([entry.item(self.spec.id) for entry in descriptors], next_cursor,
+        return FetchResult([entry.item(self.spec.id, opts.url) for entry in descriptors], next_cursor,
             {'entries': len(descriptors), 'dropped_links': dropped, 'seen_cached': len(cached)},
             [entry.observation() for entry in descriptors] if self.spec.update_existing else [])
 
@@ -484,9 +485,12 @@ class WebSource(Source):
                     # extraction; explicit empty list summary remains empty.
                     summary = (observation.summary or '' if 'summary' in observation.model_fields_set
                                else truncate(text, 2000))
-                    result.observations[index] = observation.model_copy(update={'content': text, 'summary': summary})
+                    meta = {**(observation.meta or {}), 'full_content_sha1': content_sha1(text)}
+                    result.observations[index] = observation.model_copy(
+                        update={'content': text, 'summary': summary, 'meta': meta})
                 result.items[index] = Item.model_validate({**item.model_dump(), 'content': text,
-                    'summary': summary, 'fingerprint': ''})
+                    'summary': summary, 'fingerprint': '',
+                    'meta': {**item.meta, 'full_content_sha1': content_sha1(text)}})
 
         tasks = [asyncio.create_task(worker()) for _ in range(min(opts.concurrency, len(pending)))]
         if tasks:
@@ -517,7 +521,7 @@ class WebSource(Source):
             title = (html_to_text(str(soup.title)) if soup.title else '') or self.spec.name or httpx.URL(opts.url).host
             local_date = to_utc(ctx.now).astimezone(ZoneInfo(ctx.timezone)).date().isoformat()
             items = [Item(source_id=self.spec.id, kind='web', identity_policy='revision',
-                external_id=url + '#' + digest, url=url, title=f'{title} {local_date}', summary=summary,
+                external_id=url + '#' + digest, url=url, page_url=opts.url, title=f'{title} {local_date}', summary=summary,
                 content=text, published=ctx.now, meta={'web_mode': 'page', 'content_hash': digest, 'baseline': baseline})]
         return FetchResult(items, {'identity': identity, 'content_hash': digest, 'content': text}, stats)
 
@@ -542,7 +546,7 @@ class WebSource(Source):
             raw_date = published.observe(node) if published else None
             excerpt = truncate(raw_summary or '', 2000)
             date = _published(raw_date, ctx) if raw_date else None
-            item = Item(source_id=self.spec.id, kind='web', external_id=url, url=url,
+            item = Item(source_id=self.spec.id, kind='web', external_id=url, url=url, page_url=opts.url,
                 title=name, summary=excerpt, content=excerpt,
                 published=date, meta={'web_mode': 'list'})
             items.append(item)

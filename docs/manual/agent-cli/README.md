@@ -17,6 +17,7 @@
 3. **[触发采集、流水线与运维状态速查](operations-reference.md)**
    - 手动抓取信息源（`sources fetch`）、触发过滤/成稿（`pipelines filter/run`）、执行周期 `tick`
    - 检查配置（`config check`）、调度进度（`scheduler status`）与运行计费账本（`runs list`）
+   - 回滚安全的故障账本（`errors list --unresolved`、`errors show`、`runs show`）、`error_code` 速查表与 `failed_targets` 排障工作流
 
 ---
 
@@ -64,8 +65,11 @@ tentacles --config ./config/tentacles.yaml --json items show <ITEM_ID>
 当用户问 Agent *“今天抓到了什么值得看的内容？”* 时：
 
 ```bash
-# 第一步：拉取最近 24 小时已通过指定 Pipeline 兴趣筛选的条目（含分数、标签与理由）
+# 第一步：拉取最近 24 小时已通过指定 Pipeline 兴趣筛选的条目（含正文、分数、标签与理由）
 tentacles --json items list --pipeline daily-tech --passed --since 24h --limit 50
+
+# 不指定 pipeline 时也会自动关联最新一次有效评估，可直接按画像/匹配分/主题筛选：
+tentacles --json items list --persona default --min-score 0.8 --since 24h --limit 50
 
 # 第二步：对高分或感兴趣的条目读取正文与多阶段评估详情（或顺着条目的 url 访问源网页）
 tentacles --json items show 6912c034fd032f1e

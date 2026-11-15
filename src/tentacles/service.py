@@ -17,8 +17,8 @@ from tentacles.net import HttpPool
 from tentacles.llm.registry import ModelRegistry
 from tentacles.llm.config import Stage
 from tentacles.llm.json import extract_json
-from tentacles.schemas import ConfigCheck, FetchOutcome, ItemDetail, ItemView, Page, RunView, SourceView, TaskView, ModelView, Completion, ModelTest, TickOutcome
-from tentacles.store import ItemQuery, Store
+from tentacles.schemas import ConfigCheck, ErrorEventDetail, ErrorEventView, FetchOutcome, ItemDetail, ItemView, Page, RunDetail, RunView, SourceView, TaskView, ModelView, Completion, ModelTest, TickOutcome
+from tentacles.store import ItemQuery, RunErrorQuery, Store
 from tentacles.personas.manager import PersonaManager
 from tentacles.personas.models import FeedbackView, PersonaProposal, PersonaView
 from tentacles.pipelines.models import PipelineOutcome, ReportView, PipelineView
@@ -214,11 +214,21 @@ class TentaclesService:
     def list_items(self, *, sources: list[str] | None = None, kinds: list[str] | None = None,
                    since: str | datetime | None = None, until: str | datetime | None = None,
                    search: str | None = None, limit: int = 50, offset: int = 0,
-                   pipeline: str | None = None, passed: bool | None = None) -> Page[ItemView]:
+                   pipeline: str | None = None, persona: str | None = None, passed: bool | None = None,
+                   min_score: float | None = None, topic: str | None = None) -> Page[ItemView]:
         if passed is not None and pipeline is None:
             raise ConfigError('passed/rejected filtering requires a pipeline')
+        if pipeline is not None and persona is not None:
+            raise ConfigError('choose either pipeline or persona')
+        if min_score is not None and not 0 <= min_score <= 1:
+            raise ConfigError('min-score must be between 0 and 1')
         if pipeline is not None:
             self._known_pipeline(pipeline)
+        pipeline_ids = None
+        if persona is not None:
+            if persona not in {p.name for p in self.store.list_personas()}:
+                raise NotFound(f"unknown persona {persona!r}")
+            pipeline_ids = sorted(spec.id for spec in self.config.pipelines if spec.persona == persona)
         if not 1 <= limit <= 500:
             raise ConfigError("limit must be between 1 and 500")
         if not 0 <= offset <= 2**63 - 1:
@@ -229,17 +239,20 @@ class TentaclesService:
                 if s not in known:
                     raise NotFound(f"unknown source {s!r}")
         q = ItemQuery(source_ids=sources or None, kinds=kinds or None, since=self._time(since),
-                      until=self._time(until), search=search or None, limit=limit, offset=offset, pipeline_id=pipeline, passed=passed)
+                      until=self._time(until), search=search or None, limit=limit, offset=offset,
+                      pipeline_id=pipeline, pipeline_ids=pipeline_ids, passed=passed,
+                      min_score=min_score, topic=topic or None)
         items, total = self.store.list_items(q)
-        views = [ItemView.model_validate({**item.model_dump(), **(evaluation.model_dump() if evaluation else {})})
-                 for item, evaluation in items]
+        views = [ItemView.of(item, evaluation) for item, evaluation in items]
         return Page[ItemView](items=views, total=total, limit=limit, offset=offset)
 
     def get_item(self, item_id: str) -> ItemDetail:
         item = self.store.get_item(item_id)
         if item is None:
             raise NotFound(f"unknown item {item_id!r}")
-        return ItemDetail.model_validate({**item.model_dump(), "evaluations": self.store.item_evaluations(item_id)})
+        latest = self.store.latest_evaluation(item_id)
+        return ItemDetail.model_validate({**item.model_dump(), **(latest.model_dump() if latest else {}),
+                                          "evaluations": self.store.item_evaluations(item_id)})
 
     def submit_feedback(self, item_id: str, *, rating: int, persona: str | None = None,
                         note: str = '') -> FeedbackView:
@@ -254,8 +267,40 @@ class TentaclesService:
                   limit: int = 50) -> list[RunView]:
         if not 1 <= limit <= 500:
             raise ConfigError("limit must be between 1 and 500")
-        return [RunView.model_validate(r, from_attributes=True)
-                for r in self.store.list_runs(kind, target, limit)]
+        return [RunView.of(record) for record in self.store.list_runs(kind, target, limit)]
+
+    def get_run(self, run_id: int) -> RunDetail:
+        record = self.store.get_run(run_id)
+        if record is None:
+            raise NotFound(f'unknown run {run_id}')
+        errors, _ = self.store.list_run_errors(RunErrorQuery(run_id=run_id, limit=500))
+        return RunDetail(**RunView.of(record).model_dump(),
+                         errors=[ErrorEventView.of(error) for error in errors])
+
+    # ---- diagnostics ledger -------------------------------------------------
+
+    def list_errors(self, *, unresolved: bool = False, source: str | None = None,
+                    pipeline: str | None = None, phase: str | None = None,
+                    error_code: str | None = None, run_id: int | None = None,
+                    since: str | datetime | None = None, until: str | datetime | None = None,
+                    limit: int = 50, offset: int = 0) -> Page[ErrorEventView]:
+        if not 1 <= limit <= 500:
+            raise ConfigError("limit must be between 1 and 500")
+        if not 0 <= offset <= 2**63 - 1:
+            raise ConfigError("offset must be between 0 and 9223372036854775807")
+        q = RunErrorQuery(unresolved=unresolved, source_id=source, pipeline_id=pipeline, phase=phase,
+                          error_code=error_code, run_id=run_id, since=self._time(since),
+                          until=self._time(until), limit=limit, offset=offset)
+        records, total = self.store.list_run_errors(q)
+        return Page[ErrorEventView](items=[ErrorEventView.of(record) for record in records],
+                                    total=total, limit=limit, offset=offset)
+
+    def get_error(self, error_id: int) -> ErrorEventDetail:
+        record = self.store.get_run_error(error_id)
+        if record is None:
+            raise NotFound(f'unknown error {error_id}')
+        return ErrorEventDetail(**ErrorEventView.of(record).model_dump(),
+                                debug_context=record.debug_context)
 
     def _time(self, value: str | datetime | None) -> datetime | None:
         if value is None:
