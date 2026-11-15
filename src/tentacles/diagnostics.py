@@ -70,7 +70,10 @@ _SENSITIVE_NAMES = frozenset({
 # redirect target, backoff hint, edge/CDN markers and rate-limit counters.
 _SAFE_HEADERS = frozenset({'content-type', 'location', 'retry-after', 'server', 'cf-mitigated'})
 _SAFE_HEADER_PREFIXES = ('x-ratelimit-',)
-_URL_IN_TEXT = re.compile(r"[a-z][a-z0-9+.\-]*://[^\s'\"<>]+", re.IGNORECASE)
+# The scheme run is length-capped: an unbounded `[a-z0-9+.\-]*` backtracks over every
+# position of a long credential-free blob (base64, inline JS) and turns sanitizing
+# quadratics. No real URL scheme is longer than this.
+_URL_IN_TEXT = re.compile(r"[a-z][a-z0-9+.\-]{1,15}://[^\s'\"<>]+", re.IGNORECASE)
 _SCRIPT_BLOCK = re.compile(r'<(script|style)\b[^>]*>.*?</\1\s*>', re.IGNORECASE | re.DOTALL)
 _HTML_COMMENT = re.compile(r'<!--.*?-->', re.DOTALL)
 _WHITESPACE = re.compile(r'\s+')
