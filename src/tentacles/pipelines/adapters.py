@@ -19,11 +19,14 @@ from tentacles.schemas import Completion
 @dataclass(frozen=True)
 class ModelRequirement:
     stage: ModelStage
-    kind: ModelKind
+    # None: the stage accepts either kind and dispatches on the resolved model.
+    kind: ModelKind | None
     # none does not use a model, but an explicit override must still be valid.
     optional: bool = False
 
     def resolve(self, models: ModelRegistry, override: str | None) -> str:
+        if self.kind is None:
+            return models.resolve_any(self.stage, override)
         name = models.resolve(self.stage, override)
         models.spec(name, kind=self.kind)
         return name

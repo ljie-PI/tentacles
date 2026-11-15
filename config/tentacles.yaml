@@ -233,18 +233,19 @@ pipelines:
         # 阶段级硬排除：命中即淘汰。正则特征需同时打开 regex: true。
         # hard_exclude: ['sponsored\s+by']
         # regex: true
-      # 可选：填好 OPENROUTER_API_KEY 后取消下面注释，启用 decision 过滤。
+      # 可选：填好对应 API key 后取消下面注释，启用统一语义过滤（会产生费用）。
       # 默认仍只用 keyword，避免升级后自动产生额外模型调用。
-      # - type: decision
-      #   model: decision         # 可省略，默认 defaults.models.decision
-      #   relevance_type: noul    # 或 score：四级量表归一化到 0–1
-      #   reject_below: 0.3
-      #   accept_above: 0.8
-      # 可选：让聊天模型批量处理前面阶段拿不准的项（同样可能产生费用）。
-      # - type: llm
-      #   model: fast             # 可省略，默认 defaults.models.filter
-      #   batch_size: 20
+      # 同一块配置同时适配 chat 与 decision 模型，实际链路取决于模型的 kind；
+      # 旧写法 type: llm / type: decision 仍然合法。
+      # - type: semantic
+      #   model: fast                 # 可省略：semantic/llm 用 defaults.models.filter，decision 用 defaults.models.decision
+      #   batch_size: 20              # 每 20 条一个 batch，也是增量落库检查点（1~100）
+      #   summary_chars: 160          # 每条附带的短摘要上限，0 表示只发标题（0~1000）
       #   reject_below: 0.5
+      #   accept_above: 0.85
+      #   # 仅当所选模型 kind 为 decision（JEV）时生效：
+      #   relevance_type: noul        # 或 score：四级量表归一化到 0–1
+      #   jev_batch_mode: packed_questions  # 或 windowed_pool：逐条并发请求
     processor:
       type: digest
       language: zh-CN
@@ -281,7 +282,7 @@ pipelines:
     enabled: false
     window: 7d
     schedule: '@daily'
-    filters: []             # 可按需求添加 keyword / decision / llm；此处保留全部邮件
+    filters: []             # 可按需求添加 keyword / semantic；此处保留全部邮件
     processor:
       type: summarize
       language: zh-CN

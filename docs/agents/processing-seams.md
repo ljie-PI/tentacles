@@ -20,9 +20,31 @@ dispatch branches to the cascade, manager, or configuration validation.
   `details.match_points`. `hard_exclude` always rejects; a soft `exclude` plus a
   positive hit scores 0.55, which is above the usual rejection threshold and
   below any `accept_above`, so the entry reaches the next semantic stage instead
-  of being cached as a 0.0 rejection. The cascade copies only the deciding
-  stage's `match_points` into the evaluation; aggregating several stages belongs
-  to the semantic-stage work, not to this seam.
+  of being cached as a 0.0 rejection.
+- Every stage's positive evidence reaches the evaluation: the cascade merges the
+  `tags` and `details.match_points` of the stages an item actually passed through,
+  in stage order and without duplicates, keeps at most `MAX_MATCH_POINTS` points
+  and takes `reason` from the first one. A stage that produced no score
+  contributes nothing, so an item error can never become a fabricated reason.
+- `semantic` is one Stage for two model kinds: `type: semantic`, and the pre-#80
+  spellings `llm` and `decision`, all select the same adapter. Its
+  `ModelRequirement` declares `kind=None`, which resolves through
+  `ModelRegistry.resolve_any` and lets the adapter dispatch on `models.spec(name).kind`.
+  The spelling only picks which default the stage prefers (`decision` keeps
+  `defaults.models.decision`, the others keep `defaults.models.filter`). The two
+  executors share `batch_size` and `summary_chars`; `relevance_type` and
+  `jev_batch_mode` only apply to the Decisions executor, which packs one shared
+  persona per batch, halves a payload the endpoint refuses with 400/413 once, and
+  then falls back to one request per item for the rest of the stage. A refused
+  second step (interest tags) keeps the step-one relevance verdicts.
+- `FilterBatch.checkpoint` is how a stage's finished work reaches disk mid-Run:
+  it receives the evaluations of one completed chunk and the manager publishes
+  them through `RunOperation.checkpoint` → `Store.checkpoint_run`, under the same
+  lease fence and `input_revision` check as the final commit but without ending
+  the Run. Chunks follow the semantic `batch_size` (100 for a keyword-only
+  cascade), which is why `batch_size` is also the paid request size. A cancelled
+  or failed Run keeps every checkpointed chunk, and the next run's candidate
+  query skips those items by itself.
 - A Processor returns location-free `ReportDraft` values, possibly empty, and
   records completions through the provided callback. It owns content, citations,
   provenance, creation time and report-local usage, not final IDs or paths.
@@ -122,7 +144,8 @@ ledger: `FetchContext.record_error`, `FilterBatch.record_error` and the
 whole-source row. `filtering.filter_items` records an item error only where the
 cascade finally gives up on that item: `score=None` on the last stage, or any
 stage that aborts the batch; the code it records is the one that stage's adapter
-declares in `item_error_code`, never a branch on `stage.type`.
+declares in `item_error_code` (the `semantic` adapter picks it from
+`details.executor`), never a branch on `stage.type`.
 
 Schema 13 adds source-scoped alias mappings without changing existing identities;
 schema 12 preserves existing rows with revision 1 and null content-update time.

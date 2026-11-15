@@ -37,8 +37,8 @@ tentacles config check
 | 阶段 (`stage`) | 要求模型种类 (`kind`) | 用途与触发时机 |
 | :--- | :--- | :--- |
 | **`extract`** | `chat` | `type: web` + `mode: llm` 网页智能抽取（可在具体 source 上用 `model:` 覆盖） |
-| **`filter`** | `chat` | Pipeline 中的 `- type: llm` 批量分类打分阶段（可在该 filter 上用 `model:` 覆盖） |
-| **`decision`** | `decision` | Pipeline 中的 `- type: decision` 单条相关性与标签打分阶段（仅支持 OpenRouter Decisions API，如 JEV） |
+| **`filter`** | `chat` | `- type: semantic`（或旧写法 `type: llm`）在模型为 chat 时使用的默认模型（可在该 filter 上用 `model:` 覆盖） |
+| **`decision`** | `decision` | `- type: semantic`（或旧写法 `type: decision`）在模型为 decision 时使用的默认模型；只有 `type: decision` 会默认取这一项（仅支持 OpenRouter Decisions API，如 JEV） |
 | **`persona`** | `chat` | `persona set` 修改画像文本时自动抽取 5–20 个兴趣标签，以及 `persona evolve` 画像演化 |
 | **`process`** | `chat` | Pipeline 处理器（`digest` / `deep` / `summarize`）生成最终报告（可在 processor 上用 `model:` 覆盖） |
 

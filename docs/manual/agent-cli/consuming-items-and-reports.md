@@ -51,14 +51,18 @@
       "pipeline_id": "daily-tech",
       "persona_version": 2,
       "passed": true,
-      "topics": ["人工智能与开源"],
+      "topics": ["人工智能与开源", "推荐与广告算法"],
       "match_score": 0.91,
       "match_level": "high",
-      "match_points": ["发布了实质性的开源本地推理引擎代码"],
+      "match_points": [
+        "命中包含关键词：开源、算法",
+        "开源了万亿参数 CTR 广告预估模型的权重与训练代码",
+        "给出公开数据集上的离线 AUC 与线上推理延迟实测对比"
+      ],
       "score": 0.91,
-      "tags": ["人工智能与开源"],
-      "reason": "发布了实质性的开源本地推理引擎代码",
-      "stage": "llm",
+      "tags": ["人工智能与开源", "推荐与广告算法"],
+      "reason": "命中包含关键词：开源、算法",
+      "stage": "semantic",
       "archive_year": null,
       "stage_scores": [
         {
@@ -91,12 +95,12 @@
   - `content_truncated`：`true` 表示正文超过 1000 units 已被截断，需要完整原文时请回访 `url`。
   - `updated_at` / `is_updated`：当信息源开启 `update_existing: true` 且正文后续发生更新时，`is_updated` 为 `true`，`updated_at` 为最近一次内容变更的 UTC 时间，而 `fetched_at` 始终保留首次入库时间。
 - **兴趣匹配度与主题**（未传 `--pipeline` / `--persona` 时关联最新一次有效评估；从未评估或内容已变更时为空）：
-  - `topics`：命中的 Persona 兴趣标签列表，即条目的主题归类（`tags` 为兼容别名，二者取值一致）。
+  - `topics`：命中的 Persona 兴趣标签列表，即条目的主题归类（`tags` 为兼容别名，二者取值一致）。多阶段级联下按阶段顺序去重汇总，`keyword` 命中的兴趣词与 `semantic` 模型选中的标签会同时出现。
   - `match_score`：`0.0 ~ 1.0` 的最终归一化兴趣匹配分数（`score` 为兼容别名）。
   - `match_level`：可读分档，由 `match_score` 与 `passed` 派生：`>= 0.8` 为 `high`、`>= 0.5` 为 `medium`、其余已评估为 `low`；`passed` 为 `false` 时一律 `rejected`；未评估为 `unscored`。
-  - `match_points`：与兴趣匹配的具体点（字符串列表）。`keyword` 阶段作为决定阶段时会写入实际命中的具体词项（如 `触发硬排除特征：限时特惠`、`命中排除词「广告」，受正向兴趣「开源、算法」豁免转交语义精筛`）；其他阶段未提供结构化匹配点时等于 `[reason]`（`reason` 为兼容别名）。
-  - `pipeline_id` / `persona_version` / `passed` / `stage`：提供该评估的 Pipeline、Persona 版本、通过与否及最终决定阶段。
-  - `reason` / `stage_scores`：最终阶段的简短判定理由与级联中走过的每个阶段的完整打分轨迹与模型原始答案（例如 JEV `decision` 阶段在 `details.answers` 中包含 `noul` 概率、`raw_score`、`confidence` 或各标签 `probabilities`）。
+  - `match_points`：与兴趣匹配的具体点（字符串列表，跨阶段去重后最多 5 条）。`keyword` 阶段写入实际命中的具体词项（如 `触发硬排除特征：限时特惠`、`命中排除词「广告」，受正向兴趣「开源、算法」豁免转交语义精筛`）；`semantic` 的 Chat 链路写入模型给出的具体事实点，JEV 链路写入可读的相关性/量表评级（如 `JEV 相关性 0.91，命中优先兴趣「AI与广告算法」（推荐系统、CTR预估与机器学习论文）`）。完全未提供结构化匹配点的阶段才退回等于 `[reason]`（`reason` 为兼容别名，取首条匹配点）。
+  - `pipeline_id` / `persona_version` / `passed` / `stage`：提供该评估的 Pipeline、Persona 版本、通过与否及做出最终决定的阶段类型（`keyword` / `semantic`，旧写法仍可能是 `llm` / `decision`）。
+  - `reason` / `stage_scores`：最终阶段的简短判定理由（即首条匹配点）与级联中走过的每个阶段的完整打分轨迹与模型原始答案（例如 JEV `semantic` 阶段在 `details.answers` 中包含 `noul` 概率、`raw_score`、`confidence` 或各标签 `probabilities`；`details.executor` 标明本次走的是 `chat` 还是 `decision` 链路）。
 - **评估的有效性**：只有 `input_revision == content_revision`（评估针对当前正文）的评估才会被关联；正文更新后旧评估自动失效，条目回到 `match_level: "unscored"`，直到重新过滤。
 - **`snippet`**：仅在带 `--search` 时返回命中高亮摘录（命中处用 `[...]` 包裹），不检索时为 `null`；需要 `bm25_rank` 时请用 `items search`。
 - **`archive_year`**：条目来自热库时为 `null`；加 `--include-archive` 时，来自 `tentacles-2025.db` 的条目为
