@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import sqlite3
 import threading
 from time import monotonic, sleep
@@ -1487,17 +1488,22 @@ def _literal_hit_condition(columns: Sequence[str], terms: Sequence[str]) -> tupl
 
 
 def _short_excerpt(item: Item, shorts: Sequence[str]) -> str:
-    """A compact `[...]`-marked excerpt around the first short-term hit."""
+    """A compact `[...]`-marked excerpt around the first short-term hit.
+
+    The hit is located in the original text: casefolding can change length
+    (`İ`, `ß`), so an index found in the folded copy would highlight the wrong
+    characters.
+    """
     for text in (item.title, item.summary, item.content):
-        folded = text.casefold()
         for term in shorts:
-            index = folded.find(term.casefold())
-            if index < 0:
+            match = re.search(re.escape(term), text, re.IGNORECASE)
+            if match is None:
                 continue
-            start = max(0, index - _SNIPPET_WINDOW)
-            end = min(len(text), index + len(term) + _SNIPPET_WINDOW)
-            return (('...' if start else '') + text[start:index] + '[' + text[index:index + len(term)] + ']'
-                    + text[index + len(term):end] + ('...' if end < len(text) else ''))
+            start = max(0, match.start() - _SNIPPET_WINDOW)
+            end = min(len(text), match.end() + _SNIPPET_WINDOW)
+            return (('...' if start else '') + text[start:match.start()] + '['
+                    + text[match.start():match.end()] + ']' + text[match.end():end]
+                    + ('...' if end < len(text) else ''))
     return ''
 
 
