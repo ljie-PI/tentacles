@@ -342,13 +342,14 @@ _PIPELINE_EVAL_JOIN = (
     ' AND e.persona_version = (SELECT MAX(n.persona_version) FROM evaluations n'
     ' WHERE n.pipeline_id = e.pipeline_id AND n.item_id = e.item_id)')
 # 未指定 pipeline 时关联最新一次有效评估（可为空）
+# 版本过滤发生在排名之前，否则最新一次评估失效会让条目丢掉全部评估
 _LATEST_EVAL_JOIN = (
     ' LEFT JOIN (SELECT * FROM (SELECT e.*, ROW_NUMBER() OVER (PARTITION BY e.item_id'
     ' ORDER BY e.evaluated_at DESC, e.pipeline_id) AS eval_rank FROM evaluations e'
+    ' JOIN items i ON i.id = e.item_id AND e.input_revision = i.content_revision'
     ' WHERE e.persona_version = (SELECT MAX(n.persona_version) FROM evaluations n'
     ' WHERE n.pipeline_id = e.pipeline_id AND n.item_id = e.item_id){scope})'
-    ' WHERE eval_rank = 1) e ON e.item_id = items.id'
-    ' AND e.input_revision = items.content_revision')
+    ' WHERE eval_rank = 1) e ON e.item_id = items.id')
 
 
 @dataclass(frozen=True)
