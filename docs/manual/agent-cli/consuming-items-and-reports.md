@@ -1,6 +1,6 @@
 # 读取与消费采集结果（Items & Reports）
 
-本章详细说明下游 Agent 通过 `items list`、`items show` 和 `reports list/show` 能拿到哪些字段、如何筛选与关联兴趣匹配结果，以及如何定位原文。
+本章详细说明下游 Agent 通过 `items list`、`items search`、`items show` 和 `reports list/show` 能拿到哪些字段、如何筛选与关联兴趣匹配结果，以及如何按相关性检索与定位原文。
 
 ---
 
@@ -20,7 +20,8 @@
 | `--passed` / `--rejected` | 仅筛选通过或被淘汰的条目（二者互斥，**必须同时指定 `--pipeline`**） |
 | `--source, -s ID` | 按信息源 ID 过滤，可多次传入（如 `-s hacker-news -s 36kr`） |
 | `--since T` / `--until T` | 时间窗口边界。支持相对时长（`90s`、`30m`、`24h`、`7d`、`2w`）或 ISO-8601 时间（无时区后缀时按配置的 `app.timezone` 解析） |
-| `--search, -q TEXT` | 在 `title`、`summary`、`author`、`content` 中执行不区分大小写的字面子串搜索（`%` 与 `_` 按普通字符处理，非通配符） |
+| `--search, -q TEXT` | 全文检索标题、摘要、作者、正文：按空白切分词项并取交集（引号包住的部分保持为一个短语），3 个字符及以上的词项走 SQLite FTS5 倒排索引，1–2 字短词（如 `广告`、`AI`）逐个逐列匹配，因此短词也不会漏召回；`C++`、`foo-bar`、`OR`、`%`、`_` 均按字面处理，不会变成检索语法 |
+| `--sort time\|relevance` | 排序方式，默认 `time`（发布时间倒序）；`relevance` 需配合 `--search`，命中条目按 BM25 相关性排序（标题权重最高） |
 | `--limit N` | 每页返回条数，范围 `1..500`，默认 `50` |
 | `--offset N` | 分页偏移量，默认 `0` |
 
@@ -95,10 +96,54 @@
   - `pipeline_id` / `persona_version` / `passed` / `stage`：提供该评估的 Pipeline、Persona 版本、通过与否及最终决定阶段。
   - `reason` / `stage_scores`：最终阶段的简短判定理由与级联中走过的每个阶段的完整打分轨迹与模型原始答案（例如 JEV `decision` 阶段在 `details.answers` 中包含 `noul` 概率、`raw_score`、`confidence` 或各标签 `probabilities`）。
 - **评估的有效性**：只有 `input_revision == content_revision`（评估针对当前正文）的评估才会被关联；正文更新后旧评估自动失效，条目回到 `match_level: "unscored"`，直到重新过滤。
+- **`snippet`**：仅在带 `--search` 时返回命中高亮摘录（命中处用 `[...]` 包裹），不检索时为 `null`；需要 `bm25_rank` 时请用 `items search`。
 
 ---
 
-## 2. 读取单条正文与跨流水线评估：`tentacles --json items show <ITEM_ID>`
+## 2. 按相关性检索：`tentacles --json items search <QUERY>`
+
+`items list --search` 保持发布时间倒序，适合“翻最近的内容”；需要**按相关度排序并看命中上下文**时用 `items search`：
+
+```bash
+tentacles --json items search '广告推荐 AI' --limit 20
+tentacles --json items search Playwright --persona default --min-score 0.8
+```
+
+- **默认排序**：`relevance`（BM25 相关性，标题权重 10 > 摘要 3 > 正文 2 > 作者 1.5）。只含 1–2 字短词、没有倒排索引分数的查询改为「标题命中优先 + 发布时间倒序」，此时 `bm25_rank` 为 `null`。`--sort time` 可切回发布时间倒序。
+- **筛选与分页**：与 `items list` 完全一致——`--source/-s`、`--pipeline`、`--persona`、`--passed/--rejected`、`--min-score`、`--topic`、`--since/--until`、`--limit 1..500`、`--offset`，关联的同样是“当前正文对应的最新一次有效评估”。
+- **返回 `Page[ItemSearchView]`**：在 `ItemView` 的全部字段之外新增两个字段：
+
+| 新增字段 | 类型 | 说明 |
+| :--- | :--- | :--- |
+| **`bm25_rank`** | `number \| null` | FTS5 BM25 排名分，**越小越相关**（通常是负数）；短词回退路径为 `null` |
+| **`snippet`** | `string` | 命中高亮摘录，命中处用 `[...]` 包裹，长文本首尾用 `...` 截断；短词回退路径截取命中处前后约 60 字 |
+
+```json
+{
+  "items": [
+    {
+      "id": "9a8b7c6d5e4f3210",
+      "source_id": "hacker-news",
+      "page_url": "https://hnrss.org/frontpage",
+      "url": "https://example.com/ctr-ad-ranking",
+      "title": "Scaling CTR Prediction Models for Real-Time Ad Ranking",
+      "bm25_rank": -8.42,
+      "snippet": "...proposes a sparse MoE architecture for [CTR] prediction in [ad] ranking...",
+      "topics": ["推荐与广告算法"],
+      "match_score": 0.94
+    }
+  ],
+  "total": 1,
+  "limit": 20,
+  "offset": 0
+}
+```
+
+> 检索词为空时返回 `invalid` 错误；`items list` 与 `GET /api/items` 也支持 `--sort relevance` / `sort=relevance`，但只有带检索词时才有相关性顺序。
+
+---
+
+## 3. 读取单条正文与跨流水线评估：`tentacles --json items show <ITEM_ID>`
 
 当列表摘要不足以回答问题时，调用 `items show` 获取单条正文、来源元数据与全部评估：
 
@@ -119,7 +164,7 @@ tentacles --json items show 6912c034fd032f1e
 
 ---
 
-## 3. 读取加工后的报告：`reports list` 与 `reports show`
+## 4. 读取加工后的报告：`reports list` 与 `reports show`
 
 如果用户已经配置了 `digest`（日报）、`deep`（重大事件深度报道）或 `summarize`（邮件简报与待办清单），Agent 可以直接消费成稿：
 

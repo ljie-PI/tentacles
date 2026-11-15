@@ -23,7 +23,7 @@ tentacles serve
 - 前端开发调试可在一个终端运行 `tentacles serve --no-scheduler`，另一个终端在 `frontend/` 下运行 `pnpm dev`（Vite 代理默认保留同源 `Host` 头）。
 
 ### Web 页面功能一览
-- **Feed**：按来源、时间、搜索词、Pipeline 及通过/淘汰状态筛选资讯，展开抽屉阅读全文与各阶段评分轨迹，直接按画像点赞/点踩；抽屉同时给出原文链接与来源入口页 `page_url`，正文被截断到 1000 字/词时显示提示。
+- **Feed**：按来源、时间、搜索词、Pipeline 及通过/淘汰状态筛选资讯（搜索走 SQLite FTS5 全文索引，毫秒级返回），展开抽屉阅读全文与各阶段评分轨迹，直接按画像点赞/点踩；抽屉同时给出原文链接与来源入口页 `page_url`，正文被截断到 1000 字/词时显示提示。
 - **Sources**：查看各源上次抓取状态、累计条目数、下次运行时间，支持单源或全量立即抓取。
 - **Pipelines**：查看待报告条目数（`pending`），手动触发“仅过滤”或“立即生成报告”。
 - **Reports**：渲染 GFM Markdown 报告表格与引用，点击引用可跳回 Feed 原文（为保护隐私，报告渲染禁用原始 HTML 且不自动加载外部图片，图片转为安全无引荐来源链接）。
@@ -107,7 +107,7 @@ OpenAPI 规范位于 `GET /api/openapi.json`（前端也可离线运行 `pnpm ge
 | `GET /api/sources` | `SourceView[]` |
 | `POST /api/sources/fetch` | 可选请求体 `{ "ids": ["id"] }`，返回 `FetchOutcome[]`（省略时抓取全部启用源） |
 | `POST /api/sources/{source_id}/fetch` | 单个 `FetchOutcome`；未知 ID `404`，运行中 `409`，抓取失败 `502` |
-| `GET /api/items` | `Page[ItemView]`；支持重复 `sources`/`kinds` 及 `since`、`until`、`search`、`pipeline`、`persona`、`passed`、`min_score`、`topic`、`limit`(1–500)、`offset` |
+| `GET /api/items` | `Page[ItemView]`；支持重复 `sources`/`kinds` 及 `since`、`until`、`search`、`pipeline`、`persona`、`passed`、`min_score`、`topic`、`sort`（`time`\|`relevance`，默认 `time`）、`limit`(1–500)、`offset`。`search` 走 SQLite FTS5 全文索引（3 字以上词项走倒排索引，1–2 字短词逐列匹配），带 `search` 时每条额外返回命中高亮 `snippet`；`sort=relevance` 需同时提供 `search`（否则 `400`），并按 BM25 相关性排序 |
 | `GET /api/items/{item_id}` | `ItemDetail`（含完整正文 `content`、`meta` 与各 Pipeline 的 `evaluations`） |
 | `GET /api/items/{item_id}/feedback` | 查询指定或默认 `persona` 的最新投票 `FeedbackView \| null` |
 | `POST /api/items/{item_id}/feedback` | 提交投票：`rating` 为 `+1` 或 `-1`，可选 `persona`、`note` |
@@ -132,4 +132,4 @@ OpenAPI 规范位于 `GET /api/openapi.json`（前端也可离线运行 `pnpm ge
 
 错误响应统一格式为 `{"error": {"code": "...", "message": "..."}}`，状态码映射：`invalid -> 400`、`unauthorized -> 401`、`forbidden -> 403`、`not_found -> 404`、`conflict / busy -> 409`、`upstream -> 502`、`error -> 500`。
 
-`ItemView` 直接返回 `page_url`、截断后的 `content`、`content_truncated` 以及最新一次有效评估的 `topics`、`match_score`、`match_level`、`match_points`（`tags` / `score` / `reason` 为兼容别名）；`/api/items` 与 CLI `items list` 共用同一套字段与筛选语义。
+`ItemView` 直接返回 `page_url`、截断后的 `content`、`content_truncated`、命中高亮摘录 `snippet`（仅带 `search` 时非 `null`）以及最新一次有效评估的 `topics`、`match_score`、`match_level`、`match_points`（`tags` / `score` / `reason` 为兼容别名）；`/api/items` 与 CLI `items list` 共用同一套字段与筛选语义，需要 `bm25_rank` 与必带 `snippet` 时用 `tentacles --json items search`（见 [Agent CLI 手册](../agent-cli/consuming-items-and-reports.md)）。

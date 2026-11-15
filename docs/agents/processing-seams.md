@@ -107,7 +107,11 @@ Schema 14 adds `items.page_url`, `items.content_truncated` and
 `evaluations.match_points` and backfills stored bodies and summaries to the unit
 caps; schema 15 adds the `run_errors` diagnostics ledger; schema 16 adds
 `persona_versions.hard_exclude` with an empty default, so existing versions stay
-readable and only hard-exclude-less seeds start empty.
+readable and only hard-exclude-less seeds start empty; schema 17 adds the `items_fts`
+trigram index over the four searchable columns, kept in sync by SQL triggers rather
+than by the write paths. `Store.list_items` is that seam: three or more character
+terms come from the index, shorter ones are matched natively per column, so callers
+must not build their own `LIKE` scans to narrow a listing.
 Pipeline activity is `COALESCE(updated_at, fetched_at)` with expression indexes;
 the Feed deliberately retains `COALESCE(published, fetched_at)`. Filter captures
 the input revision before scoring, and evaluation/report publication validates it

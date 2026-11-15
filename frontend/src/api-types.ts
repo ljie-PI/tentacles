@@ -786,6 +786,8 @@ export interface components {
             reason?: string | null;
             /** Score */
             score?: number | null;
+            /** Snippet */
+            snippet?: string | null;
             /** Source Id */
             source_id: string;
             /** Stage */
@@ -874,6 +876,8 @@ export interface components {
             reason?: string | null;
             /** Score */
             score?: number | null;
+            /** Snippet */
+            snippet?: string | null;
             /** Source Id */
             source_id: string;
             /** Stage */
@@ -1723,6 +1727,7 @@ export interface operations {
                 passed?: boolean | null;
                 min_score?: number | null;
                 topic?: string | null;
+                sort?: string;
             };
             header?: never;
             path?: never;
