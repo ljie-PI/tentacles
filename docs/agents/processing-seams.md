@@ -158,9 +158,9 @@ per-target failures, so the adapter never reaches the Store or the ledger direct
 Session policy stays in `sources/browser_session.py` (one headed work tab per
 `(cdp_url, chrome_profile)`, attached over CDP or launched headed, profile verified from
 `chrome://version`, tab closed on every exit path, never `browser.close()`), and script
-policy stays in `sources/browser_script.py` (an `ast.parse` import/call allowlist gate
-before `exec`) and `sources/browser_contract.py` (the `BrowserExtractOutput` contract,
-kept pure data because a script imports it). Disabling that work tab's HTTP cache over CDP
+policy stays in `sources/browser_script.py` (an `ast.parse` import/name/attribute
+allowlist gate before `exec`) and `sources/browser_contract.py` (the
+`BrowserExtractOutput` contract, kept pure data because a script imports it). Disabling that work tab's HTTP cache over CDP
 (`Network.setCacheDisabled`) is a deliberate replay-freshness decision: a replay must read
 the live page, so it pays a per-tab reload cost instead of trusting the user's Chrome
 cache. A fixed script must not own the tab lifecycle: only the runtime can capture the

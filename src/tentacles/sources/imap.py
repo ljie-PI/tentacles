@@ -317,13 +317,17 @@ def _auth_failure(source_id: str, opts: ImapOptions, exc: BaseException | None,
 def _fetch_failure(source_id: str, opts: ImapOptions, exc: BaseException) -> DiagnosticEvent:
     """A failure while reading the mailbox, after login succeeded.
 
-    Only the exception type is kept: a server or socket error can echo the
+    A socket-level error is a transport problem the next run may not hit again,
+    so it is `connection_failed` and retryable, exactly like the other transport
+    errors; anything else is a defect the ledger must not quietly retry. Only
+    the exception type is kept: a server or socket error can echo the
     credentials or the message body it failed on.
     """
+    connection = isinstance(exc, OSError)
     return DiagnosticEvent(
-        phase='imap_fetch', error_code='unexpected_exception', source_id=source_id,
-        message=f'IMAP fetch failed ({type(exc).__name__})',
-        exception_type=type(exc).__name__, retryable=isinstance(exc, OSError),
+        phase='imap_fetch', error_code='connection_failed' if connection else 'unexpected_exception',
+        source_id=source_id, message=f'IMAP fetch failed ({type(exc).__name__})',
+        exception_type=type(exc).__name__, retryable=connection,
         debug_context={'host': opts.host, 'port': opts.server_port, 'ssl': opts.ssl,
                        'folders': list(opts.folders), 'exception': type(exc).__name__})
 

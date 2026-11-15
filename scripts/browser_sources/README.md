@@ -29,25 +29,39 @@ async def extract(page: Page, *, page_url: str, max_items: int,
   `debug_context` 中带失败瞬间的 `current_url`、`page_title`、精简 A11y 快照与栈帧。
 - `on_detail_error: fail_batch` 时该源整批失败；`record_and_skip`（默认）只记账并返回空批次。
 
-## 静态导入白名单门禁
+## 静态门禁
 
-脚本在 `exec` 之前先经 `ast.parse` 静态扫描，只允许：
+脚本在 `exec` 之前先经 `ast.parse` 静态扫描，规则只有一条不变量：**脚本里每个可读的名字都必须是脚本自己绑定的（参数、赋值、循环/推导目标），或者是门禁列出的内建函数；导入只能拿到两个契约模型和一个页面类型，且导入名不得充当属性链的根。** 因此脚本里没有任何表达式能触到模块对象、`__builtins__` 或别的对象的内部。
 
-- 导入 `__future__`、`re`、`json`、`math`、`datetime`、`urllib.parse`、`typing`、`dataclasses`、
-  `playwright.async_api`、`tentacles.sources.browser_contract`；
-- 不含 `subprocess`、`os`、`socket`、`shutil` 等任何其他模块（相对导入同样拦截）；
-- 不调用 `__import__`、`eval`、`exec`、`compile`、`open`、`getattr`、`setattr`、`input`、
-  `breakpoint`、`globals`/`locals`/`vars`、`exit`/`quit` 等（含 `obj.open(...)` 形式的同名方法调用）；
-- 不访问 `__dunder__` 属性；
-- 不访问 `load_script`、`read_text`、`open`、`Path`、`import_module`、`__import__`、`eval`、
-  `exec`、`compile`、`getattr` 这些属性或同名导入（含 `bc.Path`、`from x import load_script`
-  这类写法）：门禁只看得到名字，无法核验它解析到什么；
-- 白名单里的 `tentacles.*` 模块只放纯数据契约：`tentacles.sources.browser_contract`
-  只导出 `BrowserExtractOutput` / `RawBrowserItem`，门禁与加载器在
-  `tentacles.sources.browser_script`，脚本不可导入。
+- 导入只允许两种写法：`from <白名单模块> import <白名单名字>`，和 `import <白名单模块> as <别名>`；整条白名单只有
+  `playwright.async_api` 的 `Page` 与 `tentacles.sources.browser_contract` 的
+  `BrowserExtractOutput` / `RawBrowserItem`。没有任何纯数据模块：`re` / `json` / `math` /
+  `datetime` / `urllib.parse` / `dataclasses` / `typing` / `__future__` 都不在其中（`typing`
+  能执行注解字符串，其余现有脚本用不上）；真的需要时按评审加回具体名字。
+- `import a.b`（会绑定顶层包 `a`）、相对导入、`import *`、`import os` / `sys` / `importlib` /
+  `typing` 等一律拒绝；导入名不得覆盖内建名（`from x import y as compile` 会被拦）。
+- 名字：每个 `ast.Name` 必须是脚本自己绑定的名字或上面列出的内建；`__builtins__`、`__import__`、
+  `eval`、`exec`、`compile`、`open`、`globals`、`locals`、`vars`、`getattr`、`setattr`、`delattr`、
+  `dir`、`type`、`object`、`super`、`input`、`breakpoint`、`help`、`memoryview` 以及任何 `__dunder__`
+  一律拒绝（赋值、参数名、函数名同样拒绝）。
+- 属性/下标：属性名不得以 `_` 开头（`__class__`、`__globals__`、`f_globals` 这些都在此列），
+  不得调用 `launch` / `launch_persistent_context` / `executable_path` / `connect_over_cdp` /
+  `install` / `open` / `read_text` / `import_module` / `system` / `popen` 这些起进程、连远端或读写文件的入口；
+  属性链的根不得是导入名（`RawBrowserItem.model_rebuild`、`p.chromium` 都被拦，把导入名先赋值给
+  局部变量也不行——导入名只能出现在注解里或作为直接调用目标）。
+- 语句：只允许函数定义、赋值、`for`/`while`/`if`/`with`/`try`/`raise`/`assert` 与 `return` 等；
+  `class`（`__init_subclass__` 钩子在定义时就执行）、`global`、`nonlocal`、`del` 与 `match` 一律拒绝。
 
-被拦截的脚本不会执行，以 `script_assertion_failed` 记账，并让该源整次抓取直接失败（`on_detail_error`
+错误信息会指出真实原因（dangerous import / dangerous name / dangerous attribute / dangerous statement）、
+文件名与行号。被拦截的脚本不会执行，以 `script_assertion_failed` 记账，并让该源整次抓取直接失败（`on_detail_error`
 不改变这一点）：坏脚本配置不能降级成每轮空跑。
+
+属于**故意保留**的能力：`page.evaluate` 与页面跳转本身（脚本可以在浏览器里跑任意 JS、打开任意地址）、以及 f-string 与 `%` 格式化。它们都不产生主机侧代码执行。
+
+另外拒绝：解释器帧与格式化属性（`gi_frame` / `gi_code` / `f_back` / `f_code` / `f_trace` / `format` / `format_map`）、
+宿主路径参数（任何调用的 `path=` 关键字，阻断 `route.fulfill(path=…)` / `tracing.stop(path=…)` /
+`storage_state(path=…)`）、`file:` 本地导航、`tracing` / `storage_state` / `new_browser_cdp_session`。
+脚本仍是需要代码评审的仓库代码：浏览器自身代表它访问网络与登录态，模块级死循环会阻塞该源的工作线程。
 
 ## 输出字段
 

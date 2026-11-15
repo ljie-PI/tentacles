@@ -264,7 +264,7 @@ tentacles --json errors show <ERROR_ID>
 | `fetch_page` / `fetch_detail` | `http_status_error` | 目标返回 401/403/404/429/5xx：检查登录态与 Cookie，或把源切换为 `type: browser`；`http_status` 字段给出具体状态码 |
 | `fetch_page` / `fetch_detail` | `http_redirect_blocked` | 静态 `web` 源遇到 301/302；`debug_context` 中的跳转目标即新地址，改用 `https://` 或修正 `url` |
 | `fetch_page` / `fetch_detail` | `network_timeout` | 连接/读取超时（可重试）：多为瞬态网络抖动、代理不通或 TLS 握手失败 |
-| `fetch_page` / `fetch_detail` | `connection_failed` | DNS 解析失败、连接被拒绝、TLS 失败（可重试）：先确认 `url` 可达与代理配置 |
+| `fetch_page` / `fetch_detail` / `imap_fetch` | `connection_failed` | DNS 解析失败、连接被拒绝、TLS 失败、IMAP 拉取中连接中断（可重试）：先确认 `url` 可达与代理配置，IMAP 则确认服务器在线 |
 | `fetch_page` | `feed_parse_error` | RSS/Atom 返回了无法识别的正文（常见于登录页/HTML 错误页）：查看 `debug_context.body_preview` 确认 |
 | `parse_entry` | `selector_no_match` | CSS 选择器匹配数为 0，或列表项缺少 `title` / `link`：需改 `list_selector` / 字段选择器 |
 | `parse_entry` | `entry_unusable` | RSS/Atom 条目既无标题也无 `guid`/`link`，无法定位；`debug_context` 给出原始 `guid`/`link` |

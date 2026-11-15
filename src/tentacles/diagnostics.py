@@ -40,7 +40,7 @@ ERROR_PHASES: dict[str, tuple[str, ...]] = {
     'http_status_error': ('fetch_page', 'fetch_detail'),
     'http_redirect_blocked': ('fetch_page', 'fetch_detail'),
     'network_timeout': ('fetch_page', 'fetch_detail'),
-    'connection_failed': ('fetch_page', 'fetch_detail'),
+    'connection_failed': ('fetch_page', 'fetch_detail', 'imap_fetch'),
     'selector_no_match': ('parse_entry',),
     'empty_extracted_body': ('fetch_detail',),
     'playwright_selector_timeout': ('browser_replay',),
