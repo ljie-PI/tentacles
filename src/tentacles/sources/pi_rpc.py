@@ -34,6 +34,9 @@ BRIDGE_URL_ENV = "TENTACLES_BROWSER_BRIDGE_URL"
 BRIDGE_TOKEN_ENV = "TENTACLES_BROWSER_BRIDGE_TOKEN"
 STDERR_TAIL_CHARS = 2000
 SHUTDOWN_TIMEOUT_S = 10.0
+# One protocol record can carry a whole assistant message or tool result; the
+# default 64 KiB stream limit would tear such a line apart mid-JSON.
+MAX_RECORD_BYTES = 1 << 20
 DIALOG_METHODS = frozenset({"select", "confirm", "input", "editor"})
 
 
@@ -113,7 +116,8 @@ class PiRpcClient:
         try:
             self._process = await asyncio.create_subprocess_exec(
                 *self._argv, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE, cwd=str(self._cwd), env=self._env)
+                stderr=asyncio.subprocess.PIPE, cwd=str(self._cwd), env=self._env,
+                limit=MAX_RECORD_BYTES)
         except OSError as exc:
             raise PiRpcError(
                 f"cannot start the exploration agent {self._argv[0]!r} ({type(exc).__name__}); "
