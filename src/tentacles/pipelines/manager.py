@@ -69,7 +69,7 @@ class PipelineManager:
             candidates = await run_store_call(self._store.filter_candidates,
                 query,
                 reevaluate=reevaluate, run_id=op.run_id)
-            batch = FilterBatch([], [])
+            batch = FilterBatch([], [], record_error=op.record_error)
             try:
                 await filter_items(candidates, current, spec, op.started_at, self._models, batch)
             finally:
@@ -116,7 +116,8 @@ class PipelineManager:
             evaluations = [evaluation for _, evaluation in selected]
             op.stats['consumed'] = 0
             drafts = await PROCESSORS[spec.processor.type].process(
-                self._config, spec, persona, selected, self._models, self._clock, op.metrics.record)
+                self._config, spec, persona, selected, self._models, self._clock, op.metrics.record,
+                record_error=op.record_error)
 
             # Failed SQL/commit must not leak allocated IDs into failure stats.
             publication_stats = {'consumed': len(selected), 'report_ids': []}

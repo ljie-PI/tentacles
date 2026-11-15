@@ -5,6 +5,7 @@ from datetime import datetime
 from typing import Callable
 
 from tentacles.config import AppConfig
+from tentacles.diagnostics import DiagnosticEvent
 from tentacles.llm.registry import ModelRegistry
 from tentacles.models import Item
 from tentacles.personas.models import PersonaView
@@ -20,5 +21,6 @@ class NoneProcessor:
     async def process(self, config: AppConfig, spec: PipelineSpec, persona: PersonaView,
                       selected: list[tuple[Item, Evaluation]], models: ModelRegistry,
                       clock: Callable[[], datetime],
-                      on_completion: Callable[[Completion], None]) -> list[ReportDraft]:
+                      on_completion: Callable[[Completion], None], *,
+                      record_error: Callable[[DiagnosticEvent], None]) -> list[ReportDraft]:
         return []
