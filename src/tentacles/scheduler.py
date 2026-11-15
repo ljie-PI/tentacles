@@ -133,7 +133,8 @@ class Scheduler:
     async def _fetch_task(self, spec: SourceSpec, http: HttpPool, *, due_only: bool) -> FetchOutcome | None:
         async def work(op: RunOperation) -> None:
             await fetch_source(spec, op, store=self._store, http=http, imap_factory=self._imap_factory,
-                               timezone=self._config.app.timezone, models=self._models)
+                               timezone=self._config.app.timezone, models=self._models,
+                               config=self._config)
 
         result = await self._runs.execute(self.task('fetch', spec.id), work, due_only=due_only,
             failure_message=lambda exc: exc.message if isinstance(exc, TentaclesError)

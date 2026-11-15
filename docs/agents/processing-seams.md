@@ -15,6 +15,14 @@ dispatch branches to the cascade, manager, or configuration validation.
   error, not a rejection. `batch.error` stops the cascade without discarding
   completed decisions. Exceptions and cancellation must leave known charges
   available to the manager's `finally` block.
+  `keyword` is the zero-cost Stage: it reports every hit word in
+  `details.matched_include/matched_exclude/matched_hard_exclude` plus readable
+  `details.match_points`. `hard_exclude` always rejects; a soft `exclude` plus a
+  positive hit scores 0.55, which is above the usual rejection threshold and
+  below any `accept_above`, so the entry reaches the next semantic stage instead
+  of being cached as a 0.0 rejection. The cascade copies only the deciding
+  stage's `match_points` into the evaluation; aggregating several stages belongs
+  to the semantic-stage work, not to this seam.
 - A Processor returns location-free `ReportDraft` values, possibly empty, and
   records completions through the provided callback. It owns content, citations,
   provenance, creation time and report-local usage, not final IDs or paths.
@@ -93,11 +101,40 @@ refresh eligible details without another extraction. Old cursors may need one
 paid build; failed builds/details never advance the cache. No historical URLs
 are revisited.
 
+`WebOptions.on_detail_error` decides what one failed detail page costs.
+`fail_batch` (the default) keeps the atomic batch: it records every failure of
+that round first and then raises, so the rollback still leaves one ledger row per
+broken target. `record_and_skip` drops only the failed pages from `items` and
+`observations` and removes their identities from the cursor's `seen` list; it
+never touches `source_seen_ids`, because a skipped page never reaches
+`upsert_items`. Both properties are what makes the next fetch classify the
+skipped target as `new` again and lets its later success resolve the rows. A
+failed target must therefore never reach `seen`, while the llm descriptor cache
+keeps it deliberately: an unchanged page has to re-deliver it for another detail
+fetch.
+
+Sources and pipelines report per-target failures through callbacks, not the
+ledger: `FetchContext.record_error`, `FilterBatch.record_error` and the
+`record_error` argument of `Processor.process` all point at the owning
+`RunOperation`. An adapter that records a failure itself raises
+`sources.base.DiagnosedError`, which `fetch_source` recognises
+(`exc.diagnosed`) so one failure never produces both a concrete row and a generic
+whole-source row. `filtering.filter_items` records an item error only where the
+cascade finally gives up on that item: `score=None` on the last stage, or any
+stage that aborts the batch; the code it records is the one that stage's adapter
+declares in `item_error_code`, never a branch on `stage.type`.
+
 Schema 13 adds source-scoped alias mappings without changing existing identities;
 schema 12 preserves existing rows with revision 1 and null content-update time.
 Schema 14 adds `items.page_url`, `items.content_truncated` and
 `evaluations.match_points` and backfills stored bodies and summaries to the unit
-caps; schema 15 adds the `run_errors` diagnostics ledger.
+caps; schema 15 adds the `run_errors` diagnostics ledger; schema 16 adds
+`persona_versions.hard_exclude` with an empty default, so existing versions stay
+readable and only hard-exclude-less seeds start empty; schema 17 adds the `items_fts`
+trigram index over the four searchable columns, kept in sync by SQL triggers rather
+than by the write paths. `Store.list_items` is that seam: three or more character
+terms come from the index, shorter ones are matched natively per column, so callers
+must not build their own `LIKE` scans to narrow a listing.
 Pipeline activity is `COALESCE(updated_at, fetched_at)` with expression indexes;
 the Feed deliberately retains `COALESCE(published, fetched_at)`. Filter captures
 the input revision before scoring, and evaluation/report publication validates it
@@ -114,3 +151,18 @@ A temporary no-model Stage can replace an entry in `registry.STAGES` to exercise
 item-error forwarding, rejection/acceptance and batch aborts through the same
 `filter_items` interface; restore the entry after the check. No model client,
 alternate cascade or asynchronous persistence interface is needed.
+
+`type: browser` adds one source adapter that runs a different policy: `FetchContext`
+carries the loaded `AppConfig` (the `browser` block) and a `record_error` callback for
+per-target failures, so the adapter never reaches the Store or the ledger directly.
+Session policy stays in `sources/browser_session.py` (one headed work tab per
+`(cdp_url, chrome_profile)`, attached over CDP or launched headed, profile verified from
+`chrome://version`, tab closed on every exit path, never `browser.close()`), and script
+policy stays in `sources/browser_script.py` (an `ast.parse` import/name/attribute
+allowlist gate before `exec`) and `sources/browser_contract.py` (the
+`BrowserExtractOutput` contract, kept pure data because a script imports it). Disabling that work tab's HTTP cache over CDP
+(`Network.setCacheDisabled`) is a deliberate replay-freshness decision: a replay must read
+the live page, so it pays a per-tab reload cost instead of trusting the user's Chrome
+cache. A fixed script must not own the tab lifecycle: only the runtime can capture the
+failure site, so timeouts, script errors and zero-item results become `browser_replay`
+events whose `debug_context` carries the URL, title, A11y excerpt and traceback.

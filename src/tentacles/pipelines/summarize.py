@@ -14,6 +14,7 @@ from pydantic import BaseModel, ConfigDict, Field, StringConstraints, TypeAdapte
 
 from tentacles.asyncutil import gather_draining
 from tentacles.config import AppConfig
+from tentacles.diagnostics import DiagnosticEvent, clip, redact_text, validation_errors
 from tentacles.errors import UpstreamError
 from tentacles.llm.json import extract_json
 from tentacles.llm.registry import ModelRegistry
@@ -141,7 +142,8 @@ def _entry(item: Item, row: SummaryRow | None, zone: ZoneInfo, redact: Callable[
 
 async def make_summarize(config: AppConfig, spec: PipelineSpec, persona: PersonaView,
                          selected: list[tuple[Item, Evaluation]], models: ModelRegistry,
-                         clock: Callable[[], datetime], on_completion: Callable[[Completion], None]) -> list[ReportDraft]:
+                         clock: Callable[[], datetime], on_completion: Callable[[Completion], None], *,
+                         record_error: Callable[[DiagnosticEvent], None]) -> list[ReportDraft]:
     zone = ZoneInfo(config.app.timezone)
     metrics = UsageTotals()
     parsed: dict[str, SummaryRow] = {}
@@ -181,9 +183,17 @@ async def make_summarize(config: AppConfig, spec: PipelineSpec, persona: Persona
         result, = await gather_draining([completion])
         try:
             parsed.update(_parse_rows(result.text, [item.id for item in batch]))
-        except (ValueError, TypeError, RecursionError, OverflowError):
-            # Atomic validation: never trust fragments of a malformed batch.
-            # Do not log model output, which may include private mail content.
+        except (ValueError, TypeError, RecursionError, OverflowError) as exc:
+            # Atomic validation: never trust fragments of a malformed batch. The
+            # report degrades to "unparsed", so the ledger must name the batch.
+            record_error(DiagnosticEvent(
+                phase='report_process', error_code='summarize_batch_unparsed', severity='warning',
+                pipeline_id=spec.id, retryable=True, exception_type=type(exc).__name__,
+                message=f'summarize batch output violated its schema ({type(exc).__name__})',
+                debug_context={'item_ids': [item.id for item in batch],
+                               'target_urls': [item.url for item in batch if item.url][:10],
+                               'validation_errors': validation_errors(exc),
+                               'output_preview': clip(redact_text(result.text), 800)}))
             continue
     actions = [item for item, _ in selected if item.id in parsed and parsed[item.id].action_required]
     def deadline_key(item: Item) -> float:

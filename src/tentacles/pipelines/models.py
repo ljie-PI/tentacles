@@ -3,11 +3,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Literal
+from typing import Any, Callable, Literal
 
 from pydantic import BaseModel, Field
 
-from tentacles.diagnostics import FailedTargetRef
+from tentacles.diagnostics import DiagnosticEvent, FailedTargetRef
 from tentacles.llm.types import TokenUsage, UsageTotals
 
 
@@ -48,10 +48,13 @@ class StageBatch:
 
 @dataclass
 class FilterBatch:
+    """Caller-owned cascade progress plus the Run's per-item diagnostic sink."""
+
     evaluations: list[Evaluation]
     stages: list[dict[str, Any]]
     error: str | None = None
     batches: list[StageBatch] = field(default_factory=list)
+    record_error: Callable[[DiagnosticEvent], None] | None = None
 
 
 class PipelineOutcome(BaseModel):

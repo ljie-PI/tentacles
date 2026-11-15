@@ -55,6 +55,8 @@ class PersonaSet(PersonaVersionRequest):
     include_remove: list[str] = Field(default_factory=list)
     exclude_add: list[str] = Field(default_factory=list)
     exclude_remove: list[str] = Field(default_factory=list)
+    hard_exclude_add: list[str] = Field(default_factory=list)
+    hard_exclude_remove: list[str] = Field(default_factory=list)
     note: str | None = None
 
 

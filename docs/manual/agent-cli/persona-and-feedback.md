@@ -34,6 +34,7 @@ tentacles --json persona export default
   ],
   "include": ["人工智能", "AI", "开源"],
   "exclude": ["广告", "促销"],
+  "hard_exclude": ["限时特惠", "扫码加群"],
   "source": "llm",
   "note": "增加对本地推理量化评测的权重，过滤无实测数据的融通稿",
   "created_at": "2026-10-25T08:00:00Z",
@@ -43,6 +44,7 @@ tentacles --json persona export default
 ```
 
 - `source` 取值：`seed`（首次配置导入）、`manual`（手动 `set`）、`llm`（`evolve / apply` 演化）、`rollback`（历史回滚）。
+- `exclude` 是会受正向兴趣豁免的**软排除**词；`hard_exclude` 是**硬排除**特征，`keyword` 阶段命中即得 `0.0` 分淘汰（详见 [画像、过滤与报告流水线](../user/pipelines-and-personas.md) 的 `keyword` 真值表）。
 - `tag_status` 取值：`ok`、`error`（标签抽取调用失败但画像文本已安全保存并保留了旧标签）、`skipped`（指定了 `--skip-tags` 或种子导入）、`unchanged`（仅改关键词/备注未动正文）。
 
 ---
@@ -57,6 +59,8 @@ tentacles --json persona set default \
   --include "具身智能" \
   --exclude "带货" \
   --remove-exclude "促销" \
+  --hard-exclude "限时特惠" \
+  --remove-hard-exclude "扫码加群" \
   --note "按用户要求微调关键词"
 
 # 2. 更新完整 profile 文本（默认会自动调用 persona 阶段模型重抽 5~20 个有序标签）
@@ -72,8 +76,9 @@ cat ./new-profile.md | tentacles --json persona set default --stdin --skip-tags
 | 选项 | 说明 |
 | :--- | :--- |
 | `--text TEXT` / `--file PATH` / `--stdin` | 三选一替换 `profile` 正文（不传则保留原 `profile`） |
-| `--include KEY` / `--exclude KEY` | 新增包含或排除关键词（可重复传入；大小写不敏感去重） |
-| `--remove-include KEY` / `--remove-exclude KEY` | 删除已有关键词（同次命令中先执行删除再执行新增） |
+| `--include KEY` / `--exclude KEY` | 新增包含或**软排除**关键词（可重复传入；大小写不敏感去重） |
+| `--remove-include KEY` / `--remove-exclude KEY` | 删除已有的包含或软排除关键词（同次命令中先执行删除再执行新增） |
+| `--hard-exclude KEY` / `--remove-hard-exclude KEY` | 新增或删除**硬排除**特征（无条件淘汰）；同样大小写不敏感去重，且零模型调用 |
 | `--skip-tags` | 即使修改了 `profile` 也不调用大模型重抽标签，直接沿用旧标签 |
 | `--expected-version N` | **推荐 Agent 传入**：乐观锁并发围栏（CAS）。新建传 `0`；编辑传刚读到的 `version`。若期间被 Web 端或其他进程抢先修改，立即返回退出码 `4`（`conflict`），防止静默覆盖 |
 | `--note TEXT` | 记录在版本历史中的变更说明 |
@@ -110,7 +115,7 @@ tentacles --json persona evolve default \
   --expected-version 3 \
   --dry-run > proposal.json
 
-# 2. 检查 proposal.json 中的 summary / profile / tags / include / exclude 后，原子应用：
+# 2. 检查 proposal.json 中的 summary / profile / tags / include / exclude / hard_exclude 后，原子应用：
 tentacles --json persona apply --proposal proposal.json
 
 # （若无需人工二次审阅，也可直接管道一步串接，或省略 --dry-run 直接应用）
@@ -119,6 +124,8 @@ tentacles --json persona evolve default --instruction "多关注机器人" --dry
 ```
 
 - 如果在生成提案到执行 `apply` 之间，Persona 的基准版本 `base_version` 已被其他操作改动，`apply` 会安全拒绝并返回退出码 `4`（`conflict`）。
+- 提案**省略** `hard_exclude`（或显式给 `null`）表示**保留**当前版本的硬排除词，只有显式写
+  `"hard_exclude": []` 才清空；`include` / `exclude` 仍必须给出完整的新列表。
 
 ### 第三步（可选）：对近期条目按新画像重新打分
 

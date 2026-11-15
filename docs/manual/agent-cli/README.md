@@ -7,8 +7,8 @@
 ## 章节导航
 
 1. **[读取与消费采集结果（Items & Reports）](consuming-items-and-reports.md)**
-   - 如何按时间、来源、关键词、Pipeline 通过/淘汰状态检索条目
-   - 每条内容包含哪些字段（链接、摘要、正文、兴趣标签、评估分数与多阶段评分轨迹）
+   - 如何按时间、来源、关键词、Pipeline 通过/淘汰状态检索条目，以及按 BM25 相关性检索（`items search`）
+   - 每条内容包含哪些字段（链接、摘要、正文、兴趣标签、评估分数、命中高亮 `snippet` 与多阶段评分轨迹），包括 `kind: "browser"` 有界面浏览器条目的元数据
    - 如何读取已生成的日报、深度报道与邮件待办简报
 2. **[通过 Agent CLI 反馈与更新 Persona](persona-and-feedback.md)**
    - 对采集条目点赞/点踩（`feedback` / `items feedback`）
@@ -18,6 +18,7 @@
    - 手动抓取信息源（`sources fetch`）、触发过滤/成稿（`pipelines filter/run`）、执行周期 `tick`
    - 检查配置（`config check`）、调度进度（`scheduler status`）与运行计费账本（`runs list`）
    - 回滚安全的故障账本（`errors list --unresolved`、`errors show`、`runs show`）、`error_code` 速查表与 `failed_targets` 排障工作流
+   - `browser_replay` 阶段的排障现场（栈帧 + A11y 快照 + 失败瞬间 `current_url`）
 
 ---
 

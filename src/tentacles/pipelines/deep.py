@@ -8,6 +8,7 @@ from zoneinfo import ZoneInfo
 
 from tentacles.cluster import cluster_articles
 from tentacles.config import AppConfig
+from tentacles.diagnostics import DiagnosticEvent
 from tentacles.llm.registry import ModelRegistry
 from tentacles.models import Item
 from tentacles.personas.models import PersonaView
@@ -31,7 +32,8 @@ _SYSTEM = '''你是一名 investigative 风格的深度报道记者。你会拿�
 
 async def make_deep(config: AppConfig, spec: PipelineSpec, persona: PersonaView,
                     selected: list[tuple[Item, Evaluation]], models: ModelRegistry,
-                    clock: Callable[[], datetime], on_completion: Callable[[Completion], None]) -> list[ReportDraft]:
+                    clock: Callable[[], datetime], on_completion: Callable[[Completion], None], *,
+                    record_error: Callable[[DiagnosticEvent], None]) -> list[ReportDraft]:
     events = [event for event in cluster_articles([item for item, _ in selected])
               if event.size >= spec.processor.min_cluster_size][:spec.processor.max_reports]
     if not events:
@@ -59,7 +61,8 @@ async def make_deep(config: AppConfig, spec: PipelineSpec, persona: PersonaView,
         now = to_utc(clock())
         content = result.text
         references = [int(a or b) for a, b in re.findall(r'\[(\d+)\]|来源\s*(\d+)', content)]
-        require_citations('deep', content, references, len(items))
+        require_citations('deep', content, references, len(items), pipeline_id=spec.id,
+                          record_error=record_error, item_ids=[item.id for item in event.members])
         title = models.redact(f'深度报道：{event.title()}')
         appendix = '\n'.join(f'[来源{item["number"]}] {item["source"]}: {item["title"]} {item["url"]}' for item in items)
         markdown = models.redact(f'# {title}\n\n> 基于来自 {len(event.sources)} 个来源的 {event.size} 篇文章。\n\n'

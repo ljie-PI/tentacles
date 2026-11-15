@@ -6,12 +6,13 @@ from datetime import datetime
 from typing import Callable, Protocol
 
 from tentacles.config import AppConfig
+from tentacles.diagnostics import DiagnosticEvent
 from tentacles.llm.config import ModelKind, Stage as ModelStage
 from tentacles.llm.registry import ModelRegistry
 from tentacles.models import Item
 from tentacles.personas.models import PersonaView
 from tentacles.pipelines.config import PipelineSpec, StageSpec
-from tentacles.pipelines.models import Evaluation, ReportDraft, StageBatch
+from tentacles.pipelines.models import Evaluation, ReportDraft, StageBatch, StageScore
 from tentacles.schemas import Completion
 
 
@@ -32,6 +33,10 @@ class Stage(Protocol):
     @property
     def models(self) -> tuple[ModelRequirement, ...]: ...
 
+    def item_error_code(self, scored: StageScore) -> str:
+        """The shared vocabulary code for an item this stage could not score."""
+        ...
+
     async def score(self, items: list[Item], persona: PersonaView, stage: StageSpec,
                     index: int, models: ModelRegistry, progress: StageBatch) -> StageBatch:
         """Write ordered scores and charges to the caller-owned progress object.
@@ -51,11 +56,13 @@ class Processor(Protocol):
     async def process(self, config: AppConfig, spec: PipelineSpec, persona: PersonaView,
                       selected: list[tuple[Item, Evaluation]], models: ModelRegistry,
                       clock: Callable[[], datetime],
-                      on_completion: Callable[[Completion], None]) -> list[ReportDraft]:
+                      on_completion: Callable[[Completion], None], *,
+                      record_error: Callable[[DiagnosticEvent], None]) -> list[ReportDraft]:
         """Return location-free drafts, recording every known completion.
 
         Publication allocates identities/paths in the fenced Store transaction
         and consumes ALL selected evaluations, not just report members.
-        Failures leave the entire selection pending.
+        Failures leave the entire selection pending. A degraded batch that still
+        produces a report must record its triage snapshot through `record_error`.
         """
         ...

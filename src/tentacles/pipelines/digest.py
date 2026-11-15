@@ -8,6 +8,7 @@ from typing import Any, Callable
 from zoneinfo import ZoneInfo
 
 from tentacles.config import AppConfig
+from tentacles.diagnostics import DiagnosticEvent
 from tentacles.llm.registry import ModelRegistry
 from tentacles.models import Item
 from tentacles.personas.models import PersonaView
@@ -30,7 +31,8 @@ _SYSTEM = '''基于给定材料编写新闻日报，按用户画像取舍、排�
 
 async def make_digest(config: AppConfig, spec: PipelineSpec, persona: PersonaView,
                       selected: list[tuple[Item, Evaluation]], models: ModelRegistry,
-                      clock: Callable[[], datetime], on_completion: Callable[[Completion], None]) -> list[ReportDraft]:
+                      clock: Callable[[], datetime], on_completion: Callable[[Completion], None], *,
+                      record_error: Callable[[DiagnosticEvent], None]) -> list[ReportDraft]:
     now = to_utc(clock())
     items: list[dict[str, Any]] = [{'number': i + 1, 'id': item.id, 'source': item.source_id, 'title': item.title,
               'summary': item.summary[:600] or '（无摘要）', 'url': item.url,
@@ -53,7 +55,8 @@ async def make_digest(config: AppConfig, spec: PipelineSpec, persona: PersonaVie
     now = to_utc(clock())
     content = result.text
     references = [int(value) for value in re.findall(r'\[(\d+)\]', content)]
-    require_citations('digest', content, references, len(items))
+    require_citations('digest', content, references, len(items), pipeline_id=spec.id,
+                      record_error=record_error, item_ids=[item.id for item, _ in selected])
     title = f'{spec.name or spec.id} {now.astimezone(ZoneInfo(config.app.timezone)):%Y-%m-%d}'
     appendix = '\n'.join(f'[{item["number"]}] {item["source"]}: {item["title"]} {item["url"]}' for item in items)
     markdown = f'# {title}\n\n{content}\n\n## Sources\n\n{appendix}\n'

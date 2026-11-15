@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import sqlite3
 import threading
 from time import monotonic, sleep
@@ -68,6 +69,18 @@ class ItemQuery:
     passed: bool | None = None
     min_score: float | None = None
     topic: str | None = None
+    # relevance 只在带 search 时改变排序：FTS5 命中按 BM25，纯短词查询按标题命中优先
+    sort: Literal['time', 'relevance'] = 'time'
+
+
+@dataclass(frozen=True)
+class ItemHit:
+    """一条列出的条目，附带检索时才有的相关性排名分与命中摘录。"""
+
+    item: Item
+    evaluation: Evaluation | None
+    bm25_rank: float | None = None
+    snippet: str = ''
 
 
 @dataclass
@@ -317,7 +330,35 @@ def _migrate_v15(conn: sqlite3.Connection) -> None:
     conn.execute('CREATE INDEX idx_run_errors_target ON run_errors (target_url)')
 
 
-MIGRATIONS: list[Callable[[sqlite3.Connection], None]] = [_migrate_v1, _migrate_v2, _migrate_v3, _migrate_v4, _migrate_v5, _migrate_v6, _migrate_v7, _migrate_v8, _migrate_v9, _migrate_v10, _migrate_v11, _migrate_v12, _migrate_v13, _migrate_v14, _migrate_v15]
+def _migrate_v16(conn: sqlite3.Connection) -> None:
+    # 硬排除与软 exclude 分离：存量 persona 版本没有硬排除词。
+    conn.execute("ALTER TABLE persona_versions ADD COLUMN hard_exclude TEXT NOT NULL DEFAULT '[]'")
+
+
+def _migrate_v17(conn: sqlite3.Connection) -> None:
+    # 外部内容 FTS5 表：只存倒排索引，正文仍留在 items，触发器保证任何写入路径都同步。
+    conn.execute("""CREATE VIRTUAL TABLE items_fts USING fts5(
+        title, summary, author, content,
+        content='items', content_rowid='rowid', tokenize='trigram case_sensitive 0')""")
+    conn.execute("""CREATE TRIGGER items_fts_ai AFTER INSERT ON items BEGIN
+        INSERT INTO items_fts (rowid, title, summary, author, content)
+        VALUES (new.rowid, new.title, new.summary, new.author, new.content);
+    END""")
+    conn.execute("""CREATE TRIGGER items_fts_ad AFTER DELETE ON items BEGIN
+        INSERT INTO items_fts (items_fts, rowid, title, summary, author, content)
+        VALUES ('delete', old.rowid, old.title, old.summary, old.author, old.content);
+    END""")
+    # `UPDATE OF` keeps metadata-only writes (meta, updated_at) off the index.
+    conn.execute("""CREATE TRIGGER items_fts_au AFTER UPDATE OF title, summary, author, content ON items BEGIN
+        INSERT INTO items_fts (items_fts, rowid, title, summary, author, content)
+        VALUES ('delete', old.rowid, old.title, old.summary, old.author, old.content);
+        INSERT INTO items_fts (rowid, title, summary, author, content)
+        VALUES (new.rowid, new.title, new.summary, new.author, new.content);
+    END""")
+    conn.execute("INSERT INTO items_fts (items_fts) VALUES ('rebuild')")
+
+
+MIGRATIONS: list[Callable[[sqlite3.Connection], None]] = [_migrate_v1, _migrate_v2, _migrate_v3, _migrate_v4, _migrate_v5, _migrate_v6, _migrate_v7, _migrate_v8, _migrate_v9, _migrate_v10, _migrate_v11, _migrate_v12, _migrate_v13, _migrate_v14, _migrate_v15, _migrate_v16, _migrate_v17]
 
 _ITEM_COLUMNS = ("id, source_id, kind, external_id, url, page_url, title, author, summary, content,"
                  " content_truncated, published, fetched_at, fingerprint, meta, identity_policy,"
@@ -329,6 +370,14 @@ _EVAL_PROJECTION = ', '.join(f'e.{column} AS eval_{column}' for column in _EVAL_
 _SORT_TIME = "COALESCE(published, fetched_at)"
 _ACTIVITY_TIME = "COALESCE(updated_at, fetched_at)"
 _CONTENT_FIELDS = ('title', 'summary', 'content', 'author', 'url', 'page_url', 'published')
+# 参与全文检索的四列，顺序与 items_fts 的列一致
+_SEARCH_COLUMNS = ('title', 'summary', 'author', 'content')
+# trigram 分词器只索引 >= 3 个字符的片段，1–2 字词必须走原生列匹配
+_FTS_MIN_CHARS = 3
+# 标题 > 摘要 > 正文 > 作者
+_FTS_WEIGHTS = '10.0, 3.0, 1.5, 2.0'
+# 短词回退路径只需展示命中位置左右各 60 字
+_SNIPPET_WINDOW = 60
 # 与正文一样参与更新比较的元数据：邮件收件人影响摘要生成，全文哈希感知截断外更新
 _CONTENT_META_FIELDS = ('to', 'cc', 'full_content_sha1')
 # 单条 UPDATE 的参数上限远高于此；分块只是让超大批次不会碰到它
@@ -352,6 +401,26 @@ _LATEST_EVAL_JOIN = (
     ' WHERE e.persona_version = (SELECT MAX(n.persona_version) FROM evaluations n'
     ' WHERE n.pipeline_id = e.pipeline_id AND n.item_id = e.item_id){scope})'
     ' WHERE eval_rank = 1) e ON e.item_id = items.id')
+# 只把命中行放进子查询：外层才能同时拿到 BM25 排名分与摘录
+_FTS_JOIN = (
+    ' JOIN (SELECT rowid AS fts_rowid, bm25(items_fts, ' + _FTS_WEIGHTS + ') AS fts_rank,'
+    " snippet(items_fts, -1, '[', ']', '...', 24) AS fts_snippet"
+    ' FROM items_fts WHERE items_fts MATCH ?) fts ON fts.fts_rowid = items.rowid')
+
+
+@dataclass(frozen=True)
+class SearchPlan:
+    """一个已解析的检索词串：可走倒排索引的长词项 + 只能逐列比较的短词项。"""
+
+    phrases: tuple[str, ...] = ()
+    shorts: tuple[str, ...] = ()
+
+    @property
+    def match(self) -> str | None:
+        """FTS5 查询表达式；每个词项都括成短语，特殊字符因此不会变成语法。"""
+        if not self.phrases:
+            return None
+        return ' AND '.join(_fts_phrase(phrase) for phrase in self.phrases)
 
 
 @dataclass(frozen=True)
@@ -619,11 +688,14 @@ class Store:
 
     def _insert_persona(self, view: PersonaView) -> None:
         self._conn.execute(
-            "INSERT INTO persona_versions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO persona_versions (name, version, profile, tags, include_keywords, exclude_keywords,"
+            " source, note, created_at, tag_status, tag_error, hard_exclude)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (view.name, view.version, view.profile,
              json.dumps([tag.model_dump() for tag in view.tags], ensure_ascii=False),
              json.dumps(view.include, ensure_ascii=False), json.dumps(view.exclude, ensure_ascii=False),
-             view.source, view.note, to_iso(view.created_at), view.tag_status, view.tag_error))
+             view.source, view.note, to_iso(view.created_at), view.tag_status, view.tag_error,
+             json.dumps(view.hard_exclude, ensure_ascii=False)))
 
     # ---- scheduler tasks ---------------------------------------------------
 
@@ -982,18 +1054,28 @@ class Store:
                                      (item_id_,)).fetchone()
         return _row_to_item(row) if row else None
 
-    def list_items(self, q: ItemQuery) -> tuple[list[tuple[Item, Evaluation | None]], int]:
+    def list_items(self, q: ItemQuery) -> tuple[list[ItemHit], int]:
+        """List Items with their latest valid evaluation, optionally ranked by relevance.
+
+        Terms of three characters or more go through the trigram index, which also
+        supplies the BM25 rank and the excerpt; shorter terms (invisible to trigram
+        tokens) are matched natively per column, so no query falls back to a Python
+        callback per row.
+        """
+        plan = _parse_search(q.search) if q.search else SearchPlan()
         where = ["1 = 1"]
         where_args: list[Any] = []
+        from_args: list[Any] = []
         if q.pipeline_id is not None:
-            joined, join_args = _PIPELINE_EVAL_JOIN, [q.pipeline_id]
+            joined = _PIPELINE_EVAL_JOIN
+            from_args = [q.pipeline_id]
         else:
-            scope, join_args = '', []
+            scope = ''
             if q.pipeline_ids is not None:
                 # 画像未配置任何 pipeline 时没有任何评估可关联
                 scope = f" AND e.pipeline_id IN ({','.join('?' * len(q.pipeline_ids))})" \
                     if q.pipeline_ids else ' AND 0'
-                join_args = list(q.pipeline_ids)
+                from_args = list(q.pipeline_ids)
             joined = _LATEST_EVAL_JOIN.format(scope=scope)
         if q.passed is not None:
             where.append('e.passed = ?')
@@ -1016,21 +1098,41 @@ class Store:
         if q.until:
             where.append(f"{_SORT_TIME} < ?")
             where_args.append(to_iso(q.until))
-        if q.search:
-            where.append("(instr(casefold(title), ?) > 0 OR instr(casefold(summary), ?) > 0"
-                         " OR instr(casefold(author), ?) > 0 OR instr(casefold(content), ?) > 0)")
-            where_args += [q.search.casefold()] * 4
+        if plan.match is not None:
+            joined += _FTS_JOIN
+            from_args.append(plan.match)
+        for term in plan.shorts:
+            short_cond, short_args = _literal_hit_condition(_SEARCH_COLUMNS, (term,))
+            where.append(short_cond)
+            where_args += short_args
+        if q.search and not plan.phrases and not plan.shorts:
+            # 只剩标点或引号的查询没有可匹配词项：按“无命中”处理，而不是退回全表
+            where.append('0')
         cond = " AND ".join(where)
-        args = [*join_args, *where_args]
+        order: str = f"{_SORT_TIME} DESC, id"
+        order_args: list[Any] = []
+        if q.sort == 'relevance' and plan.match is not None:
+            order = f"fts.fts_rank ASC, {order}"
+        elif q.sort == 'relevance' and plan.shorts:
+            # 没有倒排索引可用时，标题命中的条目排在前，其余保持时间倒序
+            title_cond, order_args = _literal_hit_condition(('title',), plan.shorts)
+            order = f"{title_cond} DESC, {order}"
+        args = [*from_args, *where_args]
+        rank_columns = "fts.fts_rank, fts.fts_snippet" if plan.match is not None else "NULL AS fts_rank, '' AS fts_snippet"
         with self._lock:
             total = self._conn.execute(f"SELECT COUNT(*) FROM items{joined} WHERE {cond}", args).fetchone()[0]
             rows = self._conn.execute(
-                f"SELECT {_ITEM_COLUMNS}, {_EVAL_PROJECTION} FROM items{joined} WHERE {cond}"
-                f" ORDER BY {_SORT_TIME} DESC, id LIMIT ? OFFSET ?",
-                [*args, q.limit, q.offset],
+                f"SELECT {_ITEM_COLUMNS}, {_EVAL_PROJECTION}, {rank_columns} FROM items{joined} WHERE {cond}"
+                f" ORDER BY {order} LIMIT ? OFFSET ?",
+                [*args, *order_args, q.limit, q.offset],
             ).fetchall()
-        return [(_row_to_item(r), _row_to_evaluation(r, "eval_") if r['eval_pipeline_id'] is not None else None)
-                for r in rows], total
+        hits: list[ItemHit] = []
+        for row in rows:
+            item = _row_to_item(row)
+            snippet = row['fts_snippet'] or (_short_excerpt(item, plan.shorts) if plan.shorts else '')
+            hits.append(ItemHit(item, _row_to_evaluation(row, 'eval_') if row['eval_pipeline_id'] is not None else None,
+                                row['fts_rank'], snippet))
+        return hits, total
 
     # ---- source state -----------------------------------------------------
 
@@ -1278,6 +1380,8 @@ class RunWriter:
                     edit_keywords(old.include if old else [], edit.include_add, edit.include_remove),
             exclude=keywords(edit.exclude_replace) if edit.exclude_replace is not None else
                     edit_keywords(old.exclude if old else [], edit.exclude_add, edit.exclude_remove),
+            hard_exclude=keywords(edit.hard_exclude_replace) if edit.hard_exclude_replace is not None else
+                    edit_keywords(old.hard_exclude if old else [], edit.hard_exclude_add, edit.hard_exclude_remove),
             source=edit.source, note=edit.note, created_at=to_utc(self._now),
             tag_status=edit.tag_status, tag_error=edit.tag_error)
         self._store._insert_persona(view)
@@ -1329,6 +1433,80 @@ class RunWriter:
         return reports
 
 
+def _parse_search(text: str) -> SearchPlan:
+    """Split a query into quoted phrases and 1–2 character fallback terms.
+
+    A phrase is any whitespace-free run of characters; surrounding double quotes
+    keep a phrase that contains spaces together. Terms shorter than a trigram are
+    returned separately because the index can never hold them.
+    """
+    terms: list[str] = []
+    current: list[str] = []
+    quoted = False
+    for char in text:
+        if char == '"':
+            quoted = not quoted
+        elif char.isspace() and not quoted:
+            if current:
+                terms.append(''.join(current))
+                current = []
+        else:
+            current.append(char)
+    if current:
+        terms.append(''.join(current))
+    return SearchPlan(tuple(term for term in terms if len(term) >= _FTS_MIN_CHARS),
+                      tuple(term for term in terms if len(term) < _FTS_MIN_CHARS))
+
+
+def _fts_phrase(term: str) -> str:
+    """Quote one term so operators and punctuation (`C++`, `OR`, `%`) stay literal."""
+    return '"' + term.replace('"', '""') + '"'
+
+
+def _literal_hit_condition(columns: Sequence[str], terms: Sequence[str]) -> tuple[str, list[Any]]:
+    """OR every (column, term) pair with native comparisons, never a Python callback.
+
+    LIKE is ASCII-case-insensitive and only needs its own wildcards escaped; CJK has
+    no case, so `instr` compares bytes. A short Latin-extended term additionally
+    matches its casefolded spelling because the column itself stays unfolded.
+    """
+    conditions: list[str] = []
+    args: list[Any] = []
+    for term in terms:
+        if term.isascii():
+            pattern = '%' + term.replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_') + '%'
+            for column in columns:
+                conditions.append(f"{column} LIKE ? ESCAPE '\\'")
+                args.append(pattern)
+        else:
+            variants = (term,) if term.casefold() == term else (term, term.casefold())
+            for variant in variants:
+                for column in columns:
+                    conditions.append(f'instr({column}, ?) > 0')
+                    args.append(variant)
+    return '(' + ' OR '.join(conditions) + ')', args
+
+
+def _short_excerpt(item: Item, shorts: Sequence[str]) -> str:
+    """A compact `[...]`-marked excerpt around the first short-term hit.
+
+    The hit is located in the original text: casefolding can change length
+    (`İ`, `ß`), so an index found in the folded copy would highlight the wrong
+    characters.
+    """
+    for text in (item.title, item.summary, item.content):
+        for term in shorts:
+            match = re.search(re.escape(term), text, re.IGNORECASE)
+            if match is None:
+                continue
+            start = max(0, match.start() - _SNIPPET_WINDOW)
+            end = min(len(text), match.end() + _SNIPPET_WINDOW)
+            return (('...' if start else '') + text[start:match.start()] + '['
+                    + text[match.start():match.end()] + ']' + text[match.end():end]
+                    + ('...' if end < len(text) else ''))
+    return ''
+
+
 def _row_to_run_error(row: sqlite3.Row) -> RunErrorRecord:
     return RunErrorRecord(**_run_error_fields(row))
 
@@ -1357,7 +1535,8 @@ def _row_to_item(r: sqlite3.Row) -> Item:
 def _row_to_persona(row: sqlite3.Row) -> PersonaView:
     return PersonaView(name=row['name'], version=row['version'], profile=row['profile'],
                        tags=json.loads(row['tags']), include=json.loads(row['include_keywords']),
-                       exclude=json.loads(row['exclude_keywords']), source=row['source'], note=row['note'],
+                       exclude=json.loads(row['exclude_keywords']), hard_exclude=json.loads(row['hard_exclude']),
+                       source=row['source'], note=row['note'],
                        created_at=from_iso(row['created_at']), tag_status=row['tag_status'],
                        tag_error=row['tag_error'])
 

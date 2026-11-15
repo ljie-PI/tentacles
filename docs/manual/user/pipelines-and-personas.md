@@ -23,12 +23,13 @@ personas:
       其次关注科技产业、机器人、科学和能源。
       不关注重复营销、广告和缺乏事实依据的炒作。
     include: [人工智能, AI, 开源]
-    exclude: [广告, 促销]
+    exclude: [广告, 促销]                      # 软排除：同时命中正向兴趣时会被豁免
+    hard_exclude: ['限时特惠', '扫码加群']       # 硬排除：命中即淘汰的确定性垃圾特征
 ```
 
 - **数据库是唯一权威来源**：`personas` 配置仅在数据库中尚不存在同名画像时导入为 `v1 (source=seed)`（首次种子导入**不调用**标签模型）。一旦入库，后续修改 YAML 不会覆盖已有版本。
 - **日常管理方式**：可通过 Web 界面 **Personas** 页在线编辑、预览演化差异与回滚，也可使用 `tentacles persona ...` 命令行工具（所有修改、演化和回滚均为不可变追加新版本，永不覆盖历史）。
-- **自动兴趣标签（Tags）**：手动保存修改了 `profile` 正文时，系统会调用 `defaults.models.persona` 模型抽取 5–20 个按优先级排序的细分标签（若模型失败则自动降级保留旧标签，编辑本身仍成功保存）。仅修改 `include/exclude` 关键词不会调用模型。
+- **自动兴趣标签（Tags）**：手动保存修改了 `profile` 正文时，系统会调用 `defaults.models.persona` 模型抽取 5–20 个按优先级排序的细分标签（若模型失败则自动降级保留旧标签，编辑本身仍成功保存）。仅修改 `include/exclude/hard_exclude` 关键词不会调用模型。
 
 ---
 
@@ -48,8 +49,10 @@ pipelines:
     max_items: 500           # 单次过滤最多评估的候选条数（1~5000）
     filters:
       - type: keyword
+        regex: true
+        hard_exclude: ['sponsored\s+by']
+        guard_ambiguous_exclude: true   # 默认 true：软排除与正向词同时命中时豁免转交下一关
         reject_below: 0.5
-        accept_above: 1.0
       - type: decision
         model: decision
         relevance_type: noul
@@ -74,9 +77,22 @@ pipelines:
 ### 三种过滤器详解
 
 #### ① `keyword`（零成本本地匹配）
-- 合并 Persona 的 `include/exclude` 与当前阶段配置的 `include/exclude`，对“标题 + 摘要”做不区分大小写匹配。
-- 命中 `exclude` 优先得 `0.0` 分；命中 `include` 得 `1.0` 分；均未命中得 `0.5` 分。
-- 可设 `regex: true` 启用 Unicode 正则（单条单阶段限时 50ms 防回溯卡死）。
+- 合并 Persona 的 `include/exclude/hard_exclude` 与当前阶段配置的同名列表，对“标题 + 摘要”做不区分大小写匹配（`regex: true` 时按 Unicode 正则匹配，单条单阶段限时 50ms 防回溯卡死）。
+- 软排除（`exclude`）与硬排除（`hard_exclude`）语义不同：**硬排除**只放无歧义的垃圾特征（`限时特惠`、`扫码加群`、`[AD]`），命中即淘汰；**软排除**放跨领域双关词（`广告`、`营销`），同时命中正向兴趣时会被豁免。
+- 正向特征 = 命中的 `include` 词 ∪ 命中的 Persona 兴趣标签。
+
+| 优先级 | 命中条件 | 得分 | 级联流向 |
+| :--- | :--- | :--- | :--- |
+| 1 | 命中任意 `hard_exclude` | `0.0` | 当场淘汰 |
+| 2 | 命中软 `exclude`，且未开启豁免或没有正向特征 | `0.0` | 当场淘汰 |
+| 3 | 命中软 `exclude`，`guard_ambiguous_exclude: true`（默认）且同时命中正向特征 | `0.55` | **豁免**：不淘汰也不满分短路，转交下一关结合完整画像裁决（若 `keyword` 已是最后一关则保守通过） |
+| 4 | 仅命中正向特征 | `1.0` 或 `0.85` | 见下 |
+| 5 | 均未命中 | `0.5` | 转交下一关 |
+
+- 纯正向命中：`accept_above: 1.0` 时仍给 `1.0` 分短路通过（100% 兼容旧的省钱用法）；未配置 `accept_above` 时给 `0.85` 分，让条目继续进入语义关获取基于完整画像的打分与理由。
+- 每条评估都会记录实际命中的全部具体词项（`match_points`，例如 `命中排除词「广告」，受正向兴趣「开源、算法」豁免转交语义精筛`），可通过 `items list/show` 与 REST `ItemView.match_points` 直接读取；`StageScore.details` 另含 `matched_include` / `matched_exclude` / `matched_hard_exclude` 原始命中列表。
+
+**为什么需要豁免？** 若只想屏蔽带货促销，`exclude: [广告]` 会把《字节开源万亿参数**广告** CTR **算法**模型》一起误杀。把双关词留在 `exclude`、把确定垃圾词放进 `hard_exclude`，《…广告…算法…》会得 `0.55` 分送到语义关，由模型结合完整 Persona 判定；纯促销稿（只命中“广告”）仍得 `0.0` 分淘汰。关闭豁免（`guard_ambiguous_exclude: false`）即恢复旧的无条件淘汰行为。
 
 #### ② `decision`（OpenRouter Decisions / JEV 高并发判别打分）
 - 使用 `kind: decision` 模型（如 `typesafe/jev-1.13`）对每条候选资讯独立判断：**“根据该 Persona 及其优先级，用户是否想读这条内容？”**

@@ -18,7 +18,7 @@ from typing import TYPE_CHECKING, Any
 from urllib.parse import parse_qsl, unquote, urlsplit, urlunsplit
 
 import httpx
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 if TYPE_CHECKING:
     from tentacles.config import AppConfig
@@ -40,7 +40,7 @@ ERROR_PHASES: dict[str, tuple[str, ...]] = {
     'http_status_error': ('fetch_page', 'fetch_detail'),
     'http_redirect_blocked': ('fetch_page', 'fetch_detail'),
     'network_timeout': ('fetch_page', 'fetch_detail'),
-    'connection_failed': ('fetch_page', 'fetch_detail'),
+    'connection_failed': ('fetch_page', 'fetch_detail', 'imap_fetch'),
     'selector_no_match': ('parse_entry',),
     'empty_extracted_body': ('fetch_detail',),
     'playwright_selector_timeout': ('browser_replay',),
@@ -57,6 +57,10 @@ ERROR_PHASES: dict[str, tuple[str, ...]] = {
     'filter_stage_aborted': ('filter_stage',),
     'summarize_batch_unparsed': ('report_process',),
     'citation_out_of_range': ('report_process',),
+    'feed_parse_error': ('fetch_page',),
+    # Appended after the shared vocabulary was published: RSS/Atom entries that
+    # carry neither a title nor any identity can never become an Item.
+    'entry_unusable': ('parse_entry',),
     'unexpected_exception': PHASES,
 }
 ERROR_CODES: tuple[str, ...] = tuple(ERROR_PHASES)
@@ -82,6 +86,10 @@ _SAFE_HEADER_PREFIXES = ('x-ratelimit-',)
 _URL_IN_TEXT = re.compile(r"[a-z][a-z0-9+.\-]{1,15}://[^\s'\"<>]+", re.IGNORECASE)
 _SCRIPT_BLOCK = re.compile(r'<(script|style)\b[^>]*>.*?</\1\s*>', re.IGNORECASE | re.DOTALL)
 _HTML_COMMENT = re.compile(r'<!--.*?-->', re.DOTALL)
+_TAG = re.compile(r'<(/?)([a-zA-Z][\w:-]*)((?:"[^"]*"|\'[^\']*\'|[^>])*)>')
+_ATTRIBUTE = re.compile(r'([\w:.-]+)\s*=\s*("[^"]*"|\'[^\']*\'|[^\s"\'>]+)')
+# Layout-bearing attributes an Agent needs to retarget a selector; text is dropped.
+_LAYOUT_ATTRIBUTES = frozenset({'class', 'id', 'slot', 'href', 'rel', 'role', 'itemprop', 'data-testid'})
 _WHITESPACE = re.compile(r'\s+')
 _AUTH_SCHEMES = frozenset({'bearer', 'basic', 'digest', 'token'})
 
@@ -178,13 +186,18 @@ def classify_failure(exc: BaseException) -> tuple[str, bool, int | None]:
         seen.add(id(current))
         status = _exception_status(current)
         if status is not None:
-            return 'http_status_error', status in _RETRYABLE_STATUS or status >= 500, status
+            return 'http_status_error', status_retryable(status), status
         if isinstance(current, (httpx.TimeoutException, TimeoutError)):
             return 'network_timeout', True, None
         if isinstance(current, (httpx.TransportError, ConnectionError, OSError)):
             return 'connection_failed', True, None
         current = current.__cause__ or current.__context__
     return 'unexpected_exception', False, None
+
+
+def status_retryable(status: int) -> bool:
+    """Whether an HTTP status is worth retrying: throttling or a server fault."""
+    return status in _RETRYABLE_STATUS or status >= 500
 
 
 def _exception_status(exc: BaseException) -> int | None:
@@ -298,6 +311,49 @@ def html_skeleton(html: str, *, limit: int = 2048) -> str:
     """Bound a page's structure for selector triage, never its whole body."""
     text = _HTML_COMMENT.sub('', _SCRIPT_BLOCK.sub('', html))
     return clip(_WHITESPACE.sub(' ', text).strip(), limit)
+
+
+def html_structure_snippet(html: str, *, limit: int = 1500) -> str:
+    """Tag skeleton of one matched node: names and layout attributes, no text.
+
+    A selector miss is usually a wrapper or class rename, so the copy stays
+    comparable to the configured selector while dropping page text that may
+    carry private content.
+    """
+    kept: list[str] = []
+    for match in _TAG.finditer(_HTML_COMMENT.sub('', _SCRIPT_BLOCK.sub('', html))):
+        closing, name, attributes = match.group(1), match.group(2).lower(), match.group(3)
+        if closing:
+            kept.append(f'</{name}>')
+            continue
+        layout = [f'{key}="{value}"' for key, value in _layout_attributes(attributes)]
+        kept.append(f'<{name}{" " + " ".join(layout) if layout else ""}>')
+        if len(kept) * 40 > limit:
+            break
+    return clip(''.join(kept), limit)
+
+
+def _layout_attributes(attributes: str) -> list[tuple[str, str]]:
+    """Keep only the attributes that describe layout, not page text."""
+    kept: list[tuple[str, str]] = []
+    for match in _ATTRIBUTE.finditer(attributes):
+        name = match.group(1).lower()
+        if name in _LAYOUT_ATTRIBUTES:
+            kept.append((name, clip(match.group(2).strip('"\''), 200)))
+    return kept
+
+
+def validation_errors(exc: BaseException) -> list[str]:
+    """Where a schema violation sits, without the offending value.
+
+    A pydantic failure is reported as its field path plus error type: its
+    message can embed the offending value, which may be model output derived
+    from private page or mailbox content. Any other exception is reported as
+    its type and its (code-authored) message.
+    """
+    if not isinstance(exc, ValidationError):
+        return [f'{type(exc).__name__}: {exc}']
+    return [' '.join(str(part) for part in error['loc']) + f': {error["type"]}' for error in exc.errors()]
 
 
 def stack_frames(exc: BaseException, *, limit: int = 4096) -> str:

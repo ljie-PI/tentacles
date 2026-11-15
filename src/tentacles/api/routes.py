@@ -40,10 +40,11 @@ def items(svc: Service, sources: Annotated[list[str] | None, Query()] = None,
           kinds: Annotated[list[ItemKind] | None, Query()] = None,
           since: str | None = None, until: str | None = None, search: str | None = None,
           limit: int = 50, offset: int = 0, pipeline: str | None = None, persona: str | None = None,
-          passed: bool | None = None, min_score: float | None = None, topic: str | None = None):
+          passed: bool | None = None, min_score: float | None = None, topic: str | None = None,
+          sort: str = 'time'):
     return svc.list_items(sources=sources, kinds=[str(kind) for kind in kinds] if kinds else None, since=since, until=until, search=search,
                           limit=limit, offset=offset, pipeline=pipeline, persona=persona, passed=passed,
-                          min_score=min_score, topic=topic)
+                          min_score=min_score, topic=topic, sort=sort)
 
 
 @router.get('/items/{item_id}', response_model=ItemDetail)

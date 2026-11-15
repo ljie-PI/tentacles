@@ -226,6 +226,33 @@ tentacles --json runs show 8
 - ID 不存在时退出码 `3`（`not_found`）。
 - `debug_context` 中模型 `api_key`、`Authorization` / `Cookie` / `Set-Cookie` / `Proxy-Authorization`、IMAP 与代理密码、URL userinfo 及 `token` / `key` / `sig` / `password` / `secret` 等敏感参数一律替换为 `[REDACTED]`；保留的是**请求地址、HTTP 状态与白名单特征头**（`content-type`、`location`、`retry-after`、`server`、`cf-mitigated`、`x-ratelimit-*`）、HTML 骨架裁剪与栈帧摘要。超限时以 `{"truncated": true, ...}` 标记，不会静默丢弃。
 
+### `browser_replay` 阶段的排障现场（`type: browser` 有界面浏览器源）
+
+有界面 Chrome 重放固化脚本失败时（脚本抛错、选择器/整体超时、返回值不合契约、静态导入门禁拦截，
+或本轮返回 0 条），账本里会出现 `phase: "browser_replay"` 的记录。它是**唯一**带实时页面现场的阶段：
+
+| `debug_context` 字段 | 说明 |
+| :--- | :--- |
+| `current_url` | 失败瞬间工作 Tab 的地址；`target_url` 优先取它，取不到时回退源级 `page_url` |
+| `page_title` | 失败瞬间的页面标题（判断是否被登录墙/风控页替换） |
+| `a11y_snapshot` | 精简的 A11y 树摘录（≤ 4096 字符），比 HTML 更小、更能反映真实可见结构与角色名 |
+| `traceback` | 脚本内栈帧（不含局部变量），定位到具体选择器/断言行 |
+| `page_url` | 源配置的入口页地址 |
+
+```bash
+# 看某个浏览器源最近仍失败的记录，再展开现场
+tentacles --json errors list --source reddit-localllama --phase browser_replay --unresolved --since 7d
+tentacles --json errors show <ERROR_ID>
+```
+
+- `playwright_selector_timeout`：等待选择器/整体重放超时，通常是站点改版 → 修改
+  `scripts/browser_sources/<id>.py`；`a11y_snapshot` 里能看到新结构。
+- `script_assertion_failed`：断言失败、返回 0 条（`severity: "warning"`）、返回值不合契约或脚本未通过导入白名单门禁。
+- `retryable` 恒为 `false`：页面结构问题与脚本缺陷不会因重试自愈；修好脚本后同一 `(source_id, target_url)`
+  成功入库会自动回填 `resolved_at`。
+- 若同时看到 `phase: "fetch_page"` 的 `unexpected_exception`，那是整源失败的外层记录（如 Chrome 未开调试端口、
+  Profile 不匹配）；`message` 里带可直接执行的启动命令。
+
 ### `runs show <RUN_ID>`
 
 在 `RunView` 全部字段之外追加 `errors: ErrorEventView[]`（同样是轻量列表，不含 `debug_context`）；运行 ID 不存在时退出码 `3`。
@@ -237,8 +264,10 @@ tentacles --json runs show 8
 | `fetch_page` / `fetch_detail` | `http_status_error` | 目标返回 401/403/404/429/5xx：检查登录态与 Cookie，或把源切换为 `type: browser`；`http_status` 字段给出具体状态码 |
 | `fetch_page` / `fetch_detail` | `http_redirect_blocked` | 静态 `web` 源遇到 301/302；`debug_context` 中的跳转目标即新地址，改用 `https://` 或修正 `url` |
 | `fetch_page` / `fetch_detail` | `network_timeout` | 连接/读取超时（可重试）：多为瞬态网络抖动、代理不通或 TLS 握手失败 |
-| `fetch_page` / `fetch_detail` | `connection_failed` | DNS 解析失败、连接被拒绝、TLS 失败（可重试）：先确认 `url` 可达与代理配置 |
+| `fetch_page` / `fetch_detail` / `imap_fetch` | `connection_failed` | DNS 解析失败、连接被拒绝、TLS 失败、IMAP 拉取中连接中断（可重试）：先确认 `url` 可达与代理配置，IMAP 则确认服务器在线 |
+| `fetch_page` | `feed_parse_error` | RSS/Atom 返回了无法识别的正文（常见于登录页/HTML 错误页）：查看 `debug_context.body_preview` 确认 |
 | `parse_entry` | `selector_no_match` | CSS 选择器匹配数为 0，或列表项缺少 `title` / `link`：需改 `list_selector` / 字段选择器 |
+| `parse_entry` | `entry_unusable` | RSS/Atom 条目既无标题也无 `guid`/`link`，无法定位；`debug_context` 给出原始 `guid`/`link` |
 | `fetch_detail` | `empty_extracted_body` | 详情页 HTTP 200 但正文为空（SPA 空壳或反爬挑战页）：需要浏览器源 |
 | `browser_replay` | `playwright_selector_timeout` | 固化 Playwright 脚本等待选择器超时（页面结构已变） |
 | `browser_replay` | `script_assertion_failed` | 脚本试跑抓到 0 条或断言不通过 |
@@ -256,7 +285,36 @@ tentacles --json runs show 8
 | `report_process` | `citation_out_of_range` | 报告引用编号越界，已丢弃该引用 |
 | 任意阶段 | `unexpected_exception` | 未被更具体分类的失败（`retryable` 为 `false`，需查 `exception_type` 与栈帧） |
 
-> 当前版本会在抓取阶段产出 `network_timeout` / `connection_failed` / `unexpected_exception`，在过滤阶段产出 `filter_stage_aborted`；其余机器码是账本已预留的共享词表，由对应模块在实现后按同一契约写入，Agent 可放心按表编写分支，未出现的码不会作为「未知」返回。
+> 当前版本会在抓取阶段产出 `http_status_error` / `http_redirect_blocked` / `network_timeout` / `connection_failed` / `selector_no_match` / `empty_extracted_body` / `hallucinated_link_dropped` / `invalid_json_schema` / `feed_parse_error` / `entry_unusable` / `imap_auth_failed` / `imap_message_parse_error` / `unexpected_exception`，有界面浏览器源产出 `playwright_selector_timeout` / `script_assertion_failed`，在过滤阶段产出 `decision_item_error` / `llm_batch_parse_error` / `regex_timeout` / `filter_stage_aborted`，在报告阶段产出 `summarize_batch_unparsed` / `citation_out_of_range`；`script_pr` / `pi_heal_exhausted` 等机器码是账本已预留的共享词表，由 `type: browser` 自愈与提 PR 相关实现按同一契约写入，未出现的码不会作为「未知」返回。
+
+### 各模块的 `debug_context` 现场（实战对照）
+
+| 场景 | `error_code` | `debug_context` 关键字段与处理建议 |
+| :--- | :--- | :--- |
+| Web 列表选择器整页失效 | `selector_no_match` | `configured_selectors`（当前生效的全部选择器）、`html_title`、`html_skeleton`（`main`/`body` 的脱敏标签骨架，只保留标签名与 `class`/`id`/`slot`/`href` 等布局属性）：把骨架里的实际标签与 `configured_selectors` 对比即可定位改写点 |
+| 列表部分节点缺 `title`/`link` | `selector_no_match`（`warning`） | `matched_nodes` / `skipped_nodes` 是命中与跳过计数；`node_samples` 最多 10 条，每条含 `node_index`、`title_found`、`link_found` 与该节点的 `node_html_snippet`。`skipped_nodes` 远大于样本数说明是全站式改版 |
+| Web 详情页 3xx | `http_redirect_blocked` | `redirect_location` + `redirect_url`（已解析成绝对地址）：直接把 YAML 的 `url` 换成 `redirect_url` |
+| Cloudflare / 反爬挑战页 | `http_status_error` 或 `empty_extracted_body` | `html_title` 出现 `Just a moment...` / `Attention Required`，`response_headers.cf-mitigated` 为 `challenge`，`retry-after` 给出等待秒数：静态 `web` 源无法绕过，需换 `type: browser` |
+| 详情页 4xx/5xx | `http_status_error` | `http_status`、`known_title`（列表已知标题，便于对照是哪篇）、`elapsed_ms`、`response_headers`（白名单）、`html_title`、`body_preview`（前 1000 字）、`dom_skeleton` |
+| 模型幻觉链接 | `hallucinated_link_dropped`（`warning`） | `dropped_urls`（最多 50 条）与 `dropped_count`：模型编造的链接已被丢弃，不需人工处理 |
+| 抽取输出违反 Schema | `invalid_json_schema` | `validation_errors`（字段路径 + 错误类型，如 `title: string_too_short`）与 `output_preview`（800 字脱敏） |
+| IMAP 单封坏信 | `imap_message_parse_error` | `external_id` 即 `folder:UIDVALIDITY:UID`（可直接用它在客户端里搜到该信），`debug_context.folder` / `uidvalidity` / `uid` / `exception` |
+| `summarize` 批次未解析 | `summarize_batch_unparsed`（`warning`） | `item_ids` 为该批全部条目（≤ 10 条），`target_urls` 便于逐篇核对，`validation_errors` 与 `output_preview` 说明违约点；报告已降级到「未能解析」栏目 |
+| 报告引用越界 | `citation_out_of_range` | `out_of_range` 即模型引用的非法编号列表，`max_number` 是本轮提供的最大合法编号，`item_ids` 是本次选题 |
+| 过滤单条未判定 | `regex_timeout` / `llm_batch_parse_error` / `decision_item_error` | `item_id` + `target_url` 指向具体条目，`stage` / `stage_error` / `stage_message` 说明是哪一级、什么错误；下一轮会自动重试，成功后自动消警 |
+
+### Web 详情页局部失败（`on_detail_error: record_and_skip`）
+
+默认 `fail_batch` 保留原子语义：本轮任一详情失败就整批回滚、游标不前进，但**回滚前所有失败详情已逐条入库**。若改为 `record_and_skip`，失败的那篇只进账本，其余文章正常入库，且失败 `target_url` 不会被写进游标 `seen` 与 `source_seen_ids`：
+
+```bash
+# 哪些漏网链接会在下一轮自动重试（target_url 就是它们）
+tentacles --json errors list --unresolved --source web-list --error-code http_status_error
+# 单篇现场：是不是 Cloudflare 挑战页？
+tentacles --json errors show 21
+```
+
+修复上游后重跑 `sources fetch web-list`，这些目标会自动重试，成功后 `resolved_at` 被回填、从 `--unresolved` 列表消失。
 
 ### 自动消警（`resolved_at`）
 

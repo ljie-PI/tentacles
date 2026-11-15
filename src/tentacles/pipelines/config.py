@@ -32,12 +32,16 @@ class ThresholdSpec(BaseModel):
 class KeywordSpec(ThresholdSpec):
     type: Literal['keyword'] = 'keyword'
     include: list[str] = Field(default_factory=list)
+    # Soft excludes: an ambiguous term plus a positive interest term is handed to
+    # the next stage instead of being rejected outright.
     exclude: list[str] = Field(default_factory=list)
+    hard_exclude: list[str] = Field(default_factory=list)
+    guard_ambiguous_exclude: bool = True
     regex: bool = False
 
     @model_validator(mode='after')
     def _keywords(self):
-        for pattern in self.include + self.exclude:
+        for pattern in self.include + self.exclude + self.hard_exclude:
             if not pattern.strip():
                 raise ValueError('keywords must not be blank')
             if self.regex:

@@ -11,6 +11,8 @@ from typing import Any, Callable, ClassVar, Type, TYPE_CHECKING
 from pydantic import BaseModel
 
 from tentacles.config import AppConfig, SourceSpec
+from tentacles.diagnostics import DiagnosticEvent
+from tentacles.errors import UpstreamError
 from tentacles.models import Item, ItemObservation, LinkDisposition
 from tentacles.net import HttpPool
 from tentacles.sources.imap_client import ImapFactory, connect_imap
@@ -18,6 +20,21 @@ from tentacles.llm.types import UsageTotals
 
 if TYPE_CHECKING:
     from tentacles.llm.registry import ModelRegistry
+
+
+def discard_diagnostic(event: DiagnosticEvent) -> None:
+    """Default sink: a source exercised outside a Run records nothing."""
+
+
+class DiagnosedError(UpstreamError):
+    """An upstream failure whose triage snapshot is already in the Run's ledger.
+
+    Adapters raise it after `FetchContext.record_error` captured the concrete
+    failed target, so the runner does not add a second, generic ledger row for
+    the same failure.
+    """
+
+    diagnosed = True
 
 
 @dataclass
@@ -30,6 +47,9 @@ class FetchContext:
     models: ModelRegistry | None = None
     metrics: UsageTotals = field(default_factory=UsageTotals)
     classify_links: Callable[[list[str]], dict[str, LinkDisposition]] | None = None
+    config: AppConfig | None = None
+    # Per-target failure diagnostics, wired straight to the owning RunOperation.
+    record_error: Callable[[DiagnosticEvent], None] = discard_diagnostic
 
 
 @dataclass
