@@ -135,6 +135,17 @@ trigram index over the four searchable columns, kept in sync by SQL triggers rat
 than by the write paths. `Store.list_items` is that seam: three or more character
 terms come from the index, shorter ones are matched natively per column, so callers
 must not build their own `LIKE` scans to narrow a listing.
+Schema 18 adds the `archived_identities` tombstone table. `archive.py`
+(`ArchiveManager`) owns the two-phase yearly cold archive: it writes complete copies
+into `data/archive/tentacles-YYYY.db` (opened through `Store`, so the cold database
+carries the same schema and its own `items_fts`) and `Store.import_archived` verifies
+rows and index before `Store.archive_move` tombstones identities and deletes the hot
+rows in one transaction. Cold databases are sealed out of WAL mode so a plain
+read-only `Store(read_only=True)` never creates side files. `--include-archive`
+queries each database separately and merges in memory, which keeps cross-year reads
+independent of SQLite's ten-database `ATTACH` limit. Dedup reads `archived_identities`
+through the same identity rules as live rows, so an archived article can never return
+as `new`.
 Pipeline activity is `COALESCE(updated_at, fetched_at)` with expression indexes;
 the Feed deliberately retains `COALESCE(published, fetched_at)`. Filter captures
 the input revision before scoring, and evaluation/report publication validates it

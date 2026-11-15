@@ -24,6 +24,7 @@
 | `--sort time\|relevance` | 排序方式，默认 `time`（发布时间倒序）；`relevance` 需配合 `--search`，命中条目按 BM25 相关性排序（标题权重最高） |
 | `--limit N` | 每页返回条数，范围 `1..500`，默认 `50` |
 | `--offset N` | 分页偏移量，默认 `0` |
+| `--include-archive` | 连同各年度冷归档库（`data/archive/tentacles-YYYY.db`）一起查询，结果用 `archive_year` 标注年份；`items list`、`items search`、`items show` 都支持 |
 
 ### 返回 JSON 结构（`Page[ItemView]`）
 
@@ -58,6 +59,7 @@
       "tags": ["人工智能与开源"],
       "reason": "发布了实质性的开源本地推理引擎代码",
       "stage": "llm",
+      "archive_year": null,
       "stage_scores": [
         {
           "index": 0,
@@ -97,6 +99,8 @@
   - `reason` / `stage_scores`：最终阶段的简短判定理由与级联中走过的每个阶段的完整打分轨迹与模型原始答案（例如 JEV `decision` 阶段在 `details.answers` 中包含 `noul` 概率、`raw_score`、`confidence` 或各标签 `probabilities`）。
 - **评估的有效性**：只有 `input_revision == content_revision`（评估针对当前正文）的评估才会被关联；正文更新后旧评估自动失效，条目回到 `match_level: "unscored"`，直到重新过滤。
 - **`snippet`**：仅在带 `--search` 时返回命中高亮摘录（命中处用 `[...]` 包裹），不检索时为 `null`；需要 `bm25_rank` 时请用 `items search`。
+- **`archive_year`**：条目来自热库时为 `null`；加 `--include-archive` 时，来自 `tentacles-2025.db` 的条目为
+  `2025`。跨年结果是**只读**的：冷库里的条目不会再被更新、过滤或反馈，需要原文时顺着 `url` 回访。
 
 ---
 
@@ -110,6 +114,10 @@ tentacles --json items search Playwright --persona default --min-score 0.8
 ```
 
 - **默认排序**：`relevance`（BM25 相关性，标题权重 10 > 摘要 3 > 正文 2 > 作者 1.5）。只含 1–2 字短词、没有倒排索引分数的查询改为「标题命中优先 + 发布时间倒序」，此时 `bm25_rank` 为 `null`。`--sort time` 可切回发布时间倒序。
+- **跨年检索**：加 `--include-archive` 时热库与各年冷库分别检索后在内存归并分页（每个库内部都有自己的
+  `items_fts`），不受 SQLite 单连接最多 `ATTACH 10` 个库的限制，命中条目用 `archive_year` 标注年份。
+  BM25 是**库内**统计量：跨库归并时按各库返回的分值排序，因此不同年份的分值不严格可比；纯 1–2 字短词的
+  查询没有分值，跨年归并按发布时间倒序。
 - **筛选与分页**：与 `items list` 完全一致——`--source/-s`、`--pipeline`、`--persona`、`--passed/--rejected`、`--min-score`、`--topic`、`--since/--until`、`--limit 1..500`、`--offset`，关联的同样是“当前正文对应的最新一次有效评估”。
 - **返回 `Page[ItemSearchView]`**：在 `ItemView` 的全部字段之外新增两个字段：
 
@@ -149,6 +157,8 @@ tentacles --json items search Playwright --persona default --min-score 0.8
 
 ```bash
 tentacles --json items show 6912c034fd032f1e
+# 热库里找不到的旧条目：到各年冷库依次查找
+tentacles --json items show 6912c034fd032f1e --include-archive
 ```
 
 返回 `ItemDetail`（包含 `ItemView` 的全部字段，其中评估相关字段为最新一次有效评估，并新增以下 4 个字段）：
@@ -161,6 +171,9 @@ tentacles --json items show 6912c034fd032f1e
 | **`evaluations`** | `Evaluation[]` | 该条目在**所有已评估过的 Pipeline** 下的最新评分记录，每条额外包含 `match_points` 与 `reported_at`（若已被某 Pipeline 消费写入报告则为 UTC 时间戳，未消费则为 `null`） |
 
 `content` 与 `content_truncated` 与列表一致：正文最多 1000 字/词，完整原文请打开 `url`。
+
+不带 `--include-archive` 时，已归档条目返回 `not_found`（退出码 `3`）；带上后 `archive_year` 给出所在冷库的
+自然年，`evaluations` 是该条目在冷库里的全部评估（冷库只读，这些评估不会再生效或写回热库）。
 
 ---
 

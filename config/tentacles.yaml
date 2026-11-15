@@ -9,6 +9,9 @@ app:
   timezone: Asia/Shanghai     # 展示与 cron 计算使用的时区；数据库内一律存 UTC
   data_dir: ../data           # SQLite 数据库位置
   reports_dir: ../reports     # 报告输出目录
+  storage:                    # 冷热分层：`tentacles --json storage` 运维命令的默认值
+    hot_retention_days: 365   # 热库保留天数；`storage archive` 默认把更早的条目按自然年搬进冷库
+    archive_dir: ../data/archive  # 年度冷库目录（tentacles-YYYY.db），相对本文件解析
 
 # 命名模型：不填写 key 也可以校验配置、抓取 RSS；实际调用时才报 upstream。
 # provider: openai（包括 DeepSeek/Moonshot/Ollama/vLLM）、anthropic、openrouter。

@@ -64,10 +64,14 @@ tentacles items list --since 24h  # 查看最近 24 小时的条目
 | `tentacles items list` | 列出条目（含截断正文、`page_url` 与最新评估），可按来源、时间、关键词、`--persona`、`--min-score`、`--topic` 筛选，支持分页与 `--sort time\|relevance` |
 | `tentacles items search QUERY` | 全文检索条目：默认按 BM25 相关性排序（标题权重最高），返回 `bm25_rank` 与命中高亮 `snippet`；支持与 `items list` 一致的筛选与分页 |
 | `tentacles items show ID` | 查看条目详情（正文、来源元数据与各 Pipeline 最新评估） |
+| `tentacles items list/search/show ... --include-archive` | 跨年只读查询：与各年度冷归档库归并分页，结果用 `archive_year` 标注年份 |
 | `tentacles tick` | 先并发抓取，再依次过滤、依次运行到期 pipeline |
 | `tentacles scheduler status` | 查看任务频率、到期时间、运行状态 |
 | `tentacles pipelines list/filter/run ID` | 查看 pipeline、只过滤或生成报告 |
 | `tentacles reports list/show ID` | 查看报告列表和全文 |
+| `tentacles storage status` | 热库与各年度冷库的体积、WAL 体积、各表行数与 FTS 行数 |
+| `tentacles storage reindex [--optimize] [--include-archive]` | 在线重建（或合并）FTS5 全文索引 |
+| `tentacles storage archive [--before T] [--dry-run] [--vacuum]` | 把超过 `hot_retention_days` 的条目按自然年搬进冷库 |
 | `tentacles runs list` | 查看运行记录 |
 | `tentacles runs show RUN_ID` | 查看单次运行的统计与本次记录的故障列表 |
 | `tentacles errors list` | 检索故障账本，支持 `--unresolved`、`--source`、`--pipeline`、`--phase`、`--error-code`、`--run-id`、`--since/--until` 与分页 |
@@ -87,6 +91,25 @@ tentacles --json items list --persona default --min-score 0.8 --topic 人工智�
 # 按相关性检索，拿回 BM25 排名分与命中高亮摘录
 tentacles --json items search '广告推荐 AI' --limit 20
 ```
+
+## 冷归档：单活跃热库 + 按年冷库
+
+`data/tentacles.db` 始终是唯一的在线库——7 天深度聚类、30 天反馈回溯、跨月原位更新与外键完整性都不拆分。
+超过 `app.storage.hot_retention_days`（默认 365 天）的历史条目可以按发布年份搬进 `data/archive/tentacles-YYYY.db`
+（每个冷库自带 `items_fts`），热库只留下极窄的去重墓碑 `archived_identities`，因此归档后旧文不会被任何源重新当成新条目：
+
+```bash
+# 空跑：只统计会迁出与豁免的条目，不改任何文件
+tentacles --json storage archive --dry-run
+# 正式归档（先写冷库并校验，再在一个热库事务里写墓碑、删冷行），并回收空间
+tentacles --json storage archive --before 365d --vacuum
+# 跨年检索：热库 + 全部冷库归并分页，archive_year 标注年份
+tentacles --json items search 'iPhone' --include-archive
+```
+
+仍有未决错误、处于反馈窗口内、或最近 30 天还有更新的条目会自动留在热库；中途被打断时热库要么全有要么全无，
+重跑幂等。配置与运维细节见 [配置手册](docs/manual/user/configuration-and-models.md#5-存储冷热分层与年度冷归档appstorage)
+与 [Agent CLI 手册](docs/manual/agent-cli/operations-reference.md#7-存储状态索引重建与冷归档storage)。
 
 ## RSS / Atom 与 Web list / llm 原位更新（可选）
 

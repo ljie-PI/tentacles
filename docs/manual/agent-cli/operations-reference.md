@@ -336,3 +336,111 @@ tentacles --json errors show 21
 6. **单条已入库条目的过滤异常**：`items show <ITEM_ID>` 查看 `evaluations[].stage_scores[].error`（已入库数据仍保留在此，不在账本里）。
 
 注意：账本只记录执行期的失败现场，不含任何业务数据；修好配置后可以用 `errors list --unresolved` 的条数下降来验证修复是否生效。
+
+---
+
+## 7. 存储状态、索引重建与冷归档（`storage`）
+
+热库 `data/tentacles.db` 始终是唯一的在线数据库；超过 `app.storage.hot_retention_days`（默认 365 天）的历史
+条目可以按**发布时间的自然年**搬进 `data/archive/tentacles-YYYY.db`（各自带 `items_fts` 索引）。三条命令都支持
+`--json`，另有只读的 `--include-archive` 用于跨年检索（见 [读取与消费采集结果](consuming-items-and-reports.md)）。
+
+```bash
+# 体积、WAL 体积、各表行数、FTS 行数、条目时间范围与全部年度冷库清单
+tentacles --json storage status
+
+# 在线重建 FTS5 索引（--optimize 只合并索引段；--include-archive 连各年冷库一起处理）
+tentacles --json storage reindex --optimize --include-archive
+
+# 先空跑：只统计会迁出多少条、哪些条目因活跃关联被豁免，不创建也不修改任何文件
+tentacles --json storage archive --dry-run
+
+# 正式归档（默认截止时间 = 今天 - hot_retention_days），成功后回收热库空间
+tentacles --json storage archive --before 365d --vacuum
+
+# 指定截止日期：按配置的 app.timezone 解析
+tentacles --json storage archive --before 2025-01-01
+```
+
+### `storage status` 返回（`StorageStatus`）
+
+```json
+{
+  "path": "/srv/tentacles/data/tentacles.db",
+  "db_bytes": 495616,
+  "wal_bytes": 0,
+  "schema_version": 18,
+  "tables": {"items": 50, "evaluations": 420, "reports": 18, "runs": 900, "run_errors": 12, "archived_identities": 137},
+  "fts_indexed_rows": 50,
+  "oldest_item_at": "2026-03-15T08:00:00Z",
+  "newest_item_at": "2026-11-01T09:10:00Z",
+  "hot_retention_days": 365,
+  "archive_dir": "/srv/tentacles/data/archive",
+  "archives": [
+    {"year": 2025, "path": "/srv/tentacles/data/archive/tentacles-2025.db", "bytes": 458752,
+     "items": 8120, "evaluations": 24000, "fts_indexed_rows": 8120}
+  ]
+}
+```
+
+- `tables.archived_identities` 是热库里永久保留的去重墓碑行数，不是条目数；`fts_indexed_rows` 应恒等于
+  `tables.items`（不等就说明索引需要 `storage reindex`）。
+- `wal_bytes`：热库 WAL 体积。检查点之后为 `0`；持续增长说明有长事务或副本进程一直读着旧快照。
+
+### `storage reindex` 返回（`StorageReindex`）
+
+```json
+{
+  "optimize": true,
+  "rows": 8170,
+  "seconds": 0.42,
+  "databases": [
+    {"path": "/srv/tentacles/data/tentacles.db", "year": null, "rows": 50, "seconds": 0.01},
+    {"path": "/srv/tentacles/data/archive/tentacles-2025.db", "year": 2025, "rows": 8120, "seconds": 0.41}
+  ]
+}
+```
+
+- `--optimize` 只做 FTS5 段合并（不改内容）；不带它则 `rebuild` 全量重建，耗时更长但能修好索引与行数不一致。
+- 各年冷库若不存在，`--include-archive` 不会凭空创建。
+
+### `storage archive` 返回（`StorageArchive`）
+
+```json
+{
+  "dry_run": false,
+  "cutoff": "2025-11-15T19:35:49.264145Z",
+  "vacuumed": true,
+  "items": 88,
+  "evaluations": 6,
+  "deferred": 0,
+  "years": [
+    {"year": 2024, "path": "/srv/tentacles/data/archive/tentacles-2024.db", "items": 38, "evaluations": 3, "bytes": 409600},
+    {"year": 2025, "path": "/srv/tentacles/data/archive/tentacles-2025.db", "items": 50, "evaluations": 3, "bytes": 458752}
+  ],
+  "exempt": {"recent_activity": 0, "active_feedback": 1, "unresolved_errors": 1},
+  "seconds": 0.044
+}
+```
+
+| 字段 | 说明 |
+| :--- | :--- |
+| `cutoff` | 实际使用的截止时间（UTC）；早于它的条目才可能被迁出 |
+| `items` / `evaluations` | 本次真正搬走的条目数与评估数（`dry-run` 时是计划搬走量） |
+| `years[]` | 按自然年分组的结果；`items` 是该年冷库里本次新增的条数，`bytes` 是归档后的库体积（`dry-run` 为 `0`） |
+| `deferred` | 归档期间被更新（或新近产生未决错误/反馈）而临时留在热库的条数；下次再跑会自动重试 |
+| `exempt` | 早于截止时间却豁免的条目数，三个原因互不重叠：`recent_activity`（最近 30 天有更新）、`active_feedback`（`persona_update.feedback_window` 内的反馈）、`unresolved_errors`（仍有未决错误） |
+
+### 语义与安全边界
+
+- **去重墓碑让旧文不复活**：迁出的条目在热库留下 `archived_identities`（含源内外部身份、原文链接、内容指纹），
+  并且 `source_seen_ids` 永不清理。归档后再抓同一个源，旧文章既不会变成 `new`，也不会重新生成条目。
+  需要正文时用 `items show <ID> --include-archive`。
+- **两阶段、可重跑**：先写冷库并校验其 `items_fts`，再在单个热库写事务里写墓碑并删除冷行。中途被打断时热库
+  要么全有要么全无；重跑幂等（不会重复计数），已完成的部分直接跳过。
+- **不动的数据**：`reports`（自带完整 markdown）永远留在热库；`pipeline_consumption` 与 `feedback` 行保留，
+  因此报告与已消费标记不会失效。`run_errors` 账本本身不迁移。
+- **`--dry-run` 纯只读**：不创建 `archive_dir`、不写墓碑、不改任何文件，可安全地放进定时巡检。
+  `--vacuum` 不能与 `--dry-run` 同时使用（退出码 `2`）。
+- **`--before` 解析**：接受相对时长（`365d`、`2w`、`24h`）或 ISO 日期/时间（无时区后缀按 `app.timezone`）。
+  格式非法返回退出码 `2`（`invalid`），不会退化成“归档全部”。

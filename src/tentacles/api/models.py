@@ -42,6 +42,13 @@ class PipelineFilter(BaseModel):
     since: str | None = None
 
 
+class StorageArchiveRequest(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    before: str | None = None
+    dry_run: bool = False
+    vacuum: bool = False
+
+
 class PersonaVersionRequest(BaseModel):
     model_config = ConfigDict(extra='forbid')
     name: str = Field(min_length=1)

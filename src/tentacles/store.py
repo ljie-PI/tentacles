@@ -21,7 +21,7 @@ from tentacles.diagnostics import DiagnosticEvent, FailedTargetRef, RunErrorDeta
 from tentacles.models import (CONTENT_UNITS, SUMMARY_UNITS, Item, ItemObservation, LinkDisposition,
                               item_id, normalize_url)
 from tentacles.text import truncate_content_units
-from tentacles.errors import Conflict
+from tentacles.errors import Conflict, TentaclesError
 from tentacles.personas.models import FeedbackView, PersonaEdit, PersonaView, edit_keywords, keywords
 from tentacles.timeutil import from_iso, to_iso, to_utc, utcnow
 from tentacles.tasks import Claim, Task, TaskState
@@ -81,6 +81,34 @@ class ItemHit:
     evaluation: Evaluation | None
     bm25_rank: float | None = None
     snippet: str = ''
+
+
+@dataclass(frozen=True)
+class ArchiveCopy:
+    """一条待迁入冷归档库的条目及其对应评估。"""
+
+    item: Item
+    evaluations: tuple[Evaluation, ...] = ()
+
+
+@dataclass(frozen=True)
+class ArchiveExemptions:
+    """早于截止时间但因活跃关联而豁免归档的条目数；三个原因互不重叠。"""
+
+    recent_activity: int = 0
+    active_feedback: int = 0
+    unresolved_errors: int = 0
+
+
+@dataclass(frozen=True)
+class DatabaseStats:
+    """一个数据库的体积无关计数：schema 版本、各表行数与条目时间范围。"""
+
+    schema_version: int
+    tables: dict[str, int]
+    fts_indexed_rows: int
+    oldest_item_at: datetime | None
+    newest_item_at: datetime | None
 
 
 @dataclass
@@ -358,7 +386,19 @@ def _migrate_v17(conn: sqlite3.Connection) -> None:
     conn.execute("INSERT INTO items_fts (items_fts) VALUES ('rebuild')")
 
 
-MIGRATIONS: list[Callable[[sqlite3.Connection], None]] = [_migrate_v1, _migrate_v2, _migrate_v3, _migrate_v4, _migrate_v5, _migrate_v6, _migrate_v7, _migrate_v8, _migrate_v9, _migrate_v10, _migrate_v11, _migrate_v12, _migrate_v13, _migrate_v14, _migrate_v15, _migrate_v16, _migrate_v17]
+def _migrate_v18(conn: sqlite3.Connection) -> None:
+    # 条目迁入按年冷库后，热库永久保留最窄的身份墓碑，保证旧文不会被重新当成新条目。
+    conn.execute("""CREATE TABLE archived_identities (
+        source_id TEXT NOT NULL, external_id TEXT NOT NULL, url TEXT NOT NULL DEFAULT '',
+        fingerprint TEXT NOT NULL DEFAULT '', archive_year INTEGER NOT NULL, archived_at TEXT NOT NULL,
+        PRIMARY KEY (source_id, external_id)
+    )""")
+    conn.execute("CREATE INDEX idx_archived_identities_url ON archived_identities (url) WHERE url != ''")
+    conn.execute('CREATE INDEX idx_archived_identities_fp ON archived_identities (fingerprint)'
+                 " WHERE fingerprint != ''")
+
+
+MIGRATIONS: list[Callable[[sqlite3.Connection], None]] = [_migrate_v1, _migrate_v2, _migrate_v3, _migrate_v4, _migrate_v5, _migrate_v6, _migrate_v7, _migrate_v8, _migrate_v9, _migrate_v10, _migrate_v11, _migrate_v12, _migrate_v13, _migrate_v14, _migrate_v15, _migrate_v16, _migrate_v17, _migrate_v18]
 
 _ITEM_COLUMNS = ("id, source_id, kind, external_id, url, page_url, title, author, summary, content,"
                  " content_truncated, published, fetched_at, fingerprint, meta, identity_policy,"
@@ -407,6 +447,21 @@ _FTS_JOIN = (
     " snippet(items_fts, -1, '[', ']', '...', 24) AS fts_snippet"
     ' FROM items_fts WHERE items_fts MATCH ?) fts ON fts.fts_rowid = items.rowid')
 
+# 归档筛选：截止时间之外还要避开仍活跃的关联（参数顺序按 SQL 出现顺序）
+_ARCHIVE_OLDER = 'COALESCE(published, fetched_at) < ?'
+_ARCHIVE_ACTIVE = 'COALESCE(updated_at, fetched_at) >= ?'
+_ARCHIVE_FEEDBACK = 'EXISTS (SELECT 1 FROM feedback f WHERE f.item_id = items.id AND f.created_at >= ?)'
+_ARCHIVE_UNRESOLVED = ('EXISTS (SELECT 1 FROM run_errors e WHERE e.item_id = items.id'
+                       ' AND e.resolved_at IS NULL)')
+# 可安全归档：早于截止时间，且最近没有活动、没有活跃反馈、没有未决错误
+_ARCHIVE_SAFE = (f'{_ARCHIVE_OLDER} AND NOT ({_ARCHIVE_ACTIVE})'
+                 f' AND NOT ({_ARCHIVE_FEEDBACK}) AND NOT ({_ARCHIVE_UNRESOLVED})')
+# 单条复查用同一组条件（不带截止时间），正文又变了就留在热库
+_ARCHIVE_RECHECK = (f'NOT ({_ARCHIVE_ACTIVE}) AND NOT ({_ARCHIVE_FEEDBACK})'
+                    f' AND NOT ({_ARCHIVE_UNRESOLVED})')
+# storage status 报行数的表，以及冷库同样是这套 schema
+_STATS_TABLES = ('items', 'evaluations', 'reports', 'runs', 'run_errors', 'archived_identities')
+
 
 @dataclass(frozen=True)
 class SearchPlan:
@@ -431,12 +486,16 @@ class ItemWriteResult:
 
 
 class Store:
-    def __init__(self, path: str | Path, *, snapshot: bool = False):
+    def __init__(self, path: str | Path, *, snapshot: bool = False, read_only: bool = False):
+        if snapshot and read_only:
+            raise ValueError('a snapshot store is writable in memory; read_only is for on-disk archives')
         self.path = Path(path)
-        if not snapshot:
+        if not (snapshot or read_only):
             self.path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
-        self._conn = sqlite3.connect(':memory:' if snapshot else self.path, check_same_thread=False)
+        target = ':memory:' if snapshot else (
+            self.path.resolve().as_uri() + '?mode=ro' if read_only else self.path)
+        self._conn = sqlite3.connect(target, uri=read_only, check_same_thread=False)
         try:
             if snapshot and self.path.exists():
                 # Copy through SQLite's backup API, including live WAL data. All
@@ -452,8 +511,12 @@ class Store:
             self._conn.row_factory = sqlite3.Row
             self._conn.create_function("casefold", 1, str.casefold, deterministic=True)
             self._conn.execute("PRAGMA busy_timeout = 5000")
-            self._enable_wal()
-            self._migrate()
+            if read_only:
+                # 冷库只读打开：不换 WAL、不迁移，并让任何误写直接报错
+                self._conn.execute("PRAGMA query_only = ON")
+            else:
+                self._enable_wal()
+                self._migrate()
         except BaseException:
             self._conn.close()
             raise
@@ -803,12 +866,17 @@ class Store:
             for offset in range(0, len(urls), 500):
                 chunk = urls[offset:offset + 500]
                 placeholders = ','.join('?' for _ in chunk)
-                for table in ('source_seen_ids', 'suppressed_items'):
+                for table in ('source_seen_ids', 'suppressed_items', 'archived_identities'):
                     rows = self._conn.execute(f'SELECT external_id FROM {table}'
                         f' WHERE source_id = ? AND external_id IN ({placeholders})', [source_id, *chunk]).fetchall()
                     known.update(row[0] for row in rows)
                 rows = self._conn.execute(f"SELECT url FROM items WHERE identity_policy = 'standard'"
                     f" AND url != '' AND url IN ({placeholders})", chunk).fetchall()
+                known.update(row[0] for row in rows)
+                # 已归档条目的原文链接同样是旧链接：URL 级身份从不分来源
+                rows = self._conn.execute(
+                    f"SELECT url FROM archived_identities WHERE url != '' AND url IN ({placeholders})",
+                    chunk).fetchall()
                 known.update(row[0] for row in rows)
         return known
 
@@ -916,7 +984,7 @@ class Store:
         if not rows and any(self._conn.execute(
                 f'SELECT 1 FROM {table} WHERE source_id = ? AND external_id = ?',
                 (it.source_id, it.external_id)).fetchone()
-                for table in ('suppressed_items', 'source_seen_ids')):
+                for table in ('suppressed_items', 'source_seen_ids', 'archived_identities')):
             return 'suppressed'
         url = normalize_url(observation.url) if observation.url else ''
         matches = self._conn.execute(
@@ -1015,26 +1083,32 @@ class Store:
              it.fingerprint, json.dumps(it.meta, ensure_ascii=False), it.identity_policy, None, 1))
 
     # 三条规则各走自己的索引；合成一个 OR 查询会退化为全表扫描
+    # 已归档条目的墓碑参与同样三条规则，旧文因此不会以 new 重新入库
     _SUPPRESSED = "SELECT 1 FROM suppressed_items WHERE source_id = ? AND external_id = ?"
-    _DUP_BY_ID = "SELECT 1 FROM items WHERE source_id = ? AND external_id = ?"
-    _DUP_BY_URL = "SELECT 1 FROM items WHERE url = ? AND url != '' AND identity_policy = 'standard'"
-    _DUP_BY_FP = "SELECT 1 FROM items WHERE fingerprint = ? AND kind != 'email' AND identity_policy = 'standard'"
+    _DUP_BY_ID = ("SELECT 1 FROM items WHERE source_id = ? AND external_id = ?"
+                  " UNION ALL SELECT 1 FROM archived_identities WHERE source_id = ? AND external_id = ?")
+    _DUP_BY_URL = ("SELECT 1 FROM items WHERE url = ? AND url != '' AND identity_policy = 'standard'"
+                   " UNION ALL SELECT 1 FROM archived_identities WHERE url = ? AND url != ''")
+    _DUP_BY_FP = ("SELECT 1 FROM items WHERE fingerprint = ? AND kind != 'email'"
+                  " AND identity_policy = 'standard'"
+                  " UNION ALL SELECT 1 FROM archived_identities WHERE fingerprint = ? AND fingerprint != ''")
 
     def _is_duplicate(self, it: Item) -> bool:
         c = self._conn
         if it.identity_policy == 'standard' and c.execute(self._SUPPRESSED, (it.source_id, it.external_id)).fetchone():
             return True
-        if c.execute(self._DUP_BY_ID, (it.source_id, it.external_id)).fetchone():
+        if c.execute(self._DUP_BY_ID, (it.source_id, it.external_id, it.source_id, it.external_id)).fetchone():
             return True
         if it.identity_policy == 'revision':
             return False
-        if it.url and c.execute(self._DUP_BY_URL, (it.url,)).fetchone():
+        if it.url and c.execute(self._DUP_BY_URL, (it.url, it.url)).fetchone():
             return True
-        return it.kind != "email" and bool(c.execute(self._DUP_BY_FP, (it.fingerprint,)).fetchone())
+        return it.kind != "email" and bool(c.execute(self._DUP_BY_FP, (it.fingerprint, it.fingerprint)).fetchone())
 
     def source_ids(self) -> set[str]:
         with self._lock:
-            return {r[0] for r in self._conn.execute("SELECT DISTINCT source_id FROM items")}
+            return {r[0] for r in self._conn.execute(
+                "SELECT DISTINCT source_id FROM items UNION SELECT DISTINCT source_id FROM archived_identities")}
 
     def _recent_titles(self, *, exclude_source: str, since: datetime) -> list[str]:
         """Titles of non-email items other sources stored since `since`."""
@@ -1133,6 +1207,152 @@ class Store:
             hits.append(ItemHit(item, _row_to_evaluation(row, 'eval_') if row['eval_pipeline_id'] is not None else None,
                                 row['fts_rank'], snippet))
         return hits, total
+
+    # ---- cold archive & storage ops ---------------------------------------
+
+    def archive_candidates(self, cutoff: datetime, *, activity_since: datetime,
+                           feedback_since: datetime) -> tuple[list[ArchiveCopy], ArchiveExemptions]:
+        """Read-only selection of everything `storage archive` would move out.
+
+        `cutoff` is the newest publish/fetch time that still qualifies; the other
+        two instants protect the activity window and the active feedback window.
+        """
+        args = [to_iso(cutoff), to_iso(activity_since), to_iso(feedback_since)]
+        exempt_queries = [
+            (f'{_ARCHIVE_OLDER} AND {_ARCHIVE_ACTIVE}', args[:2]),
+            (f'{_ARCHIVE_OLDER} AND NOT ({_ARCHIVE_ACTIVE}) AND {_ARCHIVE_FEEDBACK}', args),
+            (f'{_ARCHIVE_OLDER} AND NOT ({_ARCHIVE_ACTIVE}) AND NOT ({_ARCHIVE_FEEDBACK})'
+             f' AND {_ARCHIVE_UNRESOLVED}', args),
+        ]
+        with self._lock:
+            rows = self._conn.execute(f'SELECT {_ITEM_COLUMNS} FROM items WHERE {_ARCHIVE_SAFE}'
+                                      f' ORDER BY {_SORT_TIME}, id', args).fetchall()
+            evaluations: dict[str, list[Evaluation]] = {}
+            for row in self._conn.execute('SELECT e.* FROM evaluations e JOIN items ON items.id = e.item_id'
+                                          f' WHERE {_ARCHIVE_SAFE} ORDER BY e.pipeline_id, e.item_id', args):
+                evaluations.setdefault(row['item_id'], []).append(_row_to_evaluation(row))
+            counts = [self._conn.execute(f'SELECT COUNT(*) FROM items WHERE {condition}',
+                                         condition_args).fetchone()[0]
+                      for condition, condition_args in exempt_queries]
+        exempt = ArchiveExemptions(*counts)
+        return ([ArchiveCopy(_row_to_item(row), tuple(evaluations.get(row['id'], ()))) for row in rows], exempt)
+
+    def archive_move(self, year: int, items: Sequence[Item], *, now: datetime,
+                     activity_since: datetime, feedback_since: datetime) -> list[str]:
+        """Tombstone the identities of `items`, then delete their hot rows at once.
+
+        A row that changed after the cold copy was taken, or that gained a pending
+        error or feedback since selection, stays hot: the caller drops its stale
+        cold copy and retries later. Returns the ids that really moved.
+        """
+        stamp, moved = to_iso(now), []
+        recheck = f'SELECT id, fingerprint FROM items WHERE id = ? AND {_ARCHIVE_RECHECK}'
+        recheck_args = (to_iso(activity_since), to_iso(feedback_since))
+        with self._lock, self._conn:
+            self._conn.execute('BEGIN IMMEDIATE')
+            for it in items:
+                row = self._conn.execute(recheck, (it.id, *recheck_args)).fetchone()
+                if row is None or row['fingerprint'] != it.fingerprint:
+                    continue
+                identities = {it.source_id: [it.external_id]}
+                for alias in self._conn.execute(
+                        'SELECT source_id, external_id FROM source_item_aliases WHERE item_id = ?', (it.id,)):
+                    identities.setdefault(alias['source_id'], []).append(alias['external_id'])
+                self._conn.executemany(
+                    'INSERT OR REPLACE INTO archived_identities'
+                    ' (source_id, external_id, url, fingerprint, archive_year, archived_at)'
+                    ' VALUES (?, ?, ?, ?, ?, ?)',
+                    [(source_id, external_id, it.url, it.fingerprint, year, stamp)
+                     for source_id, external_ids in identities.items()
+                     for external_id in dict.fromkeys(external_ids)])
+                self._conn.execute('DELETE FROM source_item_aliases WHERE item_id = ?', (it.id,))
+                self._conn.execute('DELETE FROM evaluations WHERE item_id = ?', (it.id,))
+                self._conn.execute('DELETE FROM items WHERE id = ?', (it.id,))
+                moved.append(it.id)
+        return moved
+
+    def import_archived(self, items: Sequence[Item], evaluations: Sequence[Evaluation]) -> None:
+        """Write archived rows verbatim into a cold database, then verify the copy.
+
+        Re-runs replace rows in place, so an interrupted archive can repeat safely.
+        A copy that is not complete and not covered by `items_fts` rolls back here,
+        which is what lets the caller defer deleting the hot rows to a later step.
+        """
+        with self._lock, self._conn:
+            self._conn.execute('BEGIN IMMEDIATE')
+            for it in items:
+                self._conn.execute(
+                    f'INSERT OR REPLACE INTO items ({_ITEM_COLUMNS})'
+                    ' VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+                    (it.id, it.source_id, it.kind, it.external_id, it.url, it.page_url, it.title,
+                     it.author, it.summary, it.content, int(it.content_truncated), to_iso(it.published),
+                     to_iso(it.fetched_at), it.fingerprint, json.dumps(it.meta, ensure_ascii=False),
+                     it.identity_policy, to_iso(it.updated_at), it.content_revision))
+            for evaluation in evaluations:
+                self._conn.execute(
+                    'INSERT OR REPLACE INTO evaluations (pipeline_id, item_id, persona_version, passed,'
+                    ' score, tags, reason, stage, stage_scores, evaluated_at, reported_at, input_revision,'
+                    ' match_points) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+                    (evaluation.pipeline_id, evaluation.item_id, evaluation.persona_version,
+                     evaluation.passed, evaluation.score,
+                     json.dumps(evaluation.tags, ensure_ascii=False), evaluation.reason, evaluation.stage,
+                     json.dumps([score.model_dump() for score in evaluation.stage_scores], ensure_ascii=False),
+                     to_iso(evaluation.evaluated_at), to_iso(evaluation.reported_at),
+                     evaluation.input_revision,
+                     json.dumps(evaluation.match_points, ensure_ascii=False)))
+            ids = [it.id for it in items]
+            for start in range(0, len(ids), _RESOLVE_CHUNK):
+                chunk = ids[start:start + _RESOLVE_CHUNK]
+                placeholders = ','.join('?' for _ in chunk)
+                if self._conn.execute(f'SELECT COUNT(*) FROM items WHERE id IN ({placeholders})',
+                                      chunk).fetchone()[0] != len(chunk):
+                    raise TentaclesError('archive copy is incomplete')
+            rows = self._conn.execute('SELECT COUNT(*) FROM items').fetchone()[0]
+            if self._conn.execute('SELECT COUNT(*) FROM items_fts').fetchone()[0] != rows:
+                raise TentaclesError('archive full-text index does not match its rows')
+
+    def drop_archived(self, item_ids: Sequence[str]) -> None:
+        """Remove copies a later archive run superseded; triggers keep FTS in sync."""
+        with self._lock, self._conn:
+            self._conn.execute('BEGIN IMMEDIATE')
+            self._conn.executemany('DELETE FROM evaluations WHERE item_id = ?', [(i,) for i in item_ids])
+            self._conn.executemany('DELETE FROM items WHERE id = ?', [(i,) for i in item_ids])
+
+    def database_stats(self) -> DatabaseStats:
+        """Counts and item time range; both the hot database and a cold archive use it."""
+        with self._lock:
+            version = self._conn.execute('PRAGMA user_version').fetchone()[0]
+            present = {row[0] for row in self._conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'")}
+            tables = {name: self._conn.execute(f'SELECT COUNT(*) FROM "{name}"').fetchone()[0]
+                      for name in _STATS_TABLES if name in present}
+            fts = (self._conn.execute('SELECT COUNT(*) FROM items_fts').fetchone()[0]
+                   if 'items_fts' in present else 0)
+            oldest, newest = self._conn.execute(
+                f'SELECT MIN({_SORT_TIME}), MAX({_SORT_TIME}) FROM items').fetchone()
+        return DatabaseStats(version, tables, fts, from_iso(oldest), from_iso(newest))
+
+    def reindex_fts(self, *, optimize: bool) -> int:
+        """Rebuild (or merge) the FTS5 index in place; returns the indexed row count."""
+        with self._lock, self._conn:
+            self._conn.execute('INSERT INTO items_fts (items_fts) VALUES (?)',
+                               ('optimize' if optimize else 'rebuild',))
+            return self._conn.execute('SELECT COUNT(*) FROM items_fts').fetchone()[0]
+
+    def vacuum(self) -> None:
+        """Return freed pages to the filesystem; only valid outside a transaction."""
+        with self._lock:
+            self._conn.execute('VACUUM')
+            self._conn.execute('PRAGMA wal_checkpoint(TRUNCATE)')
+
+    def seal_archive(self) -> None:
+        """Checkpoint a cold archive out of WAL mode before closing it.
+
+        Archives are written once and then read, often concurrently; without a WAL
+        a plain read-only open creates neither `-wal` nor `-shm` side files.
+        """
+        with self._lock:
+            self._conn.execute('PRAGMA journal_mode = DELETE')
 
     # ---- source state -----------------------------------------------------
 
