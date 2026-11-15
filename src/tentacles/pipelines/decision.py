@@ -42,7 +42,10 @@ async def score_decisions(items: list[Item], persona: PersonaView, stage: StageS
     scores = []
     for result in batch.results:
         if not isinstance(result, DecisionCompletion):
-            scores.append(StageScore(index=index, type='decision', error=type(result).__name__ if result else 'batch_aborted'))
+            # Keep the upstream reason: it names the contract the batch broke.
+            scores.append(StageScore(index=index, type='decision',
+                error=type(result).__name__ if result else 'batch_aborted',
+                details={'stage_message': str(result)[:300]} if result is not None else {}))
             continue
         related = result.answers['relevance']
         selected = result.answers.get('tag', {}).get('choice', 'other')

@@ -37,6 +37,7 @@ sources:
 - 自动处理条件 GET（`ETag` / `Last-Modified`，返回 `304 Not Modified` 时零解析开销）。
 - 新增入库时执行多级去重：同源同 `external_id`、规范化 URL（剥离 `utm_*`、`spm`、`fbclid` 等追踪参数与 `#fragment`）、标题+摘要哈希指纹，以及 48 小时内跨源近似标题去重。
 - 每条条目保留入口 `page_url`（即该 Feed 地址）；条目带 `<comments>` 等讨论链接且与本条 `url` 不同时，将讨论页写入 `meta.comments_url`。
+- **逐条失败现场**：Feed 请求失败记 `http_status_error` / `network_timeout` / `connection_failed`，无法识别的 Feed 记 `feed_parse_error`（均附响应头与前 500 字脱敏预览）；因既无标题也无 `guid`/`link` 而无法定位的条目记 `entry_unusable`（`severity="warning"`，附原始 `guid`/`link`），计入 `stats.unusable`，不影响其余条目入库。
 
 ---
 
@@ -74,6 +75,7 @@ sources:
 - 文件夹始终以**只读模式**打开，使用 `BODY.PEEK[]` 读取：**绝不标记已读、不移动、不删除、不 expunge**。
 - 每个文件夹独立维护 `UIDVALIDITY + 最后处理 UID` 游标；按 UID 升序拉取。
 - 优先取 `text/plain`，无纯文本时将 HTML 转为文本；自动清理常见 `>` 回复引用头和 HTML quote 容器；不提取附件正文，仅记录附件文件名列表。邮件不做内容指纹或近似标题判重（相同内容但 `Message-ID` 不同的邮件均会保留）。
+- **单封坏信不会拖垮整个邮箱**：登录/连接失败记 `imap_auth_failed`（**不回显密码与服务器 banner**）；某封邮件 MIME 解析或 UID 校验异常时记 `imap_message_parse_error`，`external_id` 为 `folder:UIDVALIDITY:UID`，该封被跳过并计入 `stats.unparsed`，游标仍向前推进，因此坏信不会毎轮堵住整个文件夹。
 
 ---
 
@@ -97,6 +99,7 @@ sources:
       summary: .summary      # 可选：列表摘要
       date: time@datetime    # 可选：时间文本或属性（按 app.timezone 解析为 UTC）
     fetch_content: true      # 是否并发请求详情页提取正文（默认 false）
+    on_detail_error: fail_batch   # fail_batch（默认）| record_and_skip，见下
     update_existing: false   # 可选原位更新（默认 false）
     concurrency: 4           # 详情抓取固定并发数（默认 4，上限 16）
     headers: {}
@@ -106,7 +109,11 @@ sources:
 ```
 
 - **选择器属性语法**：普通选择器提取清洗后文本；`选择器@属性` 提取指定属性；`@href` 直接读取当前 `item` 节点自身属性（引号或方括号内的 `@` 不会被误判为属性分隔符）。
-- **详情与去重**：启用 `fetch_content: true` 后，详情页依次尝试提取非空 `article` → `main` → `body`；若本轮任一详情请求失败，整轮回滚且不推进游标，方便下次重试。游标缓存最近 500 个已见 ID，数据库同时持久化观察身份，避免重启后重复抓详情。
+- **详情与去重**：启用 `fetch_content: true` 后，详情页依次尝试提取非空 `article` → `main` → `body`；若本轮任一详情请求失败，按 `on_detail_error` 决定整批回滚（见下）。游标缓存最近 500 个已见 ID，数据库同时持久化观察身份，避免重启后重复抓详情。
+- **`on_detail_error`（详情页局部容错）**：
+  - `fail_batch`（默认，兼容旧行为）：任一详情页请求失败（`update_existing: true` 时还包括正文为空）整批业务数据回滚、游标不前进；但**回滚前会先把本轮所有失败详情逐条写入故障账本**（`errors list --unresolved` 可查，含具体 `target_url`、列表已知标题、HTTP 状态、`html_title`、`body_preview`）。
+  - `record_and_skip`：失败的单篇详情只写入故障账本（`severity="error"`，`retryable` 按状态码判定），**本轮其余成功抓到的文章正常入库**。关键不变量：被跳过的 `target_url` **不写入游标 `seen` 缓存，也不写入 `source_seen_ids`**，所以下一轮它仍会被判定为 `new` 自动重试；重试成功入库后，账本里对应的未决记录自动回填 `resolved_at`（自动消警）。
+  - 运行统计里 `details_fetched` 是本轮详情总数，`details_failed` / 跳过导致的 `skipped_nodes` 只在有失败或选择器异常时出现。
 
 ### 模式 B：`mode: page`（单页内容版本监控）
 
@@ -123,6 +130,7 @@ sources:
 
 - 对区域清洗文本计算完整哈希；内容变化时生成一条 `identity_policy="revision"` 的新版本条目，`summary` 为增删行 `unified_diff`（最多 2000 字符），`external_id` 为 `规范化URL#<内容哈希>`，不会被普通文章 URL 去重吞掉。
 - 版本条目的 `page_url` 为监控页地址；`content` 同样受 1000 units 入库截断，完整快照保留在源游标中用于下次 diff。
+- `selector` 匹配数为 0 时报错并保留旧快照（防误判为空页），同时把 `configured_selectors`、`html_title` 与页面 `main`/`body` 的脱敏标签骨架写入故障账本（`selector_no_match`）。
 
 ### 模式 C：`mode: llm`（杂乱页面模型结构化抽取）
 
@@ -139,7 +147,8 @@ sources:
     update_existing: false
 ```
 
-- **防幻觉机制**：先剔除导航/脚本/页脚，提取“有界文本 + 页面真实存在的规范化链接集合”发给模型；模型返回的 JSON 中凡是不在真实页面链接集合内的编造链接一律丢弃（计入 `stats.dropped_links`）。
+- **防幻觉机制**：先剔除导航/脚本/页脚，提取“有界文本 + 页面真实存在的规范化链接集合”发给模型；模型返回的 JSON 中凡是不在真实页面链接集合内的编造链接一律丢弃（计入 `stats.dropped_links`，并在故障账本记 `hallucinated_link_dropped` 附具体丢弃的 URL）。
+- **输出违约可见**：模型输出违反严格 JSON Schema 时不再只是“本轮降级”，而是记录 `invalid_json_schema` 与违约字段路径、800 字脱敏输出预览。
 - **付费缓存**：页面有效文本、链接集合及模型配置未发生变化时，后续轮次直接命中持久游标缓存，**零模型调用**（单纯轮换 API Key 不会使缓存失效）。
 - 抽取出的每条条目都保留入口 `page_url`（即该列表页地址）与自己的原文 `url`。
 

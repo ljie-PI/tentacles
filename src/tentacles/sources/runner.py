@@ -61,8 +61,10 @@ async def fetch_source(spec: SourceSpec, operation: RunOperation, *, store: Stor
         result = await source.fetch(state.cursor, ctx)
     except Exception as exc:
         # The Run's ledger outlives this batch: the event is collected before
-        # the failure reaches RunLifecycle's rollback-and-cleanup path.
-        operation.record_error(_fetch_failure(spec, exc))
+        # the failure reaches RunLifecycle's rollback-and-cleanup path. A source
+        # that already recorded the concrete target needs no generic second row.
+        if not getattr(exc, 'diagnosed', False):
+            operation.record_error(_fetch_failure(spec, exc))
         raise
     # 非邮件条目必须留有原文详情或入口页链接，否则无法回溯未截断全文。
     reachable = [index for index, item in enumerate(result.items)

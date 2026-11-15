@@ -152,6 +152,9 @@ sources:
       summary: .summary
       date: time@datetime
     fetch_content: true
+    # 详情页失败策略：fail_batch（默认，整批回滚不推进游标但是失败详情逐条落账本）
+    # 或 record_and_skip（失败单篇只落账本，其余正常入库，失败 target_url 下一轮自动重试）。
+    # on_detail_error: record_and_skip
     concurrency: 4
     headers: {}
     cookies: {}

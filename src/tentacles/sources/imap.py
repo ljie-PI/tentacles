@@ -18,10 +18,10 @@ from bs4 import BeautifulSoup
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
 
 from tentacles.asyncutil import run_blocking
-from tentacles.errors import UpstreamError
+from tentacles.diagnostics import DiagnosticEvent
 from tentacles.models import Item
 from tentacles.text import html_to_text, truncate
-from tentacles.sources.base import FetchContext, FetchResult, Source, register
+from tentacles.sources.base import DiagnosedError, FetchContext, FetchResult, Source, register
 
 
 def _has_controls(value: str) -> bool:
@@ -302,6 +302,33 @@ def _message(data: list[Any], uid: int) -> bytes | None:
     raise ValueError('missing IMAP message literal')
 
 
+def _auth_failure(source_id: str, opts: ImapOptions, exc: BaseException | None,
+                  message: str) -> DiagnosticEvent:
+    """Login/connection failure without the password or the server banner."""
+    return DiagnosticEvent(
+        phase='imap_fetch', error_code='imap_auth_failed', source_id=source_id, message=message,
+        exception_type=None if exc is None else type(exc).__name__,
+        retryable=isinstance(exc, OSError),
+        debug_context={'host': opts.host, 'port': opts.server_port, 'ssl': opts.ssl,
+                       'username': opts.username,
+                       'exception': None if exc is None else type(exc).__name__})
+
+
+def _message_failure(source_id: str, folder: str, validity: int, uid: int,
+                    exc: BaseException) -> DiagnosticEvent:
+    """One unparsable message, located by folder + UIDVALIDITY + UID.
+
+    Only the exception type is kept: a MIME or mailbox error can echo the
+    message body, and nothing here may leak it into the ledger.
+    """
+    return DiagnosticEvent(
+        phase='imap_fetch', error_code='imap_message_parse_error', source_id=source_id,
+        message=f'IMAP message could not be parsed ({type(exc).__name__})',
+        external_id=f'{folder}:{validity}:{uid}', exception_type=type(exc).__name__, retryable=False,
+        debug_context={'folder': folder, 'uidvalidity': validity, 'uid': uid,
+                       'exception': type(exc).__name__})
+
+
 @register
 class ImapSource(Source):
     type: ClassVar[str] = 'imap'
@@ -314,14 +341,22 @@ class ImapSource(Source):
     def _fetch(self, cursor: dict[str, Any], ctx: FetchContext) -> FetchResult:
         opts = cast(ImapOptions, self.options)
         if not opts.username or not opts.password.get_secret_value():
-            raise UpstreamError('IMAP username or password is not configured')
+            ctx.record_error(_auth_failure(self.spec.id, opts, None,
+                                           'IMAP username or password is not configured'))
+            raise DiagnosedError('IMAP username or password is not configured')
         connection = None
         try:
             identity = hashlib.sha256(json.dumps([opts.host, opts.server_port, opts.ssl, opts.username]).encode()).hexdigest()
             folders = dict(cursor.get('folders', {})) if cursor.get('account') == identity else {}
-            connection = ctx.imap_factory(opts.host, opts.server_port, ssl=opts.ssl, timeout=opts.timeout)
-            _ok(connection.login(opts.username, opts.password.get_secret_value()))
-            items, processed, excluded = [], 0, 0
+            try:
+                connection = ctx.imap_factory(opts.host, opts.server_port, ssl=opts.ssl, timeout=opts.timeout)
+                _ok(connection.login(opts.username, opts.password.get_secret_value()))
+            except Exception as exc:
+                # Neither the password nor the server banner may reach the ledger.
+                ctx.record_error(_auth_failure(self.spec.id, opts, exc,
+                                               f'IMAP login failed ({type(exc).__name__})'))
+                raise DiagnosedError(f'IMAP login failed ({type(exc).__name__})') from None
+            items, processed, excluded, unparsed = [], 0, 0, 0
             for folder in opts.folders:
                 if processed >= opts.max_fetch:
                     break
@@ -341,19 +376,31 @@ class ImapSource(Source):
                 data = _ok(connection.uid('SEARCH', None, *query, opts.search))
                 uids = sorted({_uid(token) for line in data for token in line.split() if _uid(token) > last})
                 for uid in uids[:opts.max_fetch - processed]:
-                    raw = _message(_ok(connection.uid('FETCH', str(uid), '(UID BODY.PEEK[])')), uid)
-                    if raw is not None:
-                        item = _mail_item(raw, self.spec.id, folder, validity, uid, opts)
+                    data = _ok(connection.uid('FETCH', str(uid), '(UID BODY.PEEK[])'))
+                    try:
+                        raw = _message(data, uid)
+                        item = None if raw is None else _mail_item(raw, self.spec.id, folder, validity, uid, opts)
+                    except Exception as exc:
+                        # One poison message must not cost the mailbox: it is
+                        # recorded by folder+uid and the cursor moves past it.
+                        ctx.record_error(_message_failure(self.spec.id, folder, validity, uid, exc))
+                        item, unparsed = None, unparsed + 1
+                    else:
                         if item is None:
                             excluded += 1
-                        else:
-                            items.append(item)
+                    if item is not None:
+                        items.append(item)
                     last, processed = uid, processed + 1
                 folders[folder] = {'uidvalidity': validity, 'last_uid': last}
-            return FetchResult(items, {'account': identity, 'folders': folders}, {'processed': processed, 'excluded': excluded})
+            stats = {'processed': processed, 'excluded': excluded}
+            if unparsed:
+                stats['unparsed'] = unparsed
+            return FetchResult(items, {'account': identity, 'folders': folders}, stats)
+        except DiagnosedError:
+            raise
         except Exception as exc:
             # Servers and socket errors may echo LOGIN credentials or message bodies.
-            raise UpstreamError(f'IMAP fetch failed ({type(exc).__name__})') from None
+            raise DiagnosedError(f'IMAP fetch failed ({type(exc).__name__})') from None
         finally:
             if connection is not None:
                 try:

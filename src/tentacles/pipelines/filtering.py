@@ -4,12 +4,42 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
+from tentacles.diagnostics import DiagnosticEvent
 from tentacles.models import Item
 from tentacles.personas.models import PersonaView
-from tentacles.pipelines.config import PipelineSpec
+from tentacles.pipelines.config import PipelineSpec, StageSpec
 from tentacles.llm.registry import ModelRegistry
 from tentacles.pipelines.registry import STAGES
 from tentacles.pipelines.models import Evaluation, StageScore, StageBatch, FilterBatch
+
+
+def _item_error_code(stage_type: str, scored: StageScore) -> str:
+    """The shared vocabulary code for an item a stage could not score."""
+    if stage_type == 'keyword':
+        return 'regex_timeout' if scored.error in {'TimeoutError', 'Timeout'} else 'unexpected_exception'
+    if stage_type == 'llm':
+        return 'llm_batch_parse_error'
+    return 'decision_item_error'
+
+
+def _record_item_error(progress: FilterBatch, spec: PipelineSpec, stage: StageSpec,
+                       index: int, item: Item, scored: StageScore) -> None:
+    """Leave the concrete item behind when the cascade gives up on it.
+
+    Only the final destination is recorded: an item error that a later stage
+    still evaluated is not a lost item, and would never be resolved.
+    """
+    if progress.record_error is None:
+        return
+    progress.record_error(DiagnosticEvent(
+        phase='filter_stage', error_code=_item_error_code(stage.type, scored),
+        message=f'{stage.type} stage could not score this item'
+                + (f' ({scored.error})' if scored.error else ''),
+        pipeline_id=spec.id, item_id=item.id, source_id=item.source_id,
+        target_url=item.url or None, retryable=True,
+        debug_context={'stage': stage.type, 'stage_index': index, 'stage_error': scored.error,
+                       'target_url': item.url,
+                       'stage_message': scored.details.get('stage_message')}))
 
 
 async def filter_items(items: list[Item], persona: PersonaView, spec: PipelineSpec,
@@ -40,6 +70,8 @@ async def filter_items(items: list[Item], persona: PersonaView, spec: PipelineSp
                 if not last and batch.error is None:
                     counts[i]['forwarded'] += 1
                     forwarded.append(item)
+                    continue
+                _record_item_error(progress, spec, stage, i, item, scored)
                 continue
             rejected = scored.score < stage.rejection
             accepted = not rejected and (last or stage.accept_above is not None and scored.score >= stage.accept_above)
