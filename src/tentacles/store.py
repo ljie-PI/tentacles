@@ -290,8 +290,8 @@ def _migrate_v14(conn: sqlite3.Connection) -> None:
 
 
 def _migrate_v15(conn: sqlite3.Connection) -> None:
-    # The diagnostics ledger is independent of business writes: a run records a
-    # failed target here even when its item/report transaction never commits.
+    # The failure/cancel cleanup path writes this ledger in its own transaction,
+    # so a run still records its failed targets when the business write never commits.
     conn.execute("""CREATE TABLE run_errors (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         run_id INTEGER NOT NULL REFERENCES runs(id),
@@ -1162,7 +1162,12 @@ class Store:
 
     def _save_run_errors(self, run_id: int, events: Sequence[DiagnosticEvent],
                          now: datetime) -> list[FailedTargetRef]:
-        """Caller holds the transaction; the ledger never joins business writes."""
+        """Caller holds the transaction; a commit-path ledger row rides it.
+
+        On the commit path these rows share the business write, so a rollback
+        loses them with it; the failure/cancel cleanup path (`finish_run`)
+        persists the collected events in its own transaction afterwards.
+        """
         refs: list[FailedTargetRef] = []
         for event in events:
             cursor = self._conn.execute(

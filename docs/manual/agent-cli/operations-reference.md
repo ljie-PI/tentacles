@@ -145,7 +145,7 @@ tentacles --json runs list --kind pipeline --target daily-tech
 
 ## 5. 故障账本（`errors list` / `errors show` / `runs show`）
 
-业务写入可能整批回滚，但逐条失败事件**必定落库**：`run_errors` 账本不参与 `items` / `reports` 的业务事务，`sources fetch`、`tick`、`pipelines filter/run` 在异常或取消时也会把执行中收集到的每一条结构化故障（含具体哪个 `target_url` / `external_id` 没拿到）写入。
+业务写入可能整批回滚，但逐条失败事件**必定落库**：`run_errors` 行在正常提交路径上跟随 `items` / `reports` 的业务写入在**同一个事务**内提交，因此该事务回滚时它们也一并消失；回滚安全来自**失败/取消后的清理路径**——`sources fetch`、`tick`、`pipelines filter/run` 在异常或取消后用独立事务把执行中收集到的每一条结构化故障（含具体哪个 `target_url` / `external_id` 没拿到）再次写入。
 
 ```bash
 # 只看尚未消警（后续重试仍未成功）的故障，按时间倒序（默认 limit 50）
