@@ -114,3 +114,15 @@ A temporary no-model Stage can replace an entry in `registry.STAGES` to exercise
 item-error forwarding, rejection/acceptance and batch aborts through the same
 `filter_items` interface; restore the entry after the check. No model client,
 alternate cascade or asynchronous persistence interface is needed.
+
+`type: browser` adds one source adapter that runs a different policy: `FetchContext`
+carries the loaded `AppConfig` (the `browser` block) and a `record_error` callback for
+per-target failures, so the adapter never reaches the Store or the ledger directly.
+Session policy stays in `sources/browser_session.py` (one headed work tab per
+`(cdp_url, chrome_profile)`, attached over CDP or launched headed, profile verified from
+`chrome://version`, tab closed on every exit path, never `browser.close()`), and script
+policy stays in `sources/browser_contract.py` (an `ast.parse` import/call allowlist gate
+before `exec`, plus the `BrowserExtractOutput` contract). A fixed script must not own the
+tab lifecycle: only the runtime can capture the failure site, so timeouts, script errors
+and zero-item results become `browser_replay` events whose `debug_context` carries the
+URL, title, A11y excerpt and traceback.

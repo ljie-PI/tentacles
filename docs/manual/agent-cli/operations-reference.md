@@ -226,6 +226,33 @@ tentacles --json runs show 8
 - ID 不存在时退出码 `3`（`not_found`）。
 - `debug_context` 中模型 `api_key`、`Authorization` / `Cookie` / `Set-Cookie` / `Proxy-Authorization`、IMAP 与代理密码、URL userinfo 及 `token` / `key` / `sig` / `password` / `secret` 等敏感参数一律替换为 `[REDACTED]`；保留的是**请求地址、HTTP 状态与白名单特征头**（`content-type`、`location`、`retry-after`、`server`、`cf-mitigated`、`x-ratelimit-*`）、HTML 骨架裁剪与栈帧摘要。超限时以 `{"truncated": true, ...}` 标记，不会静默丢弃。
 
+### `browser_replay` 阶段的排障现场（`type: browser` 有界面浏览器源）
+
+有界面 Chrome 重放固化脚本失败时（脚本抛错、选择器/整体超时、返回值不合契约、静态导入门禁拦截，
+或本轮返回 0 条），账本里会出现 `phase: "browser_replay"` 的记录。它是**唯一**带实时页面现场的阶段：
+
+| `debug_context` 字段 | 说明 |
+| :--- | :--- |
+| `current_url` | 失败瞬间工作 Tab 的地址；`target_url` 优先取它，取不到时回退源级 `page_url` |
+| `page_title` | 失败瞬间的页面标题（判断是否被登录墙/风控页替换） |
+| `a11y_snapshot` | 精简的 A11y 树摘录（≤ 4096 字符），比 HTML 更小、更能反映真实可见结构与角色名 |
+| `traceback` | 脚本内栈帧（不含局部变量），定位到具体选择器/断言行 |
+| `page_url` | 源配置的入口页地址 |
+
+```bash
+# 看某个浏览器源最近仍失败的记录，再展开现场
+tentacles --json errors list --source reddit-localllama --phase browser_replay --unresolved --since 7d
+tentacles --json errors show <ERROR_ID>
+```
+
+- `playwright_selector_timeout`：等待选择器/整体重放超时，通常是站点改版 → 修改
+  `scripts/browser_sources/<id>.py`；`a11y_snapshot` 里能看到新结构。
+- `script_assertion_failed`：断言失败、返回 0 条（`severity: "warning"`）、返回值不合契约或脚本未通过导入白名单门禁。
+- `retryable` 恒为 `false`：页面结构问题与脚本缺陷不会因重试自愈；修好脚本后同一 `(source_id, target_url)`
+  成功入库会自动回填 `resolved_at`。
+- 若同时看到 `phase: "fetch_page"` 的 `unexpected_exception`，那是整源失败的外层记录（如 Chrome 未开调试端口、
+  Profile 不匹配）；`message` 里带可直接执行的启动命令。
+
 ### `runs show <RUN_ID>`
 
 在 `RunView` 全部字段之外追加 `errors: ErrorEventView[]`（同样是轻量列表，不含 `debug_context`）；运行 ID 不存在时退出码 `3`。
@@ -256,7 +283,7 @@ tentacles --json runs show 8
 | `report_process` | `citation_out_of_range` | 报告引用编号越界，已丢弃该引用 |
 | 任意阶段 | `unexpected_exception` | 未被更具体分类的失败（`retryable` 为 `false`，需查 `exception_type` 与栈帧） |
 
-> 当前版本会在抓取阶段产出 `network_timeout` / `connection_failed` / `unexpected_exception`，在过滤阶段产出 `filter_stage_aborted`；其余机器码是账本已预留的共享词表，由对应模块在实现后按同一契约写入，Agent 可放心按表编写分支，未出现的码不会作为「未知」返回。
+> 当前版本会在抓取阶段产出 `network_timeout` / `connection_failed` / `unexpected_exception`，有界面浏览器源产出 `playwright_selector_timeout` / `script_assertion_failed`，在过滤阶段产出 `filter_stage_aborted`；其余机器码是账本已预留的共享词表，由对应模块在实现后按同一契约写入，Agent 可放心按表编写分支，未出现的码不会作为「未知」返回。
 
 ### 自动消警（`resolved_at`）
 

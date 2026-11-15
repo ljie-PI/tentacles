@@ -2,7 +2,7 @@
 
 每个信息源在 `sources:` 列表下声明，通用字段包括：
 - `id`（必填，全局唯一）
-- `type`（`rss` | `imap` | `web`）
+- `type`（`rss` | `imap` | `web` | `browser`）
 - `schedule`（抓取频率，支持 `30s/30m/2h/1d/1w`、`@hourly/@daily/@weekly` 或 5 段 Cron）
 - `name`（可选显示名称）
 - `enabled`（默认 `true`；设为 `false` 后定时 `tick` 跳过，但手动显式指定 `tentacles sources fetch <id>` 仍可强制抓取）
@@ -147,7 +147,7 @@ sources:
 
 ## 4. 原位更新（`update_existing: true`）
 
-默认所有源 `update_existing: false`（遇到已知条目直接跳过计入 `dup`）。**RSS / Atom** 与 **Web `list` / `llm`** 支持在源级开启 `update_existing: true`（IMAP 和 Web `page` 设为 `true` 会报配置错误）：
+默认所有源 `update_existing: false`（遇到已知条目直接跳过计入 `dup`）。**RSS / Atom**、**Web `list` / `llm`** 与 **`type: browser`** 支持在源级开启 `update_existing: true`（IMAP 和 Web `page` 设为 `true` 会报配置错误）：
 
 1. **只刷新本轮再次出现的本源标准条目**：系统绝不后台遍历历史旧链接，仅当源列表/Feed 本轮再次返回该条目时才检查更新。
 2. **稳定身份定位**：RSS 先按同源稳定 `external_id`（含已记录的同源别名）匹配，未命中再回退到本轮实际观察到的规范化 URL 唯一定位；Web `list`/`llm` 按规范化 URL 定位本源条目。若身份与 URL 指向冲突，整批事务回滚报 `Conflict`。
@@ -155,9 +155,99 @@ sources:
    - `fetch_content: true` 时，每轮会对列表里再次出现的本源条目重新抓取详情页并比对完整正文；
    - `fetch_content: false` 时，仅更新列表实际提供的标题/摘要/日期，绝不用短摘要覆盖已存的详情正文；
    - `mode: llm` 开启更新后会缓存已校验的条目描述，页面未变时零抽取模型费用，仅在 `fetch_content: true` 时重抓详情页。
+   - `type: browser` 每轮重放的条目按规范化 URL 定位本源条目，正文/摘要/作者/发布时间取脚本本轮真实返回的值。
 4. **对下游过滤与报告的影响**：
    - 正文或核心字段发生实质变化后，条目保留原 `id` 与首次 `fetched_at`，设置 `updated_at`，递增修订号并**自动使旧评分失效**；
    - 正文入库时已截断到 1000 units，为感知截断范围之外的实质更新，RSS 与 Web 详情在 `meta.full_content_sha1` 记录**截断前全文哈希**；哈希变化同样触发原位更新；
    - 该条目会按 `updated_at` 重新进入 Pipeline 时间窗口参与重评（**若开启了付费过滤器可能产生重评模型费用**）；
    - **消费账本保持不变**：已被某条 Pipeline 写入过报告的条目，即使更新重评后也不会在同一 Pipeline 中重复生成报告。
    - 抓取结果中满足 `stats.fetched = new + updated + dup`。
+
+---
+
+## 5. 有界面浏览器源（`type: browser`）
+
+静态 `type: web` 抓不到的动态流、需登录态页面（如新版 Reddit `shreddit-post`、X/Twitter），用 `type: browser`：
+它在**你已登录的可见 Chrome** 里新建一个隔离工作 Tab，确定性重放仓库内的固化 Playwright 脚本，
+把文字条目转成 `kind: "browser"` 入库。无头模式被彻底禁止（见[基础配置手册](configuration-and-models.md)第 4 节）。
+
+### 前置：让 Chrome 打开调试端口
+
+```bash
+# macOS 示例：用日常 Profile 启动一个带调试端口的有界面 Chrome，然后正常登录目标站点
+"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
+  --remote-debugging-port=9222 --profile-directory="Profile 1"
+```
+
+- 默认 `browser.cdp_url: http://127.0.0.1:9222` 会用 `connect_over_cdp` 附着这个实例，
+  **完整复用该 Profile 的 Cookie 与登录态**；抓取期间只会新建并关闭自己的 Tab。
+- 若该端口无人监听：`auto_launch: false`（默认）直接报错并打印上面这条命令；
+  `auto_launch: true` 则在 `chrome_user_data_dir` 指定的 User Data 目录下以**有界面**模式拉起目标 Profile，
+  抓完只关闭这次拉起的进程。
+- 附着后会读取 `chrome://version` 的真实命令行核验 Profile：`chrome_profile` 与实际 `--profile-directory` 不一致、
+  或该实例带 `--headless`，都会立即报 `ConfigError` 并说明如何修正。
+
+### 源配置
+
+```yaml
+sources:
+  - id: reddit-localllama
+    type: browser
+    name: r/LocalLLaMA 最新讨论
+    enabled: false
+    schedule: 1h
+    page_url: https://www.reddit.com/r/LocalLLaMA/new/
+    task: >
+      打开 r/LocalLLaMA 的 New 列表页，抓取前 20 条帖子的标题、帖子详情链接、作者、
+      发布时间和正文摘要，跳过置顶广告（promoted）。
+    chrome_profile: Profile 1             # 可选：覆盖 browser.default_profile
+    update_existing: false                # 可选：同源规范化 URL 原位更新
+    on_detail_error: record_and_skip      # fail_batch | record_and_skip
+    script_path: ../scripts/browser_sources/reddit-localllama.py  # 可省略，缺省 <scripts_dir>/<id>.py
+    max_items: 25
+    timeout: 60                           # 单次重放整体超时秒数
+    pi:                                   # 可选：源级覆盖 #82 探索模型（当前仅校验）
+      model: anthropic/claude-opus-4-7
+      reasoning_level: high
+```
+
+| 字段 | 含义 |
+| :--- | :--- |
+| `page_url` | 入口页 `http(s)` 地址，必填；成为该源条目的 `page_url` |
+| `task` | 人类可读的采集任务描述，供 #82 探索阶段使用，当前不影响重放 |
+| `chrome_profile` | 源级 Chrome Profile 目录名（如 `Profile 1`），缺省用 `browser.default_profile` |
+| `script_path` | 固化脚本路径，相对 YAML 解析；**必须**落在 `browser.scripts_dir` 内且以 `.py` 结尾 |
+| `update_existing` | 开启后本轮再次出现的本源条目按规范化 URL 原位更新（与 Web `list` 一致） |
+| `on_detail_error` | `record_and_skip`（默认）只记账并返回空批次；`fail_batch` 让该源整批失败 |
+| `max_items` | 单轮最多入库条目数，`1..200`，默认 `25` |
+| `timeout` | 单次重放的整体超时秒数（默认 `60`），同时作为脚本单步 `goto`/`wait_for_selector` 的上限 |
+| `headless` | 只允许 `false` 或缺省；`true` 直接报配置错误 |
+
+### 抓取行为
+
+- **串行焦点保护**：同一 `(cdp_url, chrome_profile)` 同时只有一个重放在跑，避免多个源抢你的窗口焦点。
+- **工作 Tab 必回收**：成功、脚本异常、超时、Ctrl-C 取消都以 `finally` 关闭本次新建的 Tab；
+  脚本自己开的额外 Tab 由脚本负责关闭（运行时不关闭你的其它 Tab，也绝不调用 `browser.close()`）。
+- **总是读取实时页面**：工作 Tab 通过 CDP 单独关闭 HTTP 缓存（只作用于该 Tab，不改你的浏览器设置），
+  避免重放命中 Chrome 缓存拿到旧内容导致漏更新。
+- **去重与更新**：同一轮内按条目标题指纹 / 规范化 URL 去重；跨轮按本源已存规范化 URL 跳过（计入 `stats.skipped_known`），
+  开启 `update_existing: true` 时改为原位更新（`stats.refresh_links`）。`stats.entries` 为脚本本轮返回的条目数，`stats.duplicates` 为同轮内重复、`stats.skipped_known` 为本源已存的条目数。
+- **失败账本**：脚本抛错、超时、返回 0 条或未通过静态导入门禁时，会写入 `run_errors`（`phase: browser_replay`）：
+  - `playwright_selector_timeout`：选择器/整体重放超时（页面结构已变，需要改脚本）；
+  - `script_assertion_failed`：断言失败、返回值不合契约、脚本被门禁拦截或返回 0 条（0 条记为 `warning`）；
+  - `debug_context` 带 `current_url`、`page_title`、精简 A11y 快照与脚本栈帧；`target_url` 指向失败瞬间的页面地址。
+  排障命令见 [Agent CLI 运维速查](../agent-cli/operations-reference.md) 第 5 节。
+
+### 固化脚本规范
+
+脚本位于 `scripts/browser_sources/<source_id>.py`，唯一入口是
+`async def extract(page, *, page_url, max_items, timeout_ms=30_000) -> BrowserExtractOutput`，
+输出 `RawBrowserItem(title=..., url=..., author=..., content=..., summary=..., published=<ISO 8601>, comments_url=None)`。
+脚本在 `exec` 之前会先经过 `ast.parse` 静态导入白名单门禁（禁止 `os` / `subprocess` / `socket` / `shutil` / `open` / `eval` / `__import__` 等）。
+完整契约、字段表与示例见 [`scripts/browser_sources/README.md`](../../../scripts/browser_sources/README.md)。
+
+```bash
+# 首次验证：先手动启动带调试端口的 Chrome 并登录，再显式抓取（enabled: false 也会执行）
+tentacles sources fetch reddit-localllama
+tentacles items list --source reddit-localllama
+```

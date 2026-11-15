@@ -2,7 +2,7 @@
 
 个人信息与新闻管理系统：从多种信息源抓取内容，按个人 persona 过滤，再用 LLM 加工成日报、深度报道或邮件简报。
 
-> 已支持配置驱动的 RSS、IMAP 和网页抓取、去重入库、持久化调度、命名模型、版本化 Persona 与反馈演化，以及 keyword/decision/llm 级联过滤和 digest/deep/summarize/none 处理器。Web 端已提供 Feed、Sources、Pipelines、Reports、Runs、Settings 和 Persona 管理；文档见 [用户手册](docs/manual/user/README.md) 与 [Agent CLI 手册](docs/manual/agent-cli/README.md)，实现与验证范围见 [规格核对](docs/agents/spec-18-audit.md)。
+> 已支持配置驱动的 RSS、IMAP、网页与有界面 Chrome 浏览器抓取、去重入库、持久化调度、命名模型、版本化 Persona 与反馈演化，以及 keyword/decision/llm 级联过滤和 digest/deep/summarize/none 处理器。Web 端已提供 Feed、Sources、Pipelines、Reports、Runs、Settings 和 Persona 管理；文档见 [用户手册](docs/manual/user/README.md) 与 [Agent CLI 手册](docs/manual/agent-cli/README.md)，实现与验证范围见 [规格核对](docs/agents/spec-18-audit.md)。
 
 ## 网页与 REST API
 
@@ -194,6 +194,52 @@ tentacles items show ITEM_ID
 仅支持静态页面；非 2xx（含重定向）会失败并保留旧游标。
 杂乱页面还可用 `mode: llm`，由 extract 阶段模型从有界“文本 + 链接”中抽取；编造链接被丢弃。
 `web-llm` 示例默认关闭，启用后会发送页面内容并可能产生费用；严格 JSON、缓存与计费规则同见协议。
+
+## 有界面浏览器信息源（`type: browser`）
+
+静态抓取拿不到的动态流与登录态页面，可以用 `type: browser`：在**你自己已登录的可见 Chrome** 里新建一个隔离工作 Tab，
+确定性重放仓库内的固化 Playwright 脚本，把文字条目转成 `kind: "browser"` 入库。**严格禁止无头模式**——
+配置里的 `headless: true` 会直接报错，运行时也没有任何无头分支。
+
+```bash
+# 1) 先用手动启动的 Chrome 开好调试端口（用你日常的 Profile，正常登录目标站点）
+"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
+  --remote-debugging-port=9222 --profile-directory="Profile 1"
+# 2) 示例源默认关闭，显式抓取即可（脚本在 scripts/browser_sources/reddit-localllama.py）
+tentacles sources fetch reddit-localllama
+tentacles items list --source reddit-localllama
+```
+
+```yaml
+browser:
+  cdp_url: http://127.0.0.1:9222          # connect_over_cdp 附着的调试端点
+  auto_launch: false                      # 端口无人监听时是否自动拉起有界面 Chrome
+  default_profile: Default                # 默认 Chrome Profile，源级 chrome_profile 可覆盖
+  scripts_dir: ../scripts/browser_sources # 固化脚本目录（相对本文件）
+
+sources:
+  - id: reddit-localllama
+    type: browser
+    enabled: false
+    schedule: 1h
+    page_url: https://www.reddit.com/r/LocalLLaMA/new/
+    chrome_profile: Profile 1
+    on_detail_error: record_and_skip      # fail_batch | record_and_skip
+    max_items: 25
+    timeout: 60
+```
+
+- **复用登录态、不抢窗口**：附着后先用 `chrome://version` 核验实际 `--profile-directory`（不匹配或带 `--headless` 立即报错），
+  同一 `(cdp_url, profile)` 串行执行；无论成功、异常、超时还是 Ctrl-C，都只关闭本次新建的 Tab，绝不关闭你的 Chrome。
+- **固化脚本契约**：`scripts/browser_sources/<id>.py` 实现
+  `async def extract(page, *, page_url, max_items, timeout_ms=30_000) -> BrowserExtractOutput`；
+  加载前经 `ast.parse` 静态导入白名单门禁，禁止 `os` / `subprocess` / `socket` / `open` / `eval` / `__import__` 等。
+  路径必须落在 `browser.scripts_dir` 内，`../../` 越界在 `config check` 阶段即报错。
+- **失败可排障**：重放超时/脚本失败/返回 0 条都会写入 `run_errors` 的 `browser_replay` 阶段，
+  带上失败瞬间的 `current_url`、`page_title`、精简 A11y 快照与脚本栈帧（`errors show`）。
+- 无脚本时的 `pi` 自动探索与脚本自愈提 PR 分别属于后续工单；`browser.pi` / `browser.pr` 目前只做 schema 校验。
+- 完整字段说明见[信息源配置手册](docs/manual/user/sources.md#5-有界面浏览器源type-browser)与
+  [脚本契约](scripts/browser_sources/README.md)，排障见 [Agent CLI 运维速查](docs/manual/agent-cli/operations-reference.md)。
 
 ## 模型配置
 
