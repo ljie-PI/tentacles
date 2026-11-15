@@ -214,11 +214,21 @@ class TentaclesService:
     def list_items(self, *, sources: list[str] | None = None, kinds: list[str] | None = None,
                    since: str | datetime | None = None, until: str | datetime | None = None,
                    search: str | None = None, limit: int = 50, offset: int = 0,
-                   pipeline: str | None = None, passed: bool | None = None) -> Page[ItemView]:
+                   pipeline: str | None = None, persona: str | None = None, passed: bool | None = None,
+                   min_score: float | None = None, topic: str | None = None) -> Page[ItemView]:
         if passed is not None and pipeline is None:
             raise ConfigError('passed/rejected filtering requires a pipeline')
+        if pipeline is not None and persona is not None:
+            raise ConfigError('choose either pipeline or persona')
+        if min_score is not None and not 0 <= min_score <= 1:
+            raise ConfigError('min-score must be between 0 and 1')
         if pipeline is not None:
             self._known_pipeline(pipeline)
+        pipeline_ids = None
+        if persona is not None:
+            if persona not in {p.name for p in self.store.list_personas()}:
+                raise NotFound(f"unknown persona {persona!r}")
+            pipeline_ids = sorted(spec.id for spec in self.config.pipelines if spec.persona == persona)
         if not 1 <= limit <= 500:
             raise ConfigError("limit must be between 1 and 500")
         if not 0 <= offset <= 2**63 - 1:
@@ -229,17 +239,20 @@ class TentaclesService:
                 if s not in known:
                     raise NotFound(f"unknown source {s!r}")
         q = ItemQuery(source_ids=sources or None, kinds=kinds or None, since=self._time(since),
-                      until=self._time(until), search=search or None, limit=limit, offset=offset, pipeline_id=pipeline, passed=passed)
+                      until=self._time(until), search=search or None, limit=limit, offset=offset,
+                      pipeline_id=pipeline, pipeline_ids=pipeline_ids, passed=passed,
+                      min_score=min_score, topic=topic or None)
         items, total = self.store.list_items(q)
-        views = [ItemView.model_validate({**item.model_dump(), **(evaluation.model_dump() if evaluation else {})})
-                 for item, evaluation in items]
+        views = [ItemView.of(item, evaluation) for item, evaluation in items]
         return Page[ItemView](items=views, total=total, limit=limit, offset=offset)
 
     def get_item(self, item_id: str) -> ItemDetail:
         item = self.store.get_item(item_id)
         if item is None:
             raise NotFound(f"unknown item {item_id!r}")
-        return ItemDetail.model_validate({**item.model_dump(), "evaluations": self.store.item_evaluations(item_id)})
+        latest = self.store.latest_evaluation(item_id)
+        return ItemDetail.model_validate({**item.model_dump(), **(latest.model_dump() if latest else {}),
+                                          "evaluations": self.store.item_evaluations(item_id)})
 
     def submit_feedback(self, item_id: str, *, rating: int, persona: str | None = None,
                         note: str = '') -> FeedbackView:
