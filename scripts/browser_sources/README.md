@@ -46,7 +46,8 @@ async def extract(page: Page, *, page_url: str, max_items: int,
   只导出 `BrowserExtractOutput` / `RawBrowserItem`，门禁与加载器在
   `tentacles.sources.browser_script`，脚本不可导入。
 
-被拦截的脚本不会执行，直接以 `script_assertion_failed` 记账。
+被拦截的脚本不会执行，以 `script_assertion_failed` 记账，并让该源整次抓取直接失败（`on_detail_error`
+不改变这一点）：坏脚本配置不能降级成每轮空跑。
 
 ## 输出字段
 

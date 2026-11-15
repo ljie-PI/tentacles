@@ -24,7 +24,7 @@ from tentacles.config import AppConfig, ReasoningLevel, chrome_profile_name, rej
 from tentacles.diagnostics import DiagnosticEvent, stack_frames
 from tentacles.errors import ConfigError, UpstreamError
 from tentacles.models import Item, ItemObservation, LinkDisposition, normalize_url
-from tentacles.sources.base import FetchContext, FetchResult, Source, register
+from tentacles.sources.base import DiagnosedError, FetchContext, FetchResult, Source, register
 from tentacles.sources.browser_contract import (
     BrowserExtractOutput, ExtractScript, RawBrowserItem, ScriptGateError,
 )
@@ -98,7 +98,11 @@ class BrowserSource(Source):
             script = _script_path(config, self.spec.id, opts)
             extract = load_script(script)
         except ScriptGateError as exc:
-            return self._failed(opts, ctx, script=script, exc=exc, snapshot={})
+            # A rejected script never runs, so this configuration error has to fail
+            # the source: degrading it to an empty batch would no-op every fetch.
+            self._record(ctx, opts, error_code='script_assertion_failed', message=exc.message,
+                         exc=exc, snapshot={}, target_url=opts.page_url)
+            raise DiagnosedError(exc.message) from None
         try:
             output, snapshot = await self._replay(extract, opts, config)
         except _ReplayFailed as failure:
@@ -163,11 +167,8 @@ class BrowserSource(Source):
     def _failed(self, opts: BrowserOptions, ctx: FetchContext, *, script: Path, exc: BaseException,
                 snapshot: dict[str, Any], timeout: bool = False) -> FetchResult:
         """Record the replay failure; `on_detail_error` decides the batch outcome."""
-        if isinstance(exc, ScriptGateError):
-            message = exc.message
-        else:
-            message = (f'browser replay timed out ({type(exc).__name__})' if timeout
-                       else f'browser replay script failed ({type(exc).__name__})')
+        message = (f'browser replay timed out ({type(exc).__name__})' if timeout
+                   else f'browser replay script failed ({type(exc).__name__})')
         self._record(ctx, opts, error_code='playwright_selector_timeout' if timeout else 'script_assertion_failed',
                      message=message, exc=exc, snapshot=snapshot,
                      target_url=_failed_target(opts, snapshot))
