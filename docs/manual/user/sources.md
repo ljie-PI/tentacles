@@ -111,7 +111,7 @@ sources:
 - **选择器属性语法**：普通选择器提取清洗后文本；`选择器@属性` 提取指定属性；`@href` 直接读取当前 `item` 节点自身属性（引号或方括号内的 `@` 不会被误判为属性分隔符）。
 - **详情与去重**：启用 `fetch_content: true` 后，详情页依次尝试提取非空 `article` → `main` → `body`；若本轮任一详情请求失败，按 `on_detail_error` 决定整批回滚（见下）。游标缓存最近 500 个已见 ID，数据库同时持久化观察身份，避免重启后重复抓详情。
 - **`on_detail_error`（详情页局部容错）**：
-  - `fail_batch`（默认，兼容旧行为）：任一详情页请求失败（`update_existing: true` 时还包括正文为空）整批业务数据回滚、游标不前进；但**回滚前会先把本轮所有失败详情逐条写入故障账本**（`errors list --unresolved` 可查，含具体 `target_url`、列表已知标题、HTTP 状态、`html_title`、`body_preview`）。
+  - `fail_batch`（默认，兼容旧行为）：任一详情页请求失败或正文提取为空（与 `update_existing` 无关，两种模式一致）整批业务数据回滚、游标不前进；但**回滚前会先把本轮所有失败详情逐条写入故障账本**（`errors list --unresolved` 可查，含具体 `target_url`、列表已知标题、HTTP 状态、`html_title`、`body_preview`）。
   - `record_and_skip`：失败的单篇详情只写入故障账本（`severity="error"`，`retryable` 按状态码判定），**本轮其余成功抓到的文章正常入库**。关键不变量：被跳过的 `target_url` **不写入游标 `seen` 缓存，也不写入 `source_seen_ids`**，所以下一轮它仍会被判定为 `new` 自动重试；重试成功入库后，账本里对应的未决记录自动回填 `resolved_at`（自动消警）。
   - 运行统计里 `details_fetched` 是本轮详情总数，`details_failed` / 跳过导致的 `skipped_nodes` 只在有失败或选择器异常时出现。
 

@@ -631,17 +631,19 @@ class WebSource(Source):
         response = await self._get(item.url, ctx, phase='fetch_detail', known_title=item.title)
         text = await run_blocking(_article_body, response.content, response.headers.get('content-type', ''))
         summary = item.summary or truncate(text, 2000)
+        if not text:
+            # An empty body is a detail failure in every mode: with updates off it
+            # would otherwise ingest an empty Item and leave no ledger row at all.
+            snapshot = await self._describe(response)
+            ctx.record_error(DiagnosticEvent(
+                phase='fetch_detail', error_code='empty_extracted_body', source_id=self.spec.id,
+                message='web detail returned no usable content', page_url=opts.url,
+                target_url=item.url, http_status=response.status_code, retryable=False,
+                debug_context=self._context(item.title,
+                                            headers=safe_response_headers(response.headers),
+                                            snapshot=snapshot)))
+            raise DiagnosedError('web detail returned no usable content')
         if result.observations:
-            if not text:
-                snapshot = await self._describe(response)
-                ctx.record_error(DiagnosticEvent(
-                    phase='fetch_detail', error_code='empty_extracted_body', source_id=self.spec.id,
-                    message='web detail returned no usable content', page_url=opts.url,
-                    target_url=item.url, http_status=response.status_code, retryable=False,
-                    debug_context=self._context(item.title,
-                                                headers=safe_response_headers(response.headers),
-                                                snapshot=snapshot)))
-                raise DiagnosedError('web detail returned no usable content')
             observation = result.observations[index]
             # Missing list summary may be supplied by successful detail
             # extraction; explicit empty list summary remains empty.
