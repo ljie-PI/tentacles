@@ -180,6 +180,9 @@ sources:
 它在**你已登录的可见 Chrome** 里新建一个隔离工作 Tab，确定性重放仓库内的固化 Playwright 脚本，
 把文字条目转成 `kind: "browser"` 入库。无头模式被彻底禁止（见[基础配置手册](configuration-and-models.md)第 4 节）。
 
+第一次抓取某个源时还没有固化脚本，运行时会走一次**冷启动**：受控 `pi --mode rpc` 探索 → 录制动作轨迹 →
+从轨迹提炼脚本 → 静态门禁 + 真实试跑通过后才写入 `scripts/browser_sources/`。之后每次抓取都是零 Token 的重放。
+
 ### 前置：让 Chrome 打开调试端口
 
 ```bash
@@ -215,7 +218,7 @@ sources:
     script_path: ../scripts/browser_sources/reddit-localllama.py  # 可省略，缺省 <scripts_dir>/<id>.py
     max_items: 25
     timeout: 60                           # 单次重放整体超时秒数
-    pi:                                   # 可选：源级覆盖 #82 探索模型（当前仅校验）
+    pi:                                   # 可选：源级覆盖 browser.pi 的探索模型
       model: anthropic/claude-opus-4-7
       reasoning_level: high
 ```
@@ -223,7 +226,7 @@ sources:
 | 字段 | 含义 |
 | :--- | :--- |
 | `page_url` | 入口页 `http(s)` 地址，必填；成为该源条目的 `page_url` |
-| `task` | 人类可读的采集任务描述，供 #82 探索阶段使用，当前不影响重放 |
+| `task` | 人类可读的采集任务描述：冷启动时交给 `pi` 探索，已有脚本时不影响重放 |
 | `chrome_profile` | 源级 Chrome Profile 目录名（如 `Profile 1`），缺省用 `browser.default_profile` |
 | `script_path` | 固化脚本路径，相对 YAML 解析；**必须**落在 `browser.scripts_dir` 内且以 `.py` 结尾 |
 | `update_existing` | 开启后本轮再次出现的本源条目按规范化 URL 原位更新（与 Web `list` 一致） |
@@ -247,6 +250,34 @@ sources:
   - `debug_context` 带 `current_url`、`page_title`、精简 A11y 快照与脚本栈帧；`target_url` 指向失败瞬间的页面地址。
   排障命令见 [Agent CLI 运维速查](../agent-cli/operations-reference.md) 第 5 节。
 
+### 冷启动：首次探索、轨迹录制与脚本提炼
+
+当 `scripts/browser_sources/<id>.py` 还不存在（且未配 `script_path`）时，本轮不直接重放，而是：
+
+1. **受控探索**：按 `pi.model` / `pi.reasoning_level` 拉起 `pi --mode rpc --no-session`，
+   关闭所有内建工具、MCP、技能与扩展发现（`--no-builtin-tools --no-extensions --no-mcp --no-skills`），
+   只加载随包发布的桥接扩展，因此 Agent 能用的工具只有 `browser_navigate` / `browser_snapshot` /
+   `browser_click` / `browser_fill` / `browser_scroll` / `browser_evaluate` / `browser_submit_result`；
+   这些工具通过 `browser.webbridge_url` 上的**一次性回环端点**（每次运行一个随机 Token）操作本轮工作 Tab，
+   拿不到 Shell、文件系统或其它进程。
+2. **轨迹录制**：每个动作都先捕获决策页面上下文（URL、标题、精简 A11y 快照、候选选择器），
+   再记录动作与观察结果，逐行追加到 `data/trajectories/<id>/<run_id>.jsonl`（`data/` 已在 `.gitignore` 中，**不入 Git**）。
+   已配置的密钥、URL 里敏感查询参数与 `Cookie` 等字段在写入前即被脱敏。
+3. **提炼与双重门禁**：`pi` 在同一会话里把 `task` + 轨迹 + 探索样本条目提炼成固定 Playwright 脚本；
+   脚本必须先通过与重放同一套 AST 静态门禁，再在一个**全新的真实工作 Tab** 上独立试跑（超时、报错、
+   返回 0 条、条目缺 `http(s)` 链接或 `page_url` 不是入口页都算失败）。失败会把报错与当时的页面现场
+   反馈给同一会话修正**最多 1 次**。
+4. **落盘边界**：两门禁都通过才写入 `scripts/browser_sources/<id>.py`，并在本地
+   `data/browser_sources/<id>.meta.json` 写下轨迹路径、脚本选用的选择器、试跑耗时与样本条数
+   （**只写本地 `data/`，绝不入库、绝不含 Cookie / 账号名 / 正文**）；本轮条目正常入库，
+   `stats.browser_mode = "distill"` 并带 `stats.trajectory_path`、`stats.script_path`。
+   未通过则**不写脚本**，失败栈与 `trajectory_path` 记入 `run_errors`（`phase: browser_distill`），
+   下一轮仍从冷启动重试（旧游标保持不变）。
+
+**计费提醒**：冷启动的探索 + 提炼 + 修正回合都发真实模型请求，Token 与费用实时累加到当轮 `Run`
+（`tentacles runs show <run_id>` 的 `stats.usage` / `stats.cost`，`tentacles runs list` 汇总可见）；
+脚本落盘后每轮都是零 Token 重放。`pi` 自身的凭据/MCP 配置不参与：子进程只拿到当前进程环境加上两个桥接变量。
+
 ### 固化脚本规范
 
 脚本位于 `scripts/browser_sources/<source_id>.py`，唯一入口是
@@ -260,5 +291,7 @@ sources:
 ```bash
 # 首次验证：先手动启动带调试端口的 Chrome 并登录，再显式抓取（enabled: false 也会执行）
 tentacles sources fetch reddit-localllama
+# 冷启动：本轮会花 Token 探索并提炼脚本，之后脚本已存在则零 Token 重放
+tentacles --json sources fetch reddit-localllama | jq '.[0].stats | {browser_mode, trajectory_path, script_path}'
 tentacles items list --source reddit-localllama
 ```

@@ -19,6 +19,7 @@
    - 检查配置（`config check`）、调度进度（`scheduler status`）与运行计费账本（`runs list`）
    - 回滚安全的故障账本（`errors list --unresolved`、`errors show`、`runs show`）、`error_code` 速查表与 `failed_targets` 排障工作流
    - `browser_replay` 阶段的排障现场（栈帧 + A11y 快照 + 失败瞬间 `current_url`）
+   - `browser_distill` 阶段的冷启动排障（`stats.browser_mode`、`trajectory_path`、`pi_rpc_failed` / `pi_script_rejected`）
 
 ---
 

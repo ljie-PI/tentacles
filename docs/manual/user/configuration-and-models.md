@@ -111,13 +111,13 @@ defaults:
 ```yaml
 browser:
   cdp_url: http://127.0.0.1:9222          # Chrome Remote Debugging 端点
-  webbridge_url: http://127.0.0.1:10086   # 预留：#82 探索期桥接地址（当前仅校验）
+  webbridge_url: http://127.0.0.1:10086   # 探索期本地工具桥接地址（仅回环）
   auto_launch: false                      # CDP 无人监听时是否自动拉起有界面 Chrome
   chrome_executable: null                 # 可选：显式 Chrome 可执行文件路径
   chrome_user_data_dir: null              # 可选：Chrome User Data 根目录（auto_launch 时必填）
   default_profile: Default                # 默认 Chrome Profile 目录名（如 Default、Profile 1）
   scripts_dir: ../scripts/browser_sources # 固化 Playwright 脚本目录，相对本文件解析
-  pi:                                     # 预留：#82/#83 的探索与自愈模型
+  pi:                                     # 首次探索与脚本提炼所用的 Agent 模型
     binary: pi
     model: anthropic/claude-sonnet-4-6
     reasoning_level: high                 # off | minimal | low | medium | high | xhigh | max
@@ -132,13 +132,20 @@ browser:
 | 字段 | 含义与默认值 |
 | :--- | :--- |
 | `cdp_url` | 用 `connect_over_cdp` 附着的有界面 Chrome 调试端点，**必须带显式端口**，默认 `http://127.0.0.1:9222` |
-| `webbridge_url` | 预留给 #82 探索期的本地桥接地址，当前不产生任何网络行为 |
+| `webbridge_url` | 首次探索时的本地工具桥接端点，**只接受回环地址与显式端口**（默认 `http://127.0.0.1:10086`）。抓取进程在该地址启动一次性 JSON 端点，受控 `pi` 子进程里的扩展只能通过它操作工作 Tab；端口被占用会直接报配置错误 |
 | `auto_launch` | 默认 `false`。为 `true` 且 `cdp_url` 无人监听时，按目标 Profile 以有界面模式拉起 Chrome（**绝不传 `--headless`**）；抓取结束后只关闭这次拉起的进程 |
 | `chrome_executable` | 可选 Chrome 可执行文件；缺省在 macOS/Windows 常见路径与 `PATH` 的 `google-chrome*` / `chromium*` 中查找 |
 | `chrome_user_data_dir` | 可选 User Data 根目录；附着时若配置了它，会与实际命令行 `--user-data-dir` 比对 |
 | `default_profile` | 默认 Chrome Profile 目录名，源级 `chrome_profile` 可覆盖；只接受目录名（禁止 `/`、前导 `-` 等可注入参数的值） |
 | `scripts_dir` | 固化脚本目录，相对 YAML 解析；源级 `script_path` 必须解析到该目录内的 `.py` 文件 |
-| `pi` / `pr` | #82 / #83 的预留配置块，当前**只做 schema 校验**，不影响抓取行为 |
+| `pi.binary` | `pi` 可执行文件，默认走 `PATH` 上的 `pi`；源级 `pi.binary` 可覆盖 |
+| `pi.model` | 首次探索与脚本提炼使用的模型（`provider/id` 形式），源级 `pi.model` 可覆盖 |
+| `pi.reasoning_level` | 映射为 `pi --thinking`，取值 `off`/`minimal`/`low`/`medium`/`high`/`xhigh`/`max` |
+| `pi.timeout` | 单轮探索或提炼回合的超时秒数（默认 300）；超时会中止该回合并杀掉子进程 |
+| `pr` | #83 的预留配置块，当前**只做 schema 校验**，不影响抓取行为 |
+
+`pi` 只在**尚无固化脚本的冷启动**里使用：探索、提炼与试跑都消耗真实模型 Token 与费用，
+完整流程与计费说明见 [信息源 → 有界面浏览器源](sources.md#5-有界面浏览器源type-browser)。
 
 **硬性安全边界**
 

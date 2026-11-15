@@ -217,9 +217,15 @@ tentacles items list --source reddit-localllama
 ```yaml
 browser:
   cdp_url: http://127.0.0.1:9222          # connect_over_cdp 附着的调试端点
+  webbridge_url: http://127.0.0.1:10086   # 冷启动探索的一次性工具桥接地址（仅回环）
   auto_launch: false                      # 端口无人监听时是否自动拉起有界面 Chrome
   default_profile: Default                # 默认 Chrome Profile，源级 chrome_profile 可覆盖
   scripts_dir: ../scripts/browser_sources # 固化脚本目录（相对本文件）
+  pi:                                     # 冷启动探索与提炼的 Agent 模型
+    binary: pi
+    model: anthropic/claude-sonnet-4-6
+    reasoning_level: high
+    timeout: 300
 
 sources:
   - id: reddit-localllama
@@ -241,7 +247,13 @@ sources:
   路径必须落在 `browser.scripts_dir` 内，`../../` 越界在 `config check` 阶段即报错。
 - **失败可排障**：重放超时/脚本失败/返回 0 条都会写入 `run_errors` 的 `browser_replay` 阶段，
   带上失败瞬间的 `current_url`、`page_title`、精简 A11y 快照与脚本栈帧（`errors show`）。
-- 无脚本时的 `pi` 自动探索与脚本自愈提 PR 分别属于后续工单；`browser.pi` / `browser.pr` 目前只做 schema 校验。
+- **冷启动自动提炼**：当 `scripts/browser_sources/<id>.py` 还不存在时，本轮按 `browser.pi`（`binary` / `model` /
+  `reasoning_level` / `timeout`）拉起受控 `pi --mode rpc` 探索页面，把每一步动作与页面决策上下文写入
+  `data/trajectories/<id>/<run_id>.jsonl`（本地、脱敏、不入 Git），再从轨迹提炼固定脚本；提炼出的脚本必须先通过
+  同一套 AST 门禁**且在真实工作 Tab 上独立试跑成功**（最多一次修正）才会写入仓库，选择器摘要写到
+  `data/browser_sources/<id>.meta.json`。`stats.browser_mode = "distill"` 时报告 `trajectory_path` /
+  `script_path`，Token 与费用归入当轮 Run；未通过则不写脚本并在 `run_errors` 的 `browser_distill` 阶段留现场。
+- 脚本报错自愈与自动提 PR 属于后续工单（`browser.pr` 目前只做 schema 校验）。
 - 完整字段说明见[信息源配置手册](docs/manual/user/sources.md#5-有界面浏览器源type-browser)与
   [脚本契约](scripts/browser_sources/README.md)，排障见 [Agent CLI 运维速查](docs/manual/agent-cli/operations-reference.md)。
 
