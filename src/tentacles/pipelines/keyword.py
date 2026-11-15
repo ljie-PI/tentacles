@@ -72,7 +72,8 @@ def _keyword(item: Item, persona: PersonaView, stage: KeywordSpec, index: int) -
 
 
 class KeywordStage:
-    models: tuple[ModelRequirement, ...] = ()
+    def models(self, stage: StageSpec) -> tuple[ModelRequirement, ...]:
+        return ()
 
     def batch_size(self, stage: StageSpec) -> int | None:
         return None  # Scored one item at a time; there is no paid request to size.

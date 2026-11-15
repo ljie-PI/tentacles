@@ -33,8 +33,14 @@ class ModelRequirement:
 
 
 class Stage(Protocol):
-    @property
-    def models(self) -> tuple[ModelRequirement, ...]: ...
+    def models(self, stage: StageSpec) -> tuple[ModelRequirement, ...]:
+        """The model requirements of one configured stage.
+
+        The declaration depends on the stage because a spelling can choose its
+        own default stage (see `SemanticSpec.model_stage`); central validation
+        reads it even when other options of that stage are invalid.
+        """
+        ...
 
     def batch_size(self, stage: StageSpec) -> int | None:
         """The paid request size this stage wants for one configured stage.

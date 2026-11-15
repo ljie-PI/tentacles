@@ -19,7 +19,10 @@ class SemanticStage:
     existing model and still run through the executor their model's kind names.
     """
 
-    models = (ModelRequirement('filter', None),)
+    def models(self, stage: StageSpec) -> tuple[ModelRequirement, ...]:
+        assert isinstance(stage, SemanticSpec)
+        # `decision` keeps its own default even though the executor comes from the model kind.
+        return (ModelRequirement(stage.model_stage, None),)
 
     def batch_size(self, stage: StageSpec) -> int | None:
         assert isinstance(stage, SemanticSpec)
@@ -31,7 +34,7 @@ class SemanticStage:
     async def score(self, items: list[Item], persona: PersonaView, stage: StageSpec,
                     index: int, models: ModelRegistry, progress: StageBatch) -> StageBatch:
         assert isinstance(stage, SemanticSpec)
-        name = ModelRequirement(stage.model_stage, None).resolve(models, stage.model)
+        name = self.models(stage)[0].resolve(models, stage.model)
         progress.model_name = name
         if models.spec(name).kind == 'decision':
             return await score_decisions(items, persona, stage, index, models, name, progress)

@@ -7,9 +7,10 @@ kind, add its adapter (and any new options schema) and register it; do not add
 dispatch branches to the cascade, manager, or configuration validation.
 
 - Each adapter declares its model requirements: default stage and model kind.
-  Central validation reads those declarations even when unrelated configuration
-  fields are invalid. `none` needs no model, but still validates an explicit
-  model override.
+  A Stage's declaration is a function of its configured stage (`Stage.models(stage)`),
+  because a spelling can choose its own default stage. Central validation reads those
+  declarations even when unrelated configuration fields are invalid. `none` needs no
+  model, but still validates an explicit model override.
 - A Stage writes one ordered `StageScore` per input into the caller's mutable
   `StageBatch`, recording usage as completions arrive. `score=None` is an item
   error, not a rejection. `batch.error` stops the cascade without discarding
@@ -31,7 +32,9 @@ dispatch branches to the cascade, manager, or configuration validation.
   `ModelRequirement` declares `kind=None`, which resolves through
   `ModelRegistry.resolve_any` and lets the adapter dispatch on `models.spec(name).kind`.
   The spelling only picks which default the stage prefers (`decision` keeps
-  `defaults.models.decision`, the others keep `defaults.models.filter`). The two
+  `defaults.models.decision`, the others keep `defaults.models.filter`), and the
+  adapter declares that preference from the configured stage, so central validation
+  checks the default the stage really resolves. The two
   executors share `batch_size` and `summary_chars`; `relevance_type` and
   `jev_batch_mode` only apply to the Decisions executor, which packs one shared
   persona per batch, halves a payload the endpoint refuses with 400/413 or answers

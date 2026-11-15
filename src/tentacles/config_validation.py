@@ -23,8 +23,11 @@ from tentacles.errors import ConfigError, ConfigIssue, ConfigValidationError
 from tentacles.llm.config import ModelSpec, STAGES
 from tentacles.personas.models import persona_name
 from tentacles.pipelines.adapters import ModelRequirement
+from tentacles.pipelines.config import StageSpec
 from tentacles.pipelines.registry import PROCESSORS, STAGES as FILTER_STAGES
 from tentacles.prompts import load_prompt
+
+_STAGE_DECLARATION: TypeAdapter[StageSpec] = TypeAdapter(StageSpec)
 
 
 def _mapping(value: Any) -> Mapping[str, Any]:
@@ -159,6 +162,19 @@ def _adapter_model_errors(requirements: tuple[ModelRequirement, ...], data: Mapp
         if error is not None:
             errors.append(error)
     return errors
+
+
+def _declared_stage(stage_type: str, data: Mapping[str, Any]) -> StageSpec:
+    """Parse a filter declaration far enough to read its model requirements.
+
+    Other options of this stage may already have schema errors, and its model
+    checks must still run, so fall back to the `type`-only declaration that
+    every stage spec accepts.
+    """
+    try:
+        return _STAGE_DECLARATION.validate_python(data)
+    except ValidationError:
+        return _STAGE_DECLARATION.validate_python({'type': stage_type})
 
 
 def _browser_scripts_dir(browser: Mapping[str, Any], config_path: Path) -> Path:
@@ -347,9 +363,10 @@ def validate_config(config: AppConfig | Mapping[str, Any], existing_personas: Co
             filter_data = _mapping(value)
             stage_type = filter_data.get('type', 'keyword')
             adapter = FILTER_STAGES.get(stage_type) if isinstance(stage_type, str) else None
-            if adapter is not None:
-                errors.extend(_adapter_model_errors(adapter.models, filter_data, models, defaults,
-                                                     f'{where}.filters[{j}]'))
+            if adapter is not None and isinstance(stage_type, str):
+                errors.extend(_adapter_model_errors(
+                    adapter.models(_declared_stage(stage_type, filter_data)), filter_data,
+                    models, defaults, f'{where}.filters[{j}]'))
         processor = _mapping(pipeline.get('processor'))
         processor_type = processor.get('type', 'digest')
         processor_adapter = PROCESSORS.get(processor_type) if isinstance(processor_type, str) else None
