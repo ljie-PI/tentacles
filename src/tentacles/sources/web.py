@@ -9,6 +9,7 @@ import json
 from datetime import datetime
 from http.cookies import SimpleCookie
 from email.message import Message
+from time import monotonic
 from typing import Annotated, Any, ClassVar, Iterable, Literal, Type, cast
 from urllib.parse import urljoin
 from zoneinfo import ZoneInfo
@@ -18,12 +19,15 @@ from dateparser.search import search_dates
 import httpx
 import soupsieve
 from bs4 import BeautifulSoup, Tag
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints, field_validator
+from pydantic import BaseModel, ValidationError, ConfigDict, Field, StringConstraints, field_validator
 
 from tentacles.asyncutil import gather_draining, run_blocking, run_store_call
+from tentacles.diagnostics import (DiagnosticEvent, classify_failure, clip, html_structure_snippet,
+                                   redact_text, safe_response_headers, stack_frames,
+                                   status_retryable, validation_errors)
 from tentacles.errors import UpstreamError
 from tentacles.models import Item, ItemObservation, LinkDisposition, normalize_url
-from tentacles.sources.base import FetchContext, FetchResult, Source, register
+from tentacles.sources.base import DiagnosedError, FetchContext, FetchResult, Source, register
 from tentacles.text import content_sha1, html_to_text, truncate
 from tentacles.timeutil import to_utc
 
@@ -115,6 +119,9 @@ class WebOptions(BaseModel):
     selectors: ListSelectors | None = None
     selector: str | None = None
     fetch_content: bool = False
+    # What one failed detail page costs: the whole batch (atomic rollback) or
+    # only that page, whose target is then retried on the next fetch.
+    on_detail_error: Literal['fail_batch', 'record_and_skip'] = 'fail_batch'
     concurrency: int = Field(default=4, ge=1, le=16)
     emit_baseline: bool = True
     headers: dict[str, str] = Field(default_factory=dict)
@@ -215,6 +222,25 @@ def _article_body(html: bytes, content_type: str) -> str:
 
 
 @dataclass(frozen=True)
+class FailureSnapshot:
+    """What a page that failed us looked like, bounded for the ledger."""
+
+    html_title: str
+    body_preview: str
+    dom_skeleton: str
+
+
+def _failure_snapshot(html: bytes, content_type: str) -> FailureSnapshot:
+    """Title, reading-order text and tag skeleton of a response, never the whole body."""
+    soup = _document(html, content_type)
+    region = soup.select_one('main') or soup.body or soup
+    return FailureSnapshot(
+        html_title=clip(html_to_text(str(soup.title)).strip() if soup.title else '', 300),
+        body_preview=clip(html_to_text(str(region)).strip(), 1000),
+        dom_skeleton=html_structure_snippet(str(region), limit=800))
+
+
+@dataclass(frozen=True)
 class ExtractionPage:
     text: str
     links: frozenset[str]
@@ -271,6 +297,8 @@ class ExtractionDescriptor(BaseModel):
 
 
 _EXTRACT_OUTPUT_LIMIT = 1_000_000
+# Selector-miss samples kept per fetch: enough to see the markup change, not a flood.
+_NODE_SAMPLE_LIMIT = 10
 
 
 def _descriptor_data(descriptors: list[ExtractionDescriptor]) -> list[dict[str, Any]]:
@@ -297,7 +325,8 @@ def _cached_descriptors(cursor: dict[str, Any], page: ExtractionPage) -> list[Ex
         return None
 
 
-def _extract_descriptors(text: str, page: ExtractionPage, ctx: FetchContext) -> tuple[list[ExtractionDescriptor], int]:
+def _extract_descriptors(text: str, page: ExtractionPage,
+                         ctx: FetchContext) -> tuple[list[ExtractionDescriptor], list[str]]:
     if len(text) > _EXTRACT_OUTPUT_LIMIT:
         raise ValueError('web extraction response exceeds size limit')
     def invalid_constant(value: str) -> None:
@@ -305,13 +334,13 @@ def _extract_descriptors(text: str, page: ExtractionPage, ctx: FetchContext) -> 
     data = json.loads(text, parse_constant=invalid_constant)
     if not isinstance(data, dict) or set(data) != {'items'} or not isinstance(data['items'], list):
         raise ValueError('invalid web extraction response')
-    descriptors, seen, dropped = [], set(), 0
+    descriptors, seen, dropped = [], set(), []
     for raw in data['items']:
         if not isinstance(raw, dict) or not isinstance(raw.get('url'), str):
             raise ValueError('invalid web extraction item')
         url = _link(page.base_url, raw['url'])
         if url is None or url not in page.links:
-            dropped += 1
+            dropped.append(clip(raw['url'], 500))
             continue
         entry = ExtractedEntry.model_validate(raw)
         if url in seen:
@@ -343,8 +372,11 @@ class WebSource(Source):
     Options: ClassVar[Type[BaseModel]] = WebOptions
     supports_updates: ClassVar[bool] = True  # list/llm only; page retains revision identities
 
-    async def _get(self, url: str, ctx: FetchContext) -> httpx.Response:
+    async def _get(self, url: str, ctx: FetchContext, *, phase: str,
+                   known_title: str | None = None) -> httpx.Response:
+        """One static GET; any failure is recorded against the concrete target."""
         opts = cast(WebOptions, self.options)
+        started = monotonic()
         def origin(value: str) -> tuple[str, str, int]:
             parsed = httpx.URL(value)
             return parsed.scheme, parsed.host, parsed.port or (443 if parsed.scheme == 'https' else 80)
@@ -360,15 +392,80 @@ class WebSource(Source):
             request.headers['Cookie'] = '; '.join(cookie.OutputString() for cookie in cookies.values())
         elif not same_origin:
             request.headers.pop('cookie', None)
-        response = await client.send(request, follow_redirects=False)
-        if not response.is_success:
-            raise UpstreamError(f'web source HTTP {response.status_code}')
-        return response
+        try:
+            response = await client.send(request, follow_redirects=False)
+        except httpx.HTTPError as exc:
+            error_code, retryable, http_status = classify_failure(exc)
+            ctx.record_error(DiagnosticEvent(
+                phase=phase, error_code=error_code, source_id=self.spec.id,
+                message=f'web source request failed ({type(exc).__name__})',
+                page_url=opts.url, target_url=url, http_status=http_status,
+                exception_type=type(exc).__name__, retryable=retryable,
+                debug_context=self._context(known_title, started, exception=stack_frames(exc))))
+            raise DiagnosedError(f'web source request failed ({type(exc).__name__})') from None
+        if response.is_success:
+            return response
+        snapshot = await self._describe(response)
+        context = self._context(known_title, started, headers=safe_response_headers(response.headers),
+                                snapshot=snapshot)
+        if 300 <= response.status_code < 400:
+            location = response.headers.get('location', '')
+            # The redirect target is the fix: it is what the YAML `url` should be.
+            ctx.record_error(DiagnosticEvent(
+                phase=phase, error_code='http_redirect_blocked', source_id=self.spec.id,
+                message=f'web source HTTP {response.status_code} redirect not followed',
+                page_url=opts.url, target_url=url, http_status=response.status_code, retryable=False,
+                debug_context={**context, 'redirect_location': location,
+                               'redirect_url': _link(url, location)}))
+            raise DiagnosedError(f'web source HTTP {response.status_code}')
+        ctx.record_error(DiagnosticEvent(
+            phase=phase, error_code='http_status_error', source_id=self.spec.id,
+            message=f'web source HTTP {response.status_code}', page_url=opts.url, target_url=url,
+            http_status=response.status_code, retryable=status_retryable(response.status_code),
+            debug_context=context))
+        raise DiagnosedError(f'web source HTTP {response.status_code}')
+
+    def _context(self, known_title: str | None, started: float | None = None, *,
+                 headers: dict[str, str] | None = None,
+                 snapshot: FailureSnapshot | None = None, exception: str | None = None) -> dict[str, Any]:
+        """The snapshot shape every Web failure carries, so one reader fits all."""
+        opts = cast(WebOptions, self.options)
+        context: dict[str, Any] = {'page_url': opts.url, 'mode': opts.mode, 'known_title': known_title}
+        if started is not None:
+            context['elapsed_ms'] = int((monotonic() - started) * 1000)
+        if headers is not None:
+            context['response_headers'] = headers
+        if snapshot is not None:
+            context.update(html_title=snapshot.html_title, body_preview=snapshot.body_preview,
+                           dom_skeleton=snapshot.dom_skeleton)
+        if exception is not None:
+            context['exception'] = exception
+        return context
+
+    async def _describe(self, response: httpx.Response) -> FailureSnapshot:
+        """Bounded DOM snapshot; a broken body must not replace the failure it explains."""
+        try:
+            return await run_blocking(_failure_snapshot, response.content,
+                                      response.headers.get('content-type', ''))
+        except Exception:
+            return FailureSnapshot('', '', '')
+
+    def _selector_miss(self, ctx: FetchContext, mode: str, configured: dict[str, Any],
+                       soup: BeautifulSoup) -> None:
+        opts = cast(WebOptions, self.options)
+        region = soup.select_one('main') or soup.body or soup
+        ctx.record_error(DiagnosticEvent(
+            phase='parse_entry', error_code='selector_no_match', source_id=self.spec.id,
+            message=f'web {mode} selector matched nothing', page_url=opts.url, retryable=False,
+            debug_context={'mode': mode, 'configured_selectors': configured,
+                           'html_title': clip(html_to_text(str(soup.title)).strip() if soup.title else '', 300),
+                           'html_skeleton': html_structure_snippet(str(region), limit=1500)}))
 
     async def fetch(self, cursor: dict[str, Any], ctx: FetchContext) -> FetchResult:
         opts = cast(WebOptions, self.options)
+        started = monotonic()
         try:
-            response = await self._get(opts.url, ctx)
+            response = await self._get(opts.url, ctx, phase='fetch_page')
             if opts.mode == 'page':
                 return await run_blocking(self._page, response.content, response.headers.get('content-type', ''), cursor, ctx)
             if opts.mode == 'llm':
@@ -386,10 +483,17 @@ class WebSource(Source):
             if opts.fetch_content:
                 await self._details(result, ctx)
             return result
-        except UpstreamError:
+        except DiagnosedError:
             raise
         except Exception as exc:
-            raise UpstreamError(f'web fetch failed ({type(exc).__name__})') from None
+            # Keep the adapter's own wording when it classified the failure itself.
+            message = (exc.message if isinstance(exc, UpstreamError)
+                       else f'web fetch failed ({type(exc).__name__})')
+            ctx.record_error(DiagnosticEvent(
+                phase='fetch_page', error_code='unexpected_exception', source_id=self.spec.id,
+                message=message, page_url=opts.url, exception_type=type(exc).__name__, retryable=False,
+                debug_context=self._context(None, started, exception=stack_frames(exc))))
+            raise DiagnosedError(message) from None
 
     async def _classify_links(self, urls: list[str], cursor: dict[str, Any],
                               ctx: FetchContext) -> dict[str, LinkDisposition]:
@@ -456,53 +560,127 @@ class WebSource(Source):
         except UpstreamError as exc:
             raise UpstreamError(f'web extraction model failed ({type(exc).__name__})') from None
         try:
-            descriptors, dropped = await run_blocking(_extract_descriptors, result.text, page, ctx)
-        except (ValueError, TypeError, RecursionError, OverflowError):
-            raise UpstreamError('web extraction returned invalid JSON or schema') from None
+            descriptors, dropped_urls = await run_blocking(_extract_descriptors, result.text, page, ctx)
+        except (ValueError, TypeError, RecursionError, OverflowError) as exc:
+            # A degraded extraction must name the contract it broke and the
+            # fields at fault, not just "invalid JSON".
+            ctx.record_error(DiagnosticEvent(
+                phase='llm_extract', error_code='invalid_json_schema', source_id=self.spec.id,
+                message=f'web extraction returned invalid JSON or schema ({type(exc).__name__})',
+                page_url=opts.url, exception_type=type(exc).__name__, retryable=True,
+                debug_context={'validation_errors': validation_errors(exc),
+                               'output_preview': clip(redact_text(result.text), 800)}))
+            raise DiagnosedError('web extraction returned invalid JSON or schema') from None
+        if dropped_urls:
+            ctx.record_error(DiagnosticEvent(
+                phase='llm_extract', error_code='hallucinated_link_dropped', severity='warning',
+                source_id=self.spec.id, retryable=False,
+                message=f'web extraction dropped {len(dropped_urls)} link(s) absent from the page',
+                page_url=opts.url,
+                debug_context={'dropped_urls': dropped_urls[:50], 'dropped_count': len(dropped_urls)}))
         cached = _seen_cache(cursor, opts.url, (entry.url for entry in descriptors))
         next_cursor = {**skipped_cursor, 'seen': cached}
         if self.spec.update_existing:
             next_cursor['descriptors'] = _descriptor_data(descriptors)
         return FetchResult([entry.item(self.spec.id, opts.url) for entry in descriptors], next_cursor,
-            {'entries': len(descriptors), 'dropped_links': dropped, 'seen_cached': len(cached)},
+            {'entries': len(descriptors), 'dropped_links': len(dropped_urls), 'seen_cached': len(cached)},
             [entry.observation() for entry in descriptors] if self.spec.update_existing else [])
 
     async def _details(self, result: FetchResult, ctx: FetchContext) -> None:
+        """Fetch every detail page, then apply `on_detail_error` to the failures.
+
+        Workers never abort: under `fail_batch` the whole round of failed pages
+        is recorded before the batch rolls back, which is what makes an Agent's
+        `errors list` show every broken target instead of only the first one.
+        """
         opts = cast(WebOptions, self.options)
         pending = list(enumerate(result.items))
         iterator = iter(pending)
+        failed: list[int] = []
 
         async def worker() -> None:
             for index, item in iterator:
-                response = await self._get(item.url, ctx)
-                text = await run_blocking(_article_body, response.content, response.headers.get('content-type', ''))
-                summary = item.summary or truncate(text, 2000)
-                if result.observations:
-                    if not text:
-                        raise UpstreamError('web detail returned no usable content')
-                    observation = result.observations[index]
-                    # Missing list summary may be supplied by successful detail
-                    # extraction; explicit empty list summary remains empty.
-                    summary = (observation.summary or '' if 'summary' in observation.model_fields_set
-                               else truncate(text, 2000))
-                    meta = {**(observation.meta or {}), 'full_content_sha1': content_sha1(text)}
-                    result.observations[index] = observation.model_copy(
-                        update={'content': text, 'summary': summary, 'meta': meta})
-                result.items[index] = Item.model_validate({**item.model_dump(), 'content': text,
-                    'summary': summary, 'fingerprint': '',
-                    'meta': {**item.meta, 'full_content_sha1': content_sha1(text)}})
+                try:
+                    await self._detail(index, item, result, ctx)
+                except DiagnosedError:
+                    failed.append(index)
+                except Exception as exc:
+                    # Nothing here may lose the concrete page it happened on.
+                    ctx.record_error(DiagnosticEvent(
+                        phase='fetch_detail', error_code='unexpected_exception', source_id=self.spec.id,
+                        message=f'web detail failed ({type(exc).__name__})', page_url=opts.url,
+                        target_url=item.url, exception_type=type(exc).__name__, retryable=False,
+                        debug_context={'page_url': opts.url, 'mode': opts.mode, 'known_title': item.title,
+                                       'exception': stack_frames(exc)}))
+                    failed.append(index)
 
         tasks = [asyncio.create_task(worker()) for _ in range(min(opts.concurrency, len(pending)))]
         if tasks:
             await gather_draining(tasks)
         result.stats['details_fetched'] = len(pending)
+        if not failed:
+            return
+        result.stats['details_failed'] = len(failed)
+        if opts.on_detail_error == 'record_and_skip':
+            self._skip_failed_details(result, failed)
+            return
+        raise DiagnosedError(f'web details failed for {len(failed)} of {len(pending)} page(s)')
+
+    async def _detail(self, index: int, item: Item, result: FetchResult, ctx: FetchContext) -> None:
+        opts = cast(WebOptions, self.options)
+        response = await self._get(item.url, ctx, phase='fetch_detail', known_title=item.title)
+        text = await run_blocking(_article_body, response.content, response.headers.get('content-type', ''))
+        summary = item.summary or truncate(text, 2000)
+        if result.observations:
+            if not text:
+                snapshot = await self._describe(response)
+                ctx.record_error(DiagnosticEvent(
+                    phase='fetch_detail', error_code='empty_extracted_body', source_id=self.spec.id,
+                    message='web detail returned no usable content', page_url=opts.url,
+                    target_url=item.url, http_status=response.status_code, retryable=False,
+                    debug_context=self._context(item.title,
+                                                headers=safe_response_headers(response.headers),
+                                                snapshot=snapshot)))
+                raise DiagnosedError('web detail returned no usable content')
+            observation = result.observations[index]
+            # Missing list summary may be supplied by successful detail
+            # extraction; explicit empty list summary remains empty.
+            summary = (observation.summary or '' if 'summary' in observation.model_fields_set
+                       else truncate(text, 2000))
+            meta = {**(observation.meta or {}), 'full_content_sha1': content_sha1(text)}
+            result.observations[index] = observation.model_copy(
+                update={'content': text, 'summary': summary, 'meta': meta})
+        result.items[index] = Item.model_validate({**item.model_dump(), 'content': text,
+            'summary': summary, 'fingerprint': '',
+            'meta': {**item.meta, 'full_content_sha1': content_sha1(text)}})
+
+    def _skip_failed_details(self, result: FetchResult, failed: list[int]) -> None:
+        """Deliver the successful pages and leave the failed targets for a retry.
+
+        The failed targets must not enter the cursor's seen cache: the next
+        fetch has to classify them as new again so they are refetched, and
+        their stored success then resolves the ledger rows (`resolved_at`).
+        Their URLs are never written to `source_seen_ids` either, because a
+        skipped page never reaches `upsert_items`.
+        """
+        dropped = {index: result.items[index] for index in failed}
+        result.items = [item for index, item in enumerate(result.items) if index not in dropped]
+        if result.observations:
+            result.observations = [observation for index, observation in enumerate(result.observations)
+                                   if index not in dropped]
+        forgotten = {item.external_id for item in dropped.values()}
+        forgotten.update(normalize_url(item.url) for item in dropped.values())
+        seen = result.cursor.get('seen')
+        if isinstance(seen, list):
+            result.cursor['seen'] = [identity for identity in seen if identity not in forgotten]
 
     def _page(self, html: bytes, content_type: str, cursor: dict[str, Any], ctx: FetchContext) -> FetchResult:
         opts = cast(WebOptions, self.options)
         soup = _document(html, content_type)
         regions = soup.select(opts.selector) if opts.selector else [soup]
         if not regions:
-            raise UpstreamError('web page selector matched no region')
+            self._selector_miss(ctx, 'page', {'selector': opts.selector}, soup)
+            raise DiagnosedError('web page selector matched no region')
         text = '\n'.join(html_to_text(str(region)) for region in regions).strip()
         digest = hashlib.sha256(text.encode('utf-8')).hexdigest()
         url = normalize_url(opts.url)
@@ -534,12 +712,28 @@ class WebSource(Source):
         published = Selector.parse(selectors.date) if selectors.date else None
         soup = _document(html, content_type)
         base = _effective_base(soup, base)
+        nodes = soup.select(selectors.item)
+        if not nodes:
+            self._selector_miss(ctx, 'list', {'item': selectors.item, 'title': selectors.title,
+                                             'link': selectors.link, 'summary': selectors.summary,
+                                             'date': selectors.date}, soup)
+            raise DiagnosedError('web list selector matched no item')
         items, seen = [], set()
         observations: list[ItemObservation] = []
-        for node in soup.select(selectors.item):
+        skipped_nodes = 0
+        samples: list[dict[str, Any]] = []
+        for position, node in enumerate(nodes):
             name = title.value(node).strip()
             url = _link(base, link.value(node, default_attribute='href'))
-            if not name or url is None or url in seen:
+            if url is not None and url in seen:
+                continue  # the same article linked twice is not a selector problem
+            if not name or url is None:
+                # Sampling bounded: a site-wide markup change must not flood the ledger.
+                skipped_nodes += 1
+                if len(samples) < _NODE_SAMPLE_LIMIT:
+                    samples.append({'node_index': position, 'title_found': bool(name),
+                                    'link_found': url is not None,
+                                    'node_html_snippet': html_structure_snippet(str(node))})
                 continue
             seen.add(url)
             raw_summary = summary.observe(node) if summary else None
@@ -560,6 +754,18 @@ class WebSource(Source):
                 # List excerpts are not full-body observations, even when
                 # details are disabled. New Items may still use the excerpt.
                 observations.append(ItemObservation(**fields))
+        if skipped_nodes:
+            ctx.record_error(DiagnosticEvent(
+                phase='parse_entry', error_code='selector_no_match', severity='warning',
+                source_id=self.spec.id, retryable=False, page_url=opts.url,
+                message=f'web list skipped {skipped_nodes} item node(s) without a title or link',
+                debug_context={'mode': 'list', 'matched_nodes': len(nodes), 'skipped_nodes': skipped_nodes,
+                               'configured_selectors': {'item': selectors.item, 'title': selectors.title,
+                                                        'link': selectors.link},
+                               'html_title': clip(html_to_text(str(soup.title)).strip() if soup.title else '', 300),
+                               'node_samples': samples}))
         cached = _seen_cache(cursor, opts.url, (item.external_id for item in items))
-        return FetchResult(items, {'url': opts.url, 'seen': cached},
-                           {'entries': len(items), 'seen_cached': len(cached)}, observations)
+        stats = {'entries': len(items), 'seen_cached': len(cached)}
+        if skipped_nodes:
+            stats['skipped_nodes'] = skipped_nodes
+        return FetchResult(items, {'url': opts.url, 'seen': cached}, stats, observations)
