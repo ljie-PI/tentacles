@@ -314,6 +314,20 @@ def _auth_failure(source_id: str, opts: ImapOptions, exc: BaseException | None,
                        'exception': None if exc is None else type(exc).__name__})
 
 
+def _fetch_failure(source_id: str, opts: ImapOptions, exc: BaseException) -> DiagnosticEvent:
+    """A failure while reading the mailbox, after login succeeded.
+
+    Only the exception type is kept: a server or socket error can echo the
+    credentials or the message body it failed on.
+    """
+    return DiagnosticEvent(
+        phase='imap_fetch', error_code='unexpected_exception', source_id=source_id,
+        message=f'IMAP fetch failed ({type(exc).__name__})',
+        exception_type=type(exc).__name__, retryable=isinstance(exc, OSError),
+        debug_context={'host': opts.host, 'port': opts.server_port, 'ssl': opts.ssl,
+                       'folders': list(opts.folders), 'exception': type(exc).__name__})
+
+
 def _message_failure(source_id: str, folder: str, validity: int, uid: int,
                     exc: BaseException) -> DiagnosticEvent:
     """One unparsable message, located by folder + UIDVALIDITY + UID.
@@ -400,6 +414,7 @@ class ImapSource(Source):
             raise
         except Exception as exc:
             # Servers and socket errors may echo LOGIN credentials or message bodies.
+            ctx.record_error(_fetch_failure(self.spec.id, opts, exc))
             raise DiagnosedError(f'IMAP fetch failed ({type(exc).__name__})') from None
         finally:
             if connection is not None:
