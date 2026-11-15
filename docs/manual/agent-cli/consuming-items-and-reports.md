@@ -80,9 +80,9 @@
 
 - **基础内容与来源定位**：
   - `id`：16 位十六进制稳定主键（由 `source_id + external_id` 派生）。
-  - `source_id` / `kind`：来源配置 ID 与种类（`rss` | `email` | `web` | `browser`）。
+  - `source_id` / `kind`：来源配置 ID 与种类（`rss` | `email` | `web` | `browser`）。`kind: "browser"` 表示该条来自有界面 Chrome 重放的固化 Playwright 脚本，正文即脚本抓到的页面文字（同样入库截断到 1000 units），不含图片/视频二进制内容。
   - `url`：规范化后的**单条原文链接**（已剥离追踪参数与 `#fragment`；纯文本邮件或无链接 GUID 条目可能为空字符串 `""`）。Agent 需要阅读未截断原文时直接请求该 `url`。
-  - `page_url`：发现该条目的**入口页链接**（RSS/Atom Feed 地址、Web 列表或监控页地址）；邮件为空字符串。`url` 与 `page_url` 至少有一个是合法的 `http(s)` 地址，聚合外链帖（如 Hacker News）的讨论链接保留在 `items show` 的 `meta.comments_url`。
+  - `page_url`：发现该条目的**入口页链接**（RSS/Atom Feed 地址、Web 列表或监控页地址、`type: browser` 脚本重放的入口页地址）；邮件为空字符串。`url` 与 `page_url` 至少有一个是合法的 `http(s)` 地址，聚合外链帖（如 Hacker News）的讨论链接保留在 `items show` 的 `meta.comments_url`。
   - `summary`：清洗后的短摘要（≤ 300 字/词；网页 `mode: page` 版本监控源中，此处存放增删行 `unified_diff`）。
   - `content`：**入库即截断的纯文本正文**，CJK 字符 + 非 CJK 词元合计 ≤ 1000 units。
   - `content_truncated`：`true` 表示正文超过 1000 units 已被截断，需要完整原文时请回访 `url`。
@@ -110,9 +110,9 @@ tentacles --json items show 6912c034fd032f1e
 
 | 新增字段 | 类型 | 说明 |
 | :--- | :--- | :--- |
-| **`external_id`** | `string` | 源内稳定外部身份（如 RSS GUID、邮件 `Message-ID` 或 `文件夹:UIDVALIDITY:UID`、网页规范化 URL、页面监控 `URL#hash`） |
+| **`external_id`** | `string` | 源内稳定外部身份（如 RSS GUID、邮件 `Message-ID` 或 `文件夹:UIDVALIDITY:UID`、网页与浏览器源条目的规范化 URL、页面监控 `URL#hash`） |
 | **`fingerprint`** | `string` | 标题 + 摘要的规范化 SHA-1 指纹 |
-| **`meta`** | `object` | 来源特定扩展元数据。例如邮件包含 `folder`、`uidvalidity`、`uid`、`message_id`、`to`、`cc`、`attachments`（附件文件名数组）；`update_existing` 源包含截断前全文哈希 `full_content_sha1`；聚合外链帖包含 `comments_url` |
+| **`meta`** | `object` | 来源特定扩展元数据。例如邮件包含 `folder`、`uidvalidity`、`uid`、`message_id`、`to`、`cc`、`attachments`（附件文件名数组）；`update_existing` 源包含截断前全文哈希 `full_content_sha1`；聚合外链帖与 `type: browser` 条目包含 `comments_url`；`type: browser` 条目还带 `browser_script`（重放的脚本文件名）与 `browser_entry_url`（脚本报告的入口页） |
 | **`evaluations`** | `Evaluation[]` | 该条目在**所有已评估过的 Pipeline** 下的最新评分记录，每条额外包含 `match_points` 与 `reported_at`（若已被某 Pipeline 消费写入报告则为 UTC 时间戳，未消费则为 `null`） |
 
 `content` 与 `content_truncated` 与列表一致：正文最多 1000 字/词，完整原文请打开 `url`。

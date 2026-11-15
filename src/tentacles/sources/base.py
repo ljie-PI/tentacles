@@ -11,6 +11,7 @@ from typing import Any, Callable, ClassVar, Type, TYPE_CHECKING
 from pydantic import BaseModel
 
 from tentacles.config import AppConfig, SourceSpec
+from tentacles.diagnostics import DiagnosticEvent
 from tentacles.models import Item, ItemObservation, LinkDisposition
 from tentacles.net import HttpPool
 from tentacles.sources.imap_client import ImapFactory, connect_imap
@@ -30,6 +31,9 @@ class FetchContext:
     models: ModelRegistry | None = None
     metrics: UsageTotals = field(default_factory=UsageTotals)
     classify_links: Callable[[list[str]], dict[str, LinkDisposition]] | None = None
+    config: AppConfig | None = None
+    # Adapters that observe a per-target failure record it here and keep going.
+    record_error: Callable[[DiagnosticEvent], None] | None = None
 
 
 @dataclass
