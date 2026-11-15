@@ -21,6 +21,12 @@ installed and the fetched items still belong in the Store, so the caller records
 `git_or_pr_failed` and keeps the round. `browser.pr.enabled: false` keeps the
 local half (one commit on the review branch) and skips push and `gh`. Only a
 byte-identical script is a no-op.
+
+Credential discipline is asymmetric on purpose: a script with any credential
+finding aborts the publication (a redacted script would not replay), while the
+PR body — the free-text `reason` and `detail` included — first passes through
+the configured-secret redaction, so a key echoed into an error string is never
+published.
 """
 
 from __future__ import annotations
@@ -37,7 +43,7 @@ from pathlib import Path
 from typing import Any, Literal, Sequence
 
 from tentacles.config import BrowserPrSpec
-from tentacles.diagnostics import clip
+from tentacles.diagnostics import clip, redact_text
 
 log = logging.getLogger(__name__)
 
@@ -116,7 +122,8 @@ async def publish_script(script: Path, *, source_id: str, spec: BrowserPrSpec, r
         text = script.read_text(encoding="utf-8")
     except (OSError, UnicodeError):
         return ScriptPublication("error", branch, detail=f"{script.name} is not readable as UTF-8")
-    body = _pr_body(source_id=source_id, reason=reason, detail=detail, script_name=script.name)
+    body = _pr_body(source_id=source_id, reason=redact_text(reason, secrets),
+                    detail=redact_text(detail, secrets), script_name=script.name)
     findings = sensitive_findings(text, secrets) + sensitive_findings(body, ())
     if findings:
         return ScriptPublication(
