@@ -238,7 +238,12 @@ async def verify_candidate(candidate: Path, request: DistillRequest, config: App
     caller assemble installation evidence from a different source or trial.
     """
     candidate.parent.mkdir(parents=True, exist_ok=True)
-    candidate.write_text(source, encoding="utf-8")
+    try:
+        candidate.write_text(source, encoding="utf-8")
+    except UnicodeEncodeError as exc:
+        return None, 0.0, DistillFailed(
+            _GATE_ERROR_CODE, f"the candidate script could not be encoded as UTF-8: {clip(str(exc), 300)}",
+            error=exc)
     try:
         extract = load_script(candidate)
     except ScriptGateError as exc:
