@@ -310,6 +310,8 @@ def _same_site(actual: str, expected: str) -> bool:
     """A redirect may change `www.` or the path; a different host is a different page."""
     try:
         left, right = urlsplit(actual), urlsplit(expected)
+        # Reading the ports validates their syntax/range without comparing them.
+        _ = left.port, right.port
     except ValueError:
         return False
     if left.scheme not in {"http", "https"} or not left.hostname or not right.hostname:
