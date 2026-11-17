@@ -237,6 +237,14 @@ tentacles --json storage reindex --include-archive
 tentacles --json items search 'iPhone' --include-archive
 ```
 
+`items list/search/show --include-archive` 与 HTTP 的 `include_archive=true` 只扩展读取范围，不切换排序规则：
+时间排序按发布时间（缺失时为抓取时间）倒序，同值按 Item `id` 升序；纯 1–2 字短词（如 `AI`）的相关性排序
+在热库与多年度冷库中都先排标题命中，再按上述时间与身份决胜。有长词时仍按各库的 BM25 分值排序，同分使用
+相同决胜规则；长短词混合仍按 AND 筛选。BM25 是库内统计量，不代表跨年份的全局相关度。
+各库分别检索再归并分页，不受 SQLite `ATTACH 10` 个库的限制；只读打开冷库不会创建或迁移数据库，也不会生成 WAL/SHM。
+详情始终热库优先，只有热库无结果才查冷库，顶层只关联当前正文版本的有效评估；`evaluations` 保留各 Pipeline
+最新 Persona 版本的评分记录供回溯，可能包含旧正文版本的记录。
+
 归档是**两阶段**的：先把条目与对应 `evaluations` 写进 `tentacles-<YYYY>.db` 并校验该库的 `items_fts`，
 再在一个热库写事务里写入墓碑并删除冷行。中途被打断时热库要么全有要么全无，重跑 `storage archive`
 是幂等的；期间被更新过的条目会留在热库（返回里计入 `deferred`），冷库里的过期副本会被撤掉。

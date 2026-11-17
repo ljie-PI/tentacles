@@ -14,14 +14,13 @@ from dataclasses import replace
 from datetime import datetime, timedelta
 from pathlib import Path
 from time import monotonic
-from typing import Callable, Iterator, Sequence
+from typing import Callable, Generator, Iterator, Sequence
 from zoneinfo import ZoneInfo
 
 from tentacles.config import AppConfig
-from tentacles.errors import ConfigError
+from tentacles.errors import ConfigError, NotFound
 from tentacles.models import Item
-from tentacles.pipelines.models import Evaluation
-from tentacles.schemas import (ArchiveExempt, ArchiveSnapshot, ArchiveYear, ReindexedDatabase,
+from tentacles.schemas import (ArchiveExempt, ArchiveSnapshot, ArchiveYear, ItemDetail, ReindexedDatabase,
                                StorageArchive, StorageReindex, StorageStatus)
 from tentacles.store import ArchiveCopy, ItemHit, ItemQuery, Store
 from tentacles.timeutil import parse_duration, parse_since, utcnow
@@ -79,14 +78,6 @@ def _item_time(item: Item) -> datetime:
     return item.published or item.fetched_at
 
 
-def _sort_key(hit: ItemHit, sort: str) -> tuple[float, float, str]:
-    """热库与冷库共用的归并顺序：相关性（BM25 升序）或发布时间倒序。"""
-    when = _item_time(hit.item)
-    rank = 0.0 if sort != 'relevance' else (
-        hit.bm25_rank if hit.bm25_rank is not None else float('inf'))
-    return (rank, -when.timestamp(), hit.item.id)
-
-
 class ArchiveManager:
     """热库与年度冷库之间的搬迁、跨年归并读取与 `storage` 运维。"""
 
@@ -101,33 +92,48 @@ class ArchiveManager:
 
     # ---- 跨年归并读取 ------------------------------------------------------
 
-    def merge_items(self, q: ItemQuery) -> tuple[list[tuple[int | None, ItemHit]], int]:
-        """把热库的一页与各年冷库的一页按同一顺序归并后再分页。
+    def _read_stores(self, include_archive: bool) -> Generator[tuple[int | None, Store], None, None]:
+        """Hot first; cold connections are read-only and open one at a time."""
+        yield None, self.store
+        if include_archive:
+            for year in archive_years(self.directory):
+                with closing(self._open(year)) as cold:
+                    yield year, cold
 
-        每个库都单独查询，因此跨年检索不受 SQLite 单连接最多 `ATTACH 10` 个
-        数据库的限制。BM25 分值是库内统计量：跨库归并时按各库返回的分值排序，
-        只有 1–2 字短词（没有倒排分值）才退回发布时间倒序。
+    def list_items(self, q: ItemQuery, *, include_archive: bool = False
+                   ) -> tuple[list[tuple[int | None, ItemHit]], int]:
+        """Read one scope, carrying Store's order through merging and pagination.
+
+        A database can contribute at most offset + limit entries to the final
+        page, so taking that prefix from *each* database cannot discard a page
+        candidate. No ATTACH is needed. BM25 remains database-local statistics;
+        Store also carries title priority for short-only relevance queries.
         """
-        window = min(q.offset + q.limit, _WINDOW_LIMIT)
-        hits, total = self.store.list_items(replace(q, limit=window, offset=0))
-        merged: list[tuple[int | None, ItemHit]] = [(None, hit) for hit in hits]
-        for year in archive_years(self.directory):
-            with closing(self._open(year)) as cold:
-                archived, archived_total = cold.list_items(replace(q, limit=window, offset=0))
-            total += archived_total
-            merged.extend((year, hit) for hit in archived)
-        merged.sort(key=lambda entry: _sort_key(entry[1], q.sort))
-        return merged[q.offset:q.offset + q.limit], total
+        query = replace(q, limit=min(q.offset + q.limit, _WINDOW_LIMIT), offset=0) if include_archive else q
+        merged: list[tuple[int | None, ItemHit]] = []
+        total = 0
+        with closing(self._read_stores(include_archive)) as databases:
+            for year, database in databases:
+                hits, count = database.list_items(query)
+                total += count
+                merged.extend((year, hit) for hit in hits)
+        if include_archive:
+            merged.sort(key=lambda entry: entry[1].order_key)
+            merged = merged[q.offset:q.offset + q.limit]
+        return merged, total
 
-    def find_item(self, item_id: str) -> tuple[int, Item, Evaluation | None, list[Evaluation]] | None:
-        """按年份从新到旧找一个已归档条目及其评估。"""
-        for year in archive_years(self.directory):
-            with closing(self._open(year)) as cold:
-                item = cold.get_item(item_id)
+    def get_item(self, item_id: str, *, include_archive: bool = False) -> ItemDetail:
+        """Hot-first detail with a current-revision association and per-pipeline history."""
+        with closing(self._read_stores(include_archive)) as databases:
+            for year, database in databases:
+                item = database.get_item(item_id)
                 if item is None:
                     continue
-                return year, item, cold.latest_evaluation(item_id), cold.item_evaluations(item_id)
-        return None
+                latest = database.latest_evaluation(item_id)
+                return ItemDetail.model_validate({
+                    **item.model_dump(), **(latest.model_dump() if latest else {}),
+                    'evaluations': database.item_evaluations(item_id), 'archive_year': year})
+        raise NotFound(f"unknown item {item_id!r}")
 
     # ---- storage status / reindex ------------------------------------------
 

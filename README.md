@@ -82,7 +82,8 @@ tentacles items list --since 24h  # 查看最近 24 小时的条目
 所有命令都支持 `--json`：stdout 只输出一个 JSON 值，日志写到 stderr，退出码按错误类型区分。给 agent 用的完整说明见 [Agent CLI 手册](docs/manual/agent-cli/README.md)。
 
 入库正文统一截断到 1000 汉字/英文词（`content_truncated` 标记），摘要不超过 300；非邮件条目必须保留单条原文 `url` 或入口 `page_url`，需要完整原文时顺着链接回访即可。
-检索走 SQLite 内置 FTS5 全文索引：3 个字符及以上的词项命中倒排索引，1–2 字短词（如 `广告`、`AI`）逐列匹配，中英长短词都不会漏召回；`tentacles --json items search QUERY` 按 BM25 相关性排序并返回命中高亮 `snippet`。
+检索走 SQLite 内置 FTS5 全文索引：3 个字符及以上的词项命中倒排索引，1–2 字短词（如 `广告`、`AI`）逐列匹配，中英长短词都不会漏召回；`tentacles --json items search QUERY` 有长词时按 BM25 相关性排序，纯短词时标题命中优先，并返回命中高亮 `snippet`。
+`--include-archive` 只扩展读取范围，热库与多年度冷库使用同一排序语义：相关性同分再按发布时间（缺失时为抓取时间）倒序、Item `id` 升序决胜；BM25 仍为各库内统计量。详情始终热库优先，仅热库没有时查冷库。
 `--json items list` 不传 `--pipeline` 时也会自动关联最新一次有效评估，直接给出 `topics`、`match_score`、`match_level`、`match_points`：
 
 ```bash

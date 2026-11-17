@@ -107,8 +107,8 @@ OpenAPI 规范位于 `GET /api/openapi.json`（前端也可离线运行 `pnpm ge
 | `GET /api/sources` | `SourceView[]` |
 | `POST /api/sources/fetch` | 可选请求体 `{ "ids": ["id"] }`，返回 `FetchOutcome[]`（省略时抓取全部启用源） |
 | `POST /api/sources/{source_id}/fetch` | 单个 `FetchOutcome`；未知 ID `404`，运行中 `409`，抓取失败 `502` |
-| `GET /api/items` | `Page[ItemView]`；支持重复 `sources`/`kinds` 及 `since`、`until`、`search`、`pipeline`、`persona`、`passed`、`min_score`、`topic`、`sort`（`time`\|`relevance`，默认 `time`）、`limit`(1–500)、`offset`。`search` 走 SQLite FTS5 全文索引（3 字以上词项走倒排索引，1–2 字短词逐列匹配），带 `search` 时每条额外返回命中高亮 `snippet`；`sort=relevance` 需同时提供 `search`（否则 `400`），并按 BM25 相关性排序 |
-| `GET /api/items/{item_id}` | `ItemDetail`（含完整正文 `content`、`meta` 与各 Pipeline 的 `evaluations`） |
+| `GET /api/items` | `Page[ItemView]`；支持重复 `sources`/`kinds` 及 `since`、`until`、`search`、`pipeline`、`persona`、`passed`、`min_score`、`topic`、`sort`（`time`\|`relevance`，默认 `time`）、`limit`(1–500)、`offset`、`include_archive`（默认 `false`）。`search` 走 SQLite FTS5 全文索引（3 字以上词项走倒排索引，1–2 字短词逐列匹配），带 `search` 时每条额外返回命中高亮 `snippet`；`sort=relevance` 需同时提供 `search`（否则 `400`），有长词时按 BM25 排序、纯短词时标题命中优先，再按发布时间/抓取时间倒序、`id` 升序决胜；开启归档只扩展范围，不切换排序语义 |
+| `GET /api/items/{item_id}` | `ItemDetail`（含入库正文 `content`、`meta` 与各 Pipeline 的 `evaluations`）；支持 `include_archive=true`，热库优先、无结果才查年度冷库，冷库结果带 `archive_year` |
 | `GET /api/items/{item_id}/feedback` | 查询指定或默认 `persona` 的最新投票 `FeedbackView \| null` |
 | `POST /api/items/{item_id}/feedback` | 提交投票：`rating` 为 `+1` 或 `-1`，可选 `persona`、`note` |
 | `GET /api/personas` | 当前所有画像最新版本 `PersonaView[]` |
