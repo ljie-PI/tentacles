@@ -256,12 +256,15 @@ sources:
 
 1. 会话输入：旧 `<id>.py` 原文、失败栈与实时页面现场（`current_url` / `page_title` / 精简 A11y 快照）、
    本地 `data/browser_sources/<id>.meta.json` 的选择器摘要（**不含**本机绝对轨迹路径），并在真实工作 Tab 上打开入口页供 Agent 用 `browser_snapshot` / `browser_evaluate` 现场探测。
-2. 每次回答都必须通过与冷启动**完全相同**的 AST 静态门禁与真实工作 Tab 独立试跑（最多 2 个候选脚本）；试跑失败会把报错与页面现场反馈给同一会话修正。
-3. 试跑通过才原子覆盖本地 `scripts/browser_sources/<id>.py`、更新 `data/browser_sources/<id>.meta.json`，
+2. 每次回答都必须通过与冷启动**同一个候选生命周期**的代码提取、AST 静态门禁与真实工作 Tab 独立试跑（最多 2 个候选脚本）；试跑失败会把报错与页面现场反馈给同一会话修正。每轮探查 Tab 在回答后释放，再打开独立试跑 Tab，不互占 Profile 锁；冷启动则只在最初探索时持有探查 Tab，提炼和修正仍在原 `pi` 会话内完成。
+3. 只有实际通过两门禁的**同一份源文本及其有效试跑结果**才能安装；先原子覆盖本地 `scripts/browser_sources/<id>.py`，再更新 `data/browser_sources/<id>.meta.json`，
    本轮条目正常入库：`stats.browser_mode = "heal"`、`stats.heal_attempts`、`stats.trajectory_path`、`stats.script_path`。
 4. 两个候选都没通过则**熔断**：旧脚本与旧 meta 一个字节都不改、不提 PR，写入 `run_errors`
    （`phase: browser_heal`, `error_code: pi_heal_exhausted`，`debug_context.last_failure` 是最后一次拒绝原因），
    本轮 Run 记为 `failed` 并保留已消耗的 `pi` 费用。旧游标不变，修好脚本后下一轮自动回填 `resolved_at`。
+
+候选被拒绝、纠正耗尽或安装前取消都不改旧脚本和 meta，并回收候选临时文件；已回报的模型费用仍属于当前 Run。
+脚本替换与 meta 写入**不是跨文件事务**：安装后的 I/O 故障会明确报错，不能解释为安装或发布成功，也不保证崩溃时两文件同时更新。
 
 ### 隔离 Worktree 自动提交与 GitHub PR
 
@@ -325,7 +328,7 @@ tentacles --json sources distill reddit-localllama   # 等价管理 API：POST /
 输出 `RawBrowserItem(title=..., url=..., author=..., content=..., summary=..., published=<ISO 8601>, comments_url=None)`。
 脚本在 `exec` 之前会先经过 `ast.parse` 静态门禁：每个可读的名字必须是脚本自己绑定的或门禁列出的内建，导入只允许 `playwright.async_api.Page` 与 `tentacles.sources.browser_contract` 的两个契约模型（`os` / `subprocess` / `importlib` / `typing` / `__builtins__` / `eval` / `open` / 任何 `__dunder__` 一律拒绝），另拒绝解释器帧与格式化属性（`gi_frame` / `f_back` / `f_code` / `format` / `format_map`）、宿主路径参数（`fulfill(path=…)` / `tracing.stop(path=…)` / `storage_state(path=…)`）、`file:` 本地导航与原始 CDP 会话。
 
-**信任边界（诚实说明）**：门禁保证脚本无法执行任意 Python、无法直接读写宿主文件，但 **Playwright 自身仍代表脚本访问网络与页面**，所以脚本依旧是需要代码评审的仓库代码（它可按登录态访问站点、发起请求）；模块级死循环或超大内存分配会阻塞该源的工作线程（`MAX_SCRIPT_BYTES` 只限制脚本源码大小）。
+**信任边界（诚实说明）**：AST 门禁是静态筛查，不是已证明安全的 Python 隔离器；**Playwright 自身仍代表脚本访问网络与页面**，所以脚本依旧是需要代码评审的仓库代码（它可按登录态访问站点、发起请求）；模块级死循环或超大内存分配会阻塞该源的工作线程（`MAX_SCRIPT_BYTES` 只限制脚本源码大小）。
 完整契约、字段表与示例见 [`scripts/browser_sources/README.md`](../../../scripts/browser_sources/README.md)。
 
 ```bash

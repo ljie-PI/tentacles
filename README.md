@@ -289,6 +289,10 @@ sources:
   **且在真实工作 Tab 上独立试跑成功**（最多 2 个候选）；通过则原子覆盖本地脚本、本轮条目正常入库
   （`stats.browser_mode = "heal"`），否则**熔断**：旧脚本一字不改、不提 PR，记 `run_errors`
   （`phase: browser_heal`, `error_code: pi_heal_exhausted`）并把本轮 Run 记为 `failed`，已花的 `pi` 费用照旧保留。
+- **共同候选生命周期**：冷启动、显式刷新与自愈共用代码提取、最多一次纠正、双门禁及临时文件回收；
+  只有实际通过静态门禁与独立试跑的同一份脚本及输出才能安装。冷启动保留探索后的同一 `pi` 会话，
+  自愈保留每轮实时探查 Tab（先释放再独立试跑）。安装前拒绝/取消不改旧脚本和 meta；脚本原子替换与
+  meta 写入不是跨文件事务，安装 I/O 故障会报错而非继续发布。AST 静态筛查不等于已证明安全的 Python 隔离器。
 - **隔离 worktree 自动提 PR**：首次提炼或自愈通过的脚本在本地生效后，还会在系统临时目录的一次性 `git worktree` 中
   **只提交 `<scripts_dir>/<source_id>.py` 这一个文件**到 `auto/browser-source-<id>`，再 `gh pr create`（已有开放 PR 则追加
   commit + `gh pr comment`）。PR 固定打上 `ready-for-human` 等配置标签且正文声明“机器生成、需人工 review”；

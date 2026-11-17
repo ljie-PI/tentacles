@@ -5,6 +5,9 @@ so it must stay pure data: it holds no filesystem, process or import machinery,
 because everything reachable from an allowlisted module is reachable from an
 untrusted script. The static gate and the loader that own those capabilities
 live in `browser_script`, which scripts cannot import.
+
+Scripts can mutate models after construction, so validation must recheck both
+returned output instances and their nested item instances.
 """
 
 from __future__ import annotations
@@ -19,7 +22,7 @@ from tentacles.errors import ConfigError
 class RawBrowserItem(BaseModel):
     """One entry a replay script extracted; `Item` truncation happens on ingest."""
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", revalidate_instances="always")
 
     title: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=1000)]
     url: str | None = Field(default=None, max_length=2000)
@@ -33,7 +36,7 @@ class RawBrowserItem(BaseModel):
 class BrowserExtractOutput(BaseModel):
     """What `extract()` must return: the entry address and its entries."""
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", revalidate_instances="always")
 
     page_url: str = Field(max_length=2000)
     items: list[RawBrowserItem] = Field(default_factory=list, max_length=500)

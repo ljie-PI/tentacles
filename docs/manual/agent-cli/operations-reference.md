@@ -58,7 +58,9 @@ tentacles --json sources distill reddit-localllama
 - 成功批次满足 `stats.fetched = new + updated + dup`（未开启 `update_existing: true` 的源 `updated` 恒为 `0`）。
 - **`error_count` / `failed_targets`**：本次运行写入故障账本的条数与指针（`error_id` 用于接续 `tentacles --json errors show <error_id>`）。未获取成功的目标即使整批业务数据回滚也一定会出现在这里，详见 **[第 5 节 故障账本](#5-故障账本errors-list--errors-show--runs-show)**。
 - **`sources distill` 的返回**：单个 `FetchOutcome`（不是数组），关键看 `status`、`new` 与
-  `stats.pr_status` / `stats.pr_url`；门禁未过时旧脚本保持原样并在 `errors` 的 `browser_distill` 阶段留现场。
+  `stats.pr_status` / `stats.pr_url`；跳过旧脚本重放，使用与冷启动、自愈共同的候选提取/纠正/验收/清理规则，
+  但保留冷启动的探索与提炼会话（最多一次修正），不增加模型回合。门禁未过时旧脚本和 meta 保持原样，
+  不发布，并在 `errors` 的 `browser_distill` 阶段留现场；已知费用仍计入当前 Run。
   `sources distill` 只接受 `type: browser` 的源，其他类型返回配置错误退出码 `2`。
 
 ---
@@ -239,6 +241,10 @@ tentacles --json runs show 8
 并额外报告 `heal_attempts`、`trajectory_path`、`script_path` 与 `pr_status` / `pr_url` / `pr_branch`。
 自愈没通过时本轮 `status = error`，`stats` 带 `browser_heal_failed: true` 与 `trajectory_path`
 （对应的 `browser_distill_failed: true` 是冷启动失败的形状），拒绝原因看 `browser_heal` 阶段的账本。
+两条流程只安装实际通过静态门禁与独立试跑的同一份源文本及输出；自愈每轮的实时探查 Tab 会先释放，
+再让试跑使用同一 Profile，不会持锁等待自身。安装前取消回收候选与工作 Tab，已回报的费用不丢失。
+脚本单文件原子替换与 meta 写入不是跨文件事务；安装后的 I/O 故障会报错，不会报告发布成功。
+已有具体 `browser_distill` / `browser_heal` 失败的 Run 不会再补重复的通用失败行。
 
 | `error_code` | 含义与处理建议 |
 | :--- | :--- |

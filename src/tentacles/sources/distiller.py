@@ -18,7 +18,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Mapping, Sequence
+from typing import Any, Awaitable, Callable, Literal, Mapping, Sequence
 from urllib.parse import urljoin, urlsplit
 
 import httpx
@@ -39,8 +39,8 @@ from tentacles.sources.trajectory import (
 
 log = logging.getLogger(__name__)
 
-# One initial script plus at most one corrective turn (#82).
-MAX_CORRECTION_ROUNDS = 1
+# Cold start and repair each allow one initial candidate and one correction.
+MAX_CANDIDATES = 2
 MAX_PROMPT_STEPS = 40
 MAX_PROMPT_CHARS = 48_000
 MAX_SAMPLE_ITEMS = 5
@@ -78,7 +78,7 @@ class DistillRequest:
 
 
 @dataclass(frozen=True)
-class DistilledScript:
+class InstalledScript:
     """A script that passed both gates, with the local artifacts to report."""
 
     path: Path
@@ -89,11 +89,60 @@ class DistilledScript:
     selectors: list[str]
     steps: int
     meta: Path
+    attempts: int
+
+
+@dataclass(frozen=True)
+class _VerifiedCandidate:
+    """Installation eligibility, created only by the shared acceptance lifecycle.
+
+    Keep the exact gated text and independent trial together, private until
+    installation. Callers can install but cannot supply replacement evidence.
+    """
+
+    _request: DistillRequest
+    _config: AppConfig
+    _recorder: TrajectoryRecorder
+    _source: str
+    _output: BrowserExtractOutput
+    _seconds: float
+    _attempts: int
+
+    def install(self) -> InstalledScript:
+        """Install exactly the accepted candidate after the Pi session has closed.
+
+        Script replacement remains single-file atomic, not a transaction with
+        metadata. Post-replacement I/O failures propagate to the owning Run.
+        """
+        request, recorder = self._request, self._recorder
+        selectors = script_selectors(self._source, recorder.steps)
+        script = request.script_path
+        script.parent.mkdir(parents=True, exist_ok=True)
+        temporary = script.with_suffix(".py.tmp")
+        try:
+            temporary.write_text(self._source, encoding="utf-8")
+            temporary.replace(script)
+        finally:
+            temporary.unlink(missing_ok=True)
+        try:
+            load_script(script)
+        except ScriptGateError as exc:
+            raise ConfigError(f"distilled script {script.name} failed its final gate: {exc.message}") from None
+        meta = write_meta(self._config.data_dir, BrowserSourceMeta(
+            source_id=request.source_id, script=script.name, page_url=request.page_url,
+            items=len(self._output.items), selectors=selectors, steps=len(recorder.steps),
+            trial_seconds=self._seconds, model=request.pi.model,
+            reasoning_level=request.pi.reasoning_level, trajectory=str(recorder.path),
+            distilled_at=datetime.now(timezone.utc)))
+        return InstalledScript(
+            path=script, trajectory=recorder.path, output=self._output, source=self._source,
+            trial_seconds=self._seconds, selectors=selectors, steps=len(recorder.steps),
+            meta=meta, attempts=self._attempts)
 
 
 async def distill(request: DistillRequest, *, config: AppConfig,
                   on_usage: Callable[[PiUsage], None] | None = None,
-                  secrets: Sequence[str] = ()) -> DistilledScript:
+                  secrets: Sequence[str] = ()) -> InstalledScript:
     """Explore, distill and gate one source; raise `DistillFailed` rather than write junk."""
     if not request.task.strip():
         raise DistillFailed(_RPC_ERROR_CODE,
@@ -106,12 +155,20 @@ async def distill(request: DistillRequest, *, config: AppConfig,
             async with PiRpcClient(request.pi, BRIDGE_EXTENSION, cwd=config.data_dir,
                                    env=server.child_env(), on_usage=on_usage) as pi:
                 await _explore(request, config, bridge, pi, recorder)
-                source, output, seconds = await _distill_script(
-                    request, config, pi, recorder, samples=bridge.exploration)
+                samples = bridge.exploration
+                accepted = await prepare_candidate(
+                    request, config=config, recorder=recorder, ask=pi.ask, rules=DISTILL_RULES,
+                    prompt=_distillation_prompt(
+                        request, recorder.steps,
+                        [item.model_dump() for item in samples.items[:MAX_SAMPLE_ITEMS]]
+                        if samples is not None else []))
     except PiRpcError as exc:
         raise DistillFailed(_RPC_ERROR_CODE, exc.message, error=exc,
                             context={"trajectory_path": str(recorder.path)}) from None
-    return _publish(config.data_dir, request, recorder, source=source, output=output, seconds=seconds)
+    installed = accepted.install()
+    log.info("browser: distilled %s from %d trajectory step(s) into %s",
+             request.source_id, installed.steps, installed.path)
+    return installed
 
 
 async def _explore(request: DistillRequest, config: AppConfig, bridge: BrowserBridge,
@@ -130,19 +187,24 @@ async def _explore(request: DistillRequest, config: AppConfig, bridge: BrowserBr
             context={"trajectory_path": str(recorder.path), "stderr": pi.stderr_tail})
 
 
-async def _distill_script(request: DistillRequest, config: AppConfig, pi: PiRpcClient,
-                          recorder: TrajectoryRecorder,
-                          *, samples: BrowserExtractOutput | None) -> tuple[str, BrowserExtractOutput, float]:
-    """Ask for a script, then let the gates decide; one corrective turn at most."""
+async def prepare_candidate(request: DistillRequest, *, config: AppConfig,
+                            recorder: TrajectoryRecorder, ask: Callable[[str], Awaitable[str]],
+                            prompt: str, rules: str, kind: Literal["distill", "heal"] = "distill"
+                            ) -> _VerifiedCandidate:
+    """Correct and accept one candidate, owning extraction, gates and cleanup.
+
+    Cold start supplies a turn in its exploration session; repair supplies a
+    live-tab turn. Both release their probing tab before the independent trial.
+    Only the returned candidate can install its own verified text and output.
+    """
     candidate = trajectory_path(config.data_dir, request.source_id, request.run_id).with_suffix(".candidate.py")
-    prompt = _distillation_prompt(request, recorder.steps,
-                                  [item.model_dump() for item in samples.items[:MAX_SAMPLE_ITEMS]]
-                                  if samples is not None else [])
     feedback: str | None = None
     last_problem = "the agent produced no script"
+    label = "repaired" if kind == "heal" else "distilled"
+    gate = "trial" if kind == "heal" else "replay"
     try:
-        for round_index in range(MAX_CORRECTION_ROUNDS + 1):
-            reply = await pi.ask(feedback or prompt, timeout=request.pi.timeout)
+        for attempt in range(1, MAX_CANDIDATES + 1):
+            reply = await ask(feedback or prompt)
             source = python_block(reply)
             failure: DistillFailed | None
             if source is None:
@@ -152,16 +214,16 @@ async def _distill_script(request: DistillRequest, config: AppConfig, pi: PiRpcC
                 output, seconds, failure = await verify_candidate(candidate, request, config, source)
                 if failure is None:
                     assert output is not None
-                    return source, output, seconds
+                    return _VerifiedCandidate(request, config, recorder, source, output, seconds, attempt)
             assert failure is not None
             last_problem = failure.message
-            log.warning("browser: distilled script for %s rejected (round %d): %s",
-                        request.source_id, round_index + 1, clip(failure.message, 200))
-            feedback = correction_prompt(DISTILL_RULES, failure.message, failure.context)
+            log.warning("browser: %s script for %s rejected (attempt %d): %s",
+                        label, request.source_id, attempt, clip(last_problem, 200))
+            feedback = correction_prompt(rules, last_problem, failure.context)
         raise DistillFailed(
             _GATE_ERROR_CODE,
-            f"no distilled script for {request.source_id!r} passed the replay gate "
-            f"after {MAX_CORRECTION_ROUNDS + 1} attempt(s)",
+            f"no {label} script for {request.source_id!r} passed the {gate} gate "
+            f"after {MAX_CANDIDATES} attempt(s)",
             context={"trajectory_path": str(recorder.path),
                      "last_failure": clip(last_problem, MAX_FEEDBACK_CHARS)})
     finally:
@@ -172,15 +234,24 @@ async def verify_candidate(candidate: Path, request: DistillRequest, config: App
                            ) -> tuple[BrowserExtractOutput | None, float, DistillFailed | None]:
     """Run both gates on one candidate; the merged loader is the static contract.
 
-    The cold start and the self-healing path share this seam, so a repaired
-    script is held to exactly the standard a distilled one already passed.
+    The shared correction lifecycle owns this gate's result. It never lets a
+    caller assemble installation evidence from a different source or trial.
     """
     candidate.parent.mkdir(parents=True, exist_ok=True)
-    candidate.write_text(source, encoding="utf-8")
+    try:
+        candidate.write_text(source, encoding="utf-8")
+    except UnicodeEncodeError as exc:
+        return None, 0.0, DistillFailed(
+            _GATE_ERROR_CODE, f"the candidate script could not be encoded as UTF-8: {clip(str(exc), 300)}",
+            error=exc)
     try:
         extract = load_script(candidate)
     except ScriptGateError as exc:
         return None, 0.0, DistillFailed(_GATE_ERROR_CODE, exc.message)
+    except Exception as exc:
+        return None, 0.0, DistillFailed(
+            _GATE_ERROR_CODE, f"the candidate script could not be loaded: {type(exc).__name__}: {clip(str(exc), 300)}",
+            error=exc)
     return await _trial(extract, request, config)
 
 
@@ -237,6 +308,8 @@ def _resolved(value: str | None, page_url: str) -> str | None:
         return None
     try:
         url = httpx.URL(urljoin(page_url, value.strip()))
+        # HTTPX accepts numeric ports outside the valid range.
+        _ = urlsplit(str(url)).port
     except (ValueError, httpx.InvalidURL):
         return None
     if url.scheme not in {"http", "https"} or not url.host or url.userinfo:
@@ -246,8 +319,18 @@ def _resolved(value: str | None, page_url: str) -> str | None:
 
 def _same_site(actual: str, expected: str) -> bool:
     """A redirect may change `www.` or the path; a different host is a different page."""
-    left, right = urlsplit(actual), urlsplit(expected)
+    # Reject controls before urlsplit silently discards some of them.
+    if any(ord(c) < 32 or ord(c) == 127 for c in actual):
+        return False
+    try:
+        left, right = urlsplit(actual), urlsplit(expected)
+        # Reading the ports validates their syntax/range without comparing them.
+        _ = left.port, right.port
+    except ValueError:
+        return False
     if left.scheme not in {"http", "https"} or not left.hostname or not right.hostname:
+        return False
+    if left.username is not None or left.password is not None:
         return False
     return _host(left.hostname) == _host(right.hostname)
 
@@ -255,47 +338,6 @@ def _same_site(actual: str, expected: str) -> bool:
 def _host(host: str) -> str:
     lowered = host.lower()
     return lowered[4:] if lowered.startswith("www.") else lowered
-
-
-def _publish(data_dir: Path, request: DistillRequest, recorder: TrajectoryRecorder, *, source: str,
-             output: BrowserExtractOutput, seconds: float) -> DistilledScript:
-    """Install the gated script and its local metadata, then describe the result."""
-    selectors = script_selectors(source, recorder.steps)
-    path, meta = install_script(
-        data_dir, source_id=request.source_id, script_path=request.script_path,
-        page_url=request.page_url, source=source, output=output, seconds=seconds,
-        selectors=selectors, steps=len(recorder.steps), pi=request.pi, trajectory=recorder.path)
-    log.info("browser: distilled %s from %d trajectory step(s) into %s",
-             request.source_id, len(recorder.steps), path)
-    return DistilledScript(path=path, trajectory=recorder.path, output=output, source=source,
-                           trial_seconds=seconds, selectors=selectors, steps=len(recorder.steps),
-                           meta=meta)
-
-
-def install_script(data_dir: Path, *, source_id: str, script_path: Path, page_url: str, source: str,
-                   output: BrowserExtractOutput, seconds: float, selectors: Sequence[str], steps: int,
-                   pi: BrowserPiSpec, trajectory: Path) -> tuple[Path, Path]:
-    """Write a script that already passed both gates, plus its local-only metadata.
-
-    Only the cold start and the healing path call this, and only after the static
-    gate and the standalone trial passed: the atomic replace is what makes the
-    new text the next replay. `data_dir` stays local and ignored; nothing here
-    touches the repository or the Store.
-    """
-    script_path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = script_path.with_suffix(".py.tmp")
-    temporary.write_text(source, encoding="utf-8")
-    temporary.replace(script_path)
-    try:
-        load_script(script_path)
-    except ScriptGateError as exc:  # pragma: no cover - the same text passed Gate 1
-        raise ConfigError(f"distilled script {script_path.name} failed its final gate: {exc.message}") from None
-    meta = write_meta(data_dir, BrowserSourceMeta(
-        source_id=source_id, script=script_path.name, page_url=page_url,
-        items=len(output.items), selectors=list(selectors), steps=steps,
-        trial_seconds=seconds, model=pi.model, reasoning_level=pi.reasoning_level,
-        trajectory=str(trajectory), distilled_at=datetime.now(timezone.utc)))
-    return script_path, meta
 
 
 def script_selectors(source: str, steps: Sequence[TrajectoryStep]) -> list[str]:

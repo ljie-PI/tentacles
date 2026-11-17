@@ -243,12 +243,25 @@ for a script is a filesystem check (`<scripts_dir>/<id>.py`), never a database f
 
 A replay that raises, times out or returns no entries is not a dead end either: one
 `sources/browser_heal.py` session sells the same controlled `pi` process the old script, the
-failure site and the local meta selectors, gives every turn the real work tab for live
-probing, and gates each candidate (at most two) through `distiller.verify_candidate` — the
-same static gate and standalone trial, so healing cannot install what a cold start would
-reject. Only a passing candidate reaches `distiller.install_script`; a session that exhausts
-its candidates writes `pi_heal_exhausted` under `browser_heal`, leaves the old script and
-meta byte-identical, opens no PR and fails the Run (the consumed `pi` cost stays on it).
+failure site and the local meta selectors, and gives every turn the real work tab for live
+probing. Both callers use `distiller.prepare_candidate`: this module owns code-block
+extraction, the two-candidate limit, `verify_candidate` (static gate then independent
+real trial), corrective feedback and temporary-file cleanup. Its private accepted candidate
+binds the exact source to its validated output and trial timing. Only that candidate's
+no-argument `install()` can assemble selectors, trajectory/model metadata and replace the
+script; callers no longer supply source/output pairs or call an unchecked installer.
+Installation still happens after the controlled Pi session closes. Cold start explores
+once then distills without a probing tab; repair opens and releases a probing tab for
+**each** turn, before the independent trial acquires the same profile lock.
+
+A session that exhausts its repair candidates writes `pi_heal_exhausted` under
+`browser_heal`, leaves the old script and meta byte-identical, opens no PR and fails the
+Run (the consumed `pi` cost stays on it). Cold-start failure retains `browser_distill`
+and `on_detail_error`; explicit refresh uses that same cold-start interface. Cancellation
+before installation also cleans candidates without replacing installed artifacts.
+The script's atomic replace is not a cross-file transaction with metadata: installation
+I/O failures propagate, never masquerading as a successful acceptance or publication.
+This refactor adds neither gate permissions nor a Python isolation guarantee.
 `browser.pr.enabled` is therefore a real switch, not a schema field.
 
 `sources/script_pr.py` owns the only code path that touches git: a throwaway `git worktree`
