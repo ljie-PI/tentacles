@@ -310,6 +310,9 @@ def _resolved(value: str | None, page_url: str) -> str | None:
 
 def _same_site(actual: str, expected: str) -> bool:
     """A redirect may change `www.` or the path; a different host is a different page."""
+    # Reject controls before urlsplit silently discards some of them.
+    if any(ord(c) < 32 or ord(c) == 127 for c in actual):
+        return False
     try:
         left, right = urlsplit(actual), urlsplit(expected)
         # Reading the ports validates their syntax/range without comparing them.
@@ -317,6 +320,8 @@ def _same_site(actual: str, expected: str) -> bool:
     except ValueError:
         return False
     if left.scheme not in {"http", "https"} or not left.hostname or not right.hostname:
+        return False
+    if left.username is not None or left.password is not None:
         return False
     return _host(left.hostname) == _host(right.hostname)
 
