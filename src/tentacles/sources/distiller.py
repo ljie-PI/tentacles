@@ -299,6 +299,8 @@ def _resolved(value: str | None, page_url: str) -> str | None:
         return None
     try:
         url = httpx.URL(urljoin(page_url, value.strip()))
+        # HTTPX accepts numeric ports outside the valid range.
+        _ = urlsplit(str(url)).port
     except (ValueError, httpx.InvalidURL):
         return None
     if url.scheme not in {"http", "https"} or not url.host or url.userinfo:
