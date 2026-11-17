@@ -308,7 +308,10 @@ def _resolved(value: str | None, page_url: str) -> str | None:
 
 def _same_site(actual: str, expected: str) -> bool:
     """A redirect may change `www.` or the path; a different host is a different page."""
-    left, right = urlsplit(actual), urlsplit(expected)
+    try:
+        left, right = urlsplit(actual), urlsplit(expected)
+    except ValueError:
+        return False
     if left.scheme not in {"http", "https"} or not left.hostname or not right.hostname:
         return False
     return _host(left.hostname) == _host(right.hostname)
