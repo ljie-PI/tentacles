@@ -161,18 +161,33 @@ caps; schema 15 adds the `run_errors` diagnostics ledger; schema 16 adds
 `persona_versions.hard_exclude` with an empty default, so existing versions stay
 readable and only hard-exclude-less seeds start empty; schema 17 adds the `items_fts`
 trigram index over the four searchable columns, kept in sync by SQL triggers rather
-than by the write paths. `Store.list_items` is that seam: three or more character
-terms come from the index, shorter ones are matched natively per column, so callers
-must not build their own `LIKE` scans to narrow a listing.
+than by the write paths. `Store.list_items` retains single-database search depth:
+three or more character terms come from the index, shorter ones are matched natively
+per column, so callers must not build their own `LIKE` scans to narrow a listing.
+Store projects the query's primary ordering value (BM25, short-only title priority,
+or neutral for time order) into internal `ItemHit` metadata. Its `order_key` carries
+that decision, with publish/fetch time descending and identity ascending as ties;
+merging must use it, never infer relevance again from the outward `bm25_rank`.
 Schema 18 adds the `archived_identities` tombstone table. `archive.py`
 (`ArchiveManager`) owns the two-phase yearly cold archive: it writes complete copies
 into `data/archive/tentacles-YYYY.db` (opened through `Store`, so the cold database
 carries the same schema and its own `items_fts`) and `Store.import_archived` verifies
 rows and index before `Store.archive_move` tombstones identities and deletes the hot
 rows in one transaction. Cold databases are sealed out of WAL mode so a plain
-read-only `Store(read_only=True)` never creates side files. `--include-archive`
-queries each database separately and merges in memory, which keeps cross-year reads
-independent of SQLite's ten-database `ATTACH` limit. Schema 19 adds
+read-only `Store(read_only=True)` never creates side files. `ArchiveManager.list_items`
+and `get_item` are the placement-hiding read seam used by the Service for list, search
+and show, with or without archives. Service retains user-input/configuration validation
+and list/search response projection, not hot/cold dispatch or detail assembly.
+`--include-archive` queries each database separately and merges Store's ordering keys
+before pagination; every database contributes up to offset + limit candidates. This
+keeps cross-year reads independent of SQLite's ten-database `ATTACH` limit and preserves
+short-only title priority even when there are no cold files. BM25 remains database-local,
+not global corpus statistics. Detail lookup is hot-first, then years newest-first;
+ArchiveManager assembles the Item, latest valid associated Evaluation and per-pipeline
+history in the same way for both placements. The detail `evaluations` collection keeps
+its retrospective semantics (latest Persona version per pipeline, possibly an older
+input revision); only the top-level association requires the current content revision.
+Schema 19 adds
 `archived_identities.kind` and `identity_policy` so a tombstone is read through the
 exact identity rules of the row it replaced: external identity always suppresses,
 URL only for `standard`, fingerprint only for `standard` non-email. An archived

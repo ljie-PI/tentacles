@@ -19,7 +19,7 @@ from tentacles.llm.registry import ModelRegistry
 from tentacles.llm.config import Stage
 from tentacles.llm.json import extract_json
 from tentacles.schemas import ConfigCheck, ErrorEventDetail, ErrorEventView, FetchOutcome, ItemDetail, ItemSearchView, ItemView, Page, RunDetail, RunView, SourceView, TaskView, ModelView, Completion, ModelTest, TickOutcome, StorageArchive, StorageReindex, StorageStatus
-from tentacles.store import ItemHit, ItemQuery, RunErrorQuery, Store
+from tentacles.store import ItemQuery, RunErrorQuery, Store
 from tentacles.personas.manager import PersonaManager
 from tentacles.personas.models import FeedbackView, PersonaProposal, PersonaView
 from tentacles.pipelines.models import PipelineOutcome, ReportView, PipelineView
@@ -239,7 +239,7 @@ class TentaclesService:
         q = self._item_query(sources=sources, kinds=kinds, since=since, until=until, search=search,
                              limit=limit, offset=offset, pipeline=pipeline, persona=persona,
                              passed=passed, min_score=min_score, topic=topic, sort=sort)
-        hits, total = self._item_hits(q, include_archive)
+        hits, total = self.archive.list_items(q, include_archive=include_archive)
         views = [ItemView.of(hit.item, hit.evaluation, snippet=hit.snippet or None, archive_year=year)
                  for year, hit in hits]
         return Page[ItemView](items=views, total=total, limit=q.limit, offset=q.offset)
@@ -256,18 +256,11 @@ class TentaclesService:
         q = self._item_query(sources=sources, kinds=kinds, since=since, until=until, search=query,
                              limit=limit, offset=offset, pipeline=pipeline, persona=persona,
                              passed=passed, min_score=min_score, topic=topic, sort=sort)
-        hits, total = self._item_hits(q, include_archive)
+        hits, total = self.archive.list_items(q, include_archive=include_archive)
         views = [ItemSearchView.of(hit.item, hit.evaluation, snippet=hit.snippet,
                                    bm25_rank=hit.bm25_rank, archive_year=year)
                  for year, hit in hits]
         return Page[ItemSearchView](items=views, total=total, limit=q.limit, offset=q.offset)
-
-    def _item_hits(self, q: ItemQuery, include_archive: bool) -> tuple[list[tuple[int | None, ItemHit]], int]:
-        """热库结果；`include_archive` 时与各年冷库归并后再分页。"""
-        if not include_archive:
-            hits, total = self.store.list_items(q)
-            return [(None, hit) for hit in hits], total
-        return self.archive.merge_items(q)
 
     def _item_query(self, *, sources: list[str] | None, kinds: list[str] | None,
                     since: str | datetime | None, until: str | datetime | None, search: str | None,
@@ -311,18 +304,7 @@ class TentaclesService:
                          min_score=min_score, topic=topic or None, sort=order)
 
     def get_item(self, item_id: str, *, include_archive: bool = False) -> ItemDetail:
-        """单条详情；热库没有时，`include_archive` 会到各年冷库依次查找。"""
-        year: int | None = None
-        item = self.store.get_item(item_id)
-        if item is not None:
-            latest, evaluations = (self.store.latest_evaluation(item_id),
-                                   self.store.item_evaluations(item_id))
-        elif include_archive and (found := self.archive.find_item(item_id)) is not None:
-            year, item, latest, evaluations = found
-        else:
-            raise NotFound(f"unknown item {item_id!r}")
-        return ItemDetail.model_validate({**item.model_dump(), **(latest.model_dump() if latest else {}),
-                                          "evaluations": evaluations, "archive_year": year})
+        return self.archive.get_item(item_id, include_archive=include_archive)
 
     def submit_feedback(self, item_id: str, *, rating: int, persona: str | None = None,
                         note: str = '') -> FeedbackView:

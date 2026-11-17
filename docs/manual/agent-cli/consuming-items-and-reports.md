@@ -6,7 +6,7 @@
 
 ## 1. 分页检索采集条目：`tentacles --json items list`
 
-默认按发布时间 `published`（缺失时回退首次抓取时间 `fetched_at`）倒序排列。
+默认按发布时间 `published`（缺失时回退首次抓取时间 `fetched_at`）倒序排列，同一时间按 Item `id` 升序决胜。
 **不传 `--pipeline` / `--persona` 时，也会自动关联该条目最新一次有效评估**，因此一次列表调用即可拿到正文、来源链接与兴趣匹配结果。
 
 ### 筛选与分页参数
@@ -21,7 +21,7 @@
 | `--source, -s ID` | 按信息源 ID 过滤，可多次传入（如 `-s hacker-news -s 36kr`） |
 | `--since T` / `--until T` | 时间窗口边界。支持相对时长（`90s`、`30m`、`24h`、`7d`、`2w`）或 ISO-8601 时间（无时区后缀时按配置的 `app.timezone` 解析） |
 | `--search, -q TEXT` | 全文检索标题、摘要、作者、正文：按空白切分词项并取交集（引号包住的部分保持为一个短语），3 个字符及以上的词项走 SQLite FTS5 倒排索引，1–2 字短词（如 `广告`、`AI`）逐个逐列匹配，因此短词也不会漏召回；`C++`、`foo-bar`、`OR`、`%`、`_` 均按字面处理，不会变成检索语法 |
-| `--sort time\|relevance` | 排序方式，默认 `time`（发布时间倒序）；`relevance` 需配合 `--search`，命中条目按 BM25 相关性排序（标题权重最高） |
+| `--sort time\|relevance` | 排序方式，默认 `time`（发布时间倒序）；`relevance` 需配合 `--search`，有长词时按 BM25 相关性排序（标题权重最高），纯短词时标题命中优先；同分再按时间倒序、`id` 升序 |
 | `--limit N` | 每页返回条数，范围 `1..500`，默认 `50` |
 | `--offset N` | 分页偏移量，默认 `0` |
 | `--include-archive` | 连同各年度冷归档库（`data/archive/tentacles-YYYY.db`）一起查询，结果用 `archive_year` 标注年份；`items list`、`items search`、`items show` 都支持 |
@@ -120,8 +120,9 @@ tentacles --json items search Playwright --persona default --min-score 0.8
 - **默认排序**：`relevance`（BM25 相关性，标题权重 10 > 摘要 3 > 正文 2 > 作者 1.5）。只含 1–2 字短词、没有倒排索引分数的查询改为「标题命中优先 + 发布时间倒序」，此时 `bm25_rank` 为 `null`。`--sort time` 可切回发布时间倒序。
 - **跨年检索**：加 `--include-archive` 时热库与各年冷库分别检索后在内存归并分页（每个库内部都有自己的
   `items_fts`），不受 SQLite 单连接最多 `ATTACH 10` 个库的限制，命中条目用 `archive_year` 标注年份。
-  BM25 是**库内**统计量：跨库归并时按各库返回的分值排序，因此不同年份的分值不严格可比；纯 1–2 字短词的
-  查询没有分值，跨年归并按发布时间倒序。
+  `--include-archive` 只扩展读取范围，不切换排序语义：纯 1–2 字短词也保持**标题命中优先**，之后按发布时间
+  （缺失时为抓取时间）倒序、`id` 升序决胜；BM25 同分也使用这两个决胜条件。BM25 是**库内**统计量，
+  跨库按各库返回的分值归并，不声称不同年份的分值已成为全局可比统计。长短词混合仍按 AND 筛选。
 - **筛选与分页**：与 `items list` 完全一致——`--source/-s`、`--pipeline`、`--persona`、`--passed/--rejected`、`--min-score`、`--topic`、`--since/--until`、`--limit 1..500`、`--offset`，关联的同样是“当前正文对应的最新一次有效评估”。
 - **返回 `Page[ItemSearchView]`**：在 `ItemView` 的全部字段之外新增两个字段：
 
@@ -177,7 +178,10 @@ tentacles --json items show 6912c034fd032f1e --include-archive
 `content` 与 `content_truncated` 与列表一致：正文最多 1000 字/词，完整原文请打开 `url`。
 
 不带 `--include-archive` 时，已归档条目返回 `not_found`（退出码 `3`）；带上后 `archive_year` 给出所在冷库的
-自然年，`evaluations` 是该条目在冷库里的全部评估（冷库只读，这些评估不会再生效或写回热库）。
+自然年。详情始终优先返回热库条目，仅热库没有时才按年份从新到旧查冷库。
+热库与冷库的顶层评估字段都只关联当前 `content_revision` 的最新有效评估；较新的失效评估不会遮蔽另一条较早的有效评估。
+`evaluations` 则保留各 Pipeline 最新 Persona 版本的评分记录供回溯，可能包含旧 `input_revision`，不等同于顶层的有效关联。
+冷库只读，这些记录不会写回热库。
 
 ---
 

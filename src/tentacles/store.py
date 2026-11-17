@@ -81,6 +81,14 @@ class ItemHit:
     evaluation: Evaluation | None
     bm25_rank: float | None = None
     snippet: str = ''
+    # Read-implementation metadata, never part of ItemView/ItemSearchView JSON.
+    _order_rank: float = field(default=0.0, repr=False, compare=False)
+
+    @property
+    def order_key(self) -> tuple[float, timedelta, str]:
+        """The SQL order carried across database reads, without reinterpreting a query."""
+        when = self.item.published or self.item.fetched_at
+        return self._order_rank, datetime.min.replace(tzinfo=when.tzinfo) - when, self.item.id
 
 
 @dataclass(frozen=True)
@@ -1202,29 +1210,32 @@ class Store:
             # 只剩标点或引号的查询没有可匹配词项：按“无命中”处理，而不是退回全表
             where.append('0')
         cond = " AND ".join(where)
-        order: str = f"{_SORT_TIME} DESC, id"
+        # Project the primary ordering value as well as using it in SQL: a merge
+        # must carry this decision, not reconstruct relevance from public BM25.
+        order_rank = '0.0'
         order_args: list[Any] = []
         if q.sort == 'relevance' and plan.match is not None:
-            order = f"fts.fts_rank ASC, {order}"
+            order_rank = 'fts.fts_rank'
         elif q.sort == 'relevance' and plan.shorts:
-            # 没有倒排索引可用时，标题命中的条目排在前，其余保持时间倒序
             title_cond, order_args = _literal_hit_condition(('title',), plan.shorts)
-            order = f"{title_cond} DESC, {order}"
+            order_rank = f'CASE WHEN {title_cond} THEN -1.0 ELSE 0.0 END'
+        order = f"item_order_rank, {_SORT_TIME} DESC, id"
         args = [*from_args, *where_args]
         rank_columns = "fts.fts_rank, fts.fts_snippet" if plan.match is not None else "NULL AS fts_rank, '' AS fts_snippet"
         with self._lock:
             total = self._conn.execute(f"SELECT COUNT(*) FROM items{joined} WHERE {cond}", args).fetchone()[0]
             rows = self._conn.execute(
-                f"SELECT {_ITEM_COLUMNS}, {_EVAL_PROJECTION}, {rank_columns} FROM items{joined} WHERE {cond}"
+                f"SELECT {_ITEM_COLUMNS}, {_EVAL_PROJECTION}, {rank_columns},"
+                f" {order_rank} AS item_order_rank FROM items{joined} WHERE {cond}"
                 f" ORDER BY {order} LIMIT ? OFFSET ?",
-                [*args, *order_args, q.limit, q.offset],
+                [*order_args, *args, q.limit, q.offset],
             ).fetchall()
         hits: list[ItemHit] = []
         for row in rows:
             item = _row_to_item(row)
             snippet = row['fts_snippet'] or (_short_excerpt(item, plan.shorts) if plan.shorts else '')
             hits.append(ItemHit(item, _row_to_evaluation(row, 'eval_') if row['eval_pipeline_id'] is not None else None,
-                                row['fts_rank'], snippet))
+                                row['fts_rank'], snippet, _order_rank=row['item_order_rank']))
         return hits, total
 
     # ---- cold archive & storage ops ---------------------------------------
