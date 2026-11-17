@@ -243,6 +243,10 @@ async def verify_candidate(candidate: Path, request: DistillRequest, config: App
         extract = load_script(candidate)
     except ScriptGateError as exc:
         return None, 0.0, DistillFailed(_GATE_ERROR_CODE, exc.message)
+    except Exception as exc:
+        return None, 0.0, DistillFailed(
+            _GATE_ERROR_CODE, f"the candidate script could not be loaded: {type(exc).__name__}: {clip(str(exc), 300)}",
+            error=exc)
     return await _trial(extract, request, config)
 
 
