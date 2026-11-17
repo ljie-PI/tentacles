@@ -22,20 +22,16 @@ from typing import Any, AsyncIterator, Callable, Mapping, Sequence
 from tentacles.config import AppConfig, BrowserPiSpec
 from tentacles.diagnostics import clip
 from tentacles.sources.browser_bridge import BridgeServer, BrowserBridge
-from tentacles.sources.browser_contract import BrowserExtractOutput
 from tentacles.sources.browser_session import work_tab
 from tentacles.sources.distiller import (
-    BRIDGE_EXTENSION, MAX_FEEDBACK_CHARS, SCRIPT_CONTRACT, DistillRequest,
-    bounded_prompt, correction_prompt, install_script, python_block, script_selectors,
-    verify_candidate,
+    BRIDGE_EXTENSION, SCRIPT_CONTRACT, DistillFailed, DistillRequest, InstalledScript,
+    bounded_prompt, prepare_candidate,
 )
 from tentacles.sources.pi_rpc import PiRpcClient, PiRpcError, PiUsage
-from tentacles.sources.trajectory import TrajectoryRecorder, trajectory_path
+from tentacles.sources.trajectory import TrajectoryRecorder
 
 log = logging.getLogger(__name__)
 
-# One replay may spend one healing session with at most two candidate scripts.
-MAX_HEAL_CANDIDATES = 2
 MAX_OLD_SCRIPT_CHARS = 24_000
 MAX_FAILURE_CHARS = 4000
 MAX_META_CHARS = 2000
@@ -88,19 +84,6 @@ class HealRequest:
             script_path=self.script_path, pi=self.pi)
 
 
-@dataclass(frozen=True)
-class HealedScript:
-    """A repaired script that passed both gates, with the local artifacts to report."""
-
-    path: Path
-    trajectory: Path
-    meta: Path
-    output: BrowserExtractOutput
-    source: str
-    trial_seconds: float
-    attempts: int
-
-
 class RepairSession:
     """One controlled pi session whose every turn gets the real work tab.
 
@@ -139,7 +122,7 @@ async def repair_session(request: HealRequest, config: AppConfig, *, bridge: Bro
 
 async def heal(request: HealRequest, *, config: AppConfig,
                on_usage: Callable[[PiUsage], None] | None = None,
-               secrets: Sequence[str] = ()) -> HealedScript:
+               secrets: Sequence[str] = ()) -> InstalledScript:
     """Repair, gate and install one script; raise `HealFailed` rather than overwrite junk."""
     if not request.task.strip():
         raise HealFailed(
@@ -149,52 +132,18 @@ async def heal(request: HealRequest, *, config: AppConfig,
                            timeout_ms=int(request.timeout * 1000))
     try:
         async with repair_session(request, config, bridge=bridge, on_usage=on_usage) as session:
-            source, output, seconds, attempts = await _repair(request, config, session, recorder)
+            accepted = await prepare_candidate(
+                request.distill_request(), config=config, recorder=recorder, ask=session.ask,
+                prompt=_heal_prompt(request), rules=HEAL_RULES, kind="heal")
+    except DistillFailed as exc:
+        raise HealFailed(exc.message, context=exc.context, error=exc.error) from None
     except PiRpcError as exc:
         raise HealFailed(exc.message, error=exc,
                          context={"trajectory_path": str(recorder.path)}) from None
-    script, meta = install_script(
-        config.data_dir, source_id=request.source_id, script_path=request.script_path,
-        page_url=request.page_url, source=source, output=output, seconds=seconds,
-        selectors=script_selectors(source, recorder.steps), steps=len(recorder.steps),
-        pi=request.pi, trajectory=recorder.path)
+    installed = accepted.install()
     log.info("browser: healed %s after %d trial attempt(s) into %s",
-             request.source_id, attempts, script)
-    return HealedScript(path=script, trajectory=recorder.path, meta=meta, output=output,
-                        source=source, trial_seconds=seconds, attempts=attempts)
-
-
-async def _repair(request: HealRequest, config: AppConfig, session: RepairSession,
-                  recorder: TrajectoryRecorder) -> tuple[str, BrowserExtractOutput, float, int]:
-    """Ask, gate, feed the failure back; the old script stays untouched meanwhile."""
-    candidate = trajectory_path(config.data_dir, request.source_id, request.run_id).with_suffix(".candidate.py")
-    prompt = _heal_prompt(request)
-    feedback: str | None = None
-    last_problem = "the agent produced no script"
-    try:
-        for attempt in range(1, MAX_HEAL_CANDIDATES + 1):
-            reply = await session.ask(feedback or prompt)
-            source = python_block(reply)
-            if source is None:
-                last_problem = "your answer contained no ```python block, so there was no script to verify"
-                feedback = correction_prompt(HEAL_RULES, last_problem, {})
-            else:
-                output, seconds, failure = await verify_candidate(
-                    candidate, request.distill_request(), config, source)
-                if failure is None:
-                    assert output is not None
-                    return source, output, seconds, attempt
-                last_problem = failure.message
-                feedback = correction_prompt(HEAL_RULES, last_problem, failure.context)
-            log.warning("browser: healed script for %s rejected (attempt %d): %s",
-                        request.source_id, attempt, clip(last_problem, 200))
-        raise HealFailed(
-            f"no repaired script for {request.source_id!r} passed the trial gate "
-            f"after {MAX_HEAL_CANDIDATES} attempt(s)",
-            context={"trajectory_path": str(recorder.path),
-                     "last_failure": clip(last_problem, MAX_FEEDBACK_CHARS)})
-    finally:
-        candidate.unlink(missing_ok=True)
+             request.source_id, installed.attempts, installed.path)
+    return installed
 
 
 async def _open_entry(page: Any, request: HealRequest) -> None:
