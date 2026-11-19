@@ -36,6 +36,7 @@ class ImapOptions(BaseModel):
     username: str
     password: SecretStr = SecretStr('')
     folders: list[str] = Field(default_factory=lambda: ['INBOX'], min_length=1)
+    include_subfolders: bool = False
     initial_days: int = Field(default=30, ge=1, le=36500, strict=True)
     max_fetch: int = Field(default=100, ge=1, le=10000, strict=True)
     search: str = 'ALL'
@@ -93,6 +94,60 @@ def _mailbox_name(folder: str) -> str:
         return '&' + base64.b64encode(text.encode('utf-16-be')).decode().rstrip('=').replace('/', ',') + '-'
     encoded = re.sub(r'[^\x20-\x7e]+|&', encode, folder)
     return '"' + encoded.replace('\\', '\\\\').replace('"', '\\"') + '"'
+
+
+def _decode_mailbox_name(folder: str) -> str:
+    def decode(match: re.Match[str]) -> str:
+        body = match.group(1)
+        if not body:
+            return '&'
+        padded = body.replace(',', '/') + '=' * (-len(body) % 4)
+        return base64.b64decode(padded).decode('utf-16-be')
+    return re.sub(r'&([A-Za-z0-9+,]*)-', decode, folder)
+
+
+def _parse_list_entry(item: Any) -> tuple[set[str], str, str] | None:
+    if isinstance(item, tuple) and len(item) == 2 and isinstance(item[0], bytes) and isinstance(item[1], bytes):
+        prefix = item[0].decode('ascii', 'replace').strip()
+        match = re.match(r'^\(([^)]*)\)\s+(NIL|"[^"]*")\s+\{\d+\}$', prefix)
+        if not match:
+            return None
+        flags = {flag.lower() for flag in match.group(1).split() if flag}
+        delim = '' if match.group(2) == 'NIL' else match.group(2)[1:-1]
+        return flags, delim, _decode_mailbox_name(item[1].decode('ascii', 'replace'))
+    if isinstance(item, bytes):
+        line = item.decode('ascii', 'replace')
+        match = re.match(r'^\(([^)]*)\)\s+(NIL|"[^"]*")\s+(.+)$', line)
+        if not match:
+            return None
+        flags = {flag.lower() for flag in match.group(1).split() if flag}
+        delim = '' if match.group(2) == 'NIL' else match.group(2)[1:-1]
+        raw = match.group(3).strip()
+        if raw.startswith('"') and raw.endswith('"') and len(raw) >= 2:
+            raw = raw[1:-1].replace('\\"', '"').replace('\\\\', '\\')
+        return flags, delim, _decode_mailbox_name(raw)
+    return None
+
+
+def _expand_folders(connection: Any, configured: list[str]) -> list[str]:
+    entries = [parsed for item in _ok(connection.list()) if (parsed := _parse_list_entry(item)) is not None]
+    selectable = [(delim, name) for flags, delim, name in entries
+                  if '\\noselect' not in flags and '\\nonexistent' not in flags]
+    expanded: list[str] = []
+    for target in configured:
+        matched: list[str] = []
+        target_cf = target.casefold()
+        for delim, name in selectable:
+            is_inbox = target_cf == 'inbox'
+            exact = name.casefold() == 'inbox' if is_inbox else name == target
+            if exact:
+                matched.append(name)
+            elif delim:
+                prefix = target + delim
+                if name.startswith(prefix) or (is_inbox and name.casefold().startswith('inbox' + delim)):
+                    matched.append(name)
+        expanded.extend(matched or [target])
+    return list(dict.fromkeys(expanded))
 
 
 def _ok(response: Any) -> list[Any]:
@@ -374,8 +429,9 @@ class ImapSource(Source):
                 ctx.record_error(_auth_failure(self.spec.id, opts, exc,
                                                f'IMAP login failed ({type(exc).__name__})'))
                 raise DiagnosedError(f'IMAP login failed ({type(exc).__name__})') from None
+            target_folders = _expand_folders(connection, opts.folders) if opts.include_subfolders else opts.folders
             items, processed, excluded, unparsed = [], 0, 0, 0
-            for folder in opts.folders:
+            for folder in target_folders:
                 if processed >= opts.max_fetch:
                     break
                 _ok(connection.select(_mailbox_name(folder), readonly=True))

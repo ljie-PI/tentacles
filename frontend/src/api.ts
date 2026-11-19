@@ -1,6 +1,9 @@
 import type { components, paths } from './api-types'
 
 export type Source = components['schemas']['SourceView']
+export type SourceConfig = components['schemas']['SourceConfigView']
+export type SourceCreate = components['schemas']['SourceCreate']
+export type SourceUpdate = components['schemas']['SourceUpdate']
 export type Item = components['schemas']['ItemView']
 export type ItemDetail = components['schemas']['ItemDetail']
 export type ItemPage = components['schemas']['Page_ItemView_']

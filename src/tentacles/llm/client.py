@@ -5,6 +5,7 @@ import asyncio
 import math
 from datetime import datetime
 from typing import Any, Callable
+from uuid import uuid4
 
 import httpx
 
@@ -22,6 +23,14 @@ class ModelClient:
                  clock: Callable[[], datetime]):
         self.name, self.spec, self._http, self._redact = name, spec, http, redact
         self._clock = clock
+        self._opencode_session = f'ses_{uuid4().hex[:24]}'
+
+    def _request_headers(self, key: str, headers: dict[str, str] | None) -> dict[str, str]:
+        merged = dict(self.spec.headers)
+        if self.spec.is_opencode_go and not any(k.lower() == 'x-opencode-session' for k in merged):
+            merged['x-opencode-session'] = self._opencode_session
+        merged.update(headers or {'Authorization': f'Bearer {key}'})
+        return merged
 
     async def _post(self, path: str, body: dict[str, Any], *, headers: dict[str, str] | None = None,
                     gate: RequestGate | None = None) -> dict[str, Any]:
@@ -31,7 +40,7 @@ class ModelClient:
             if gate is not None:
                 gate.stop(error)
             raise error
-        auth = headers or {'Authorization': f'Bearer {key}'}
+        auth = self._request_headers(key, headers)
         for attempt in range(self.spec.retries + 1):
             if gate is not None:
                 await gate.wait()

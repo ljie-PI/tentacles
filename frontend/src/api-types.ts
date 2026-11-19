@@ -441,7 +441,8 @@ export interface paths {
         /** Sources */
         get: operations["sources_api_sources_get"];
         put?: never;
-        post?: never;
+        /** Create Source */
+        post: operations["create_source_api_sources_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -463,6 +464,24 @@ export interface paths {
         options?: never;
         head?: never;
         patch?: never;
+        trace?: never;
+    };
+    "/api/sources/{source_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Source Detail */
+        get: operations["source_detail_api_sources__source_id__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        /** Update Source */
+        patch: operations["update_source_api_sources__source_id__patch"];
         trace?: never;
     };
     "/api/sources/{source_id}/distill": {
@@ -1413,10 +1432,214 @@ export interface components {
              */
             running: boolean;
         };
+        /** SourceConfigView */
+        SourceConfigView: {
+            /** Chrome Profile */
+            chrome_profile?: string | null;
+            /** Concurrency */
+            concurrency?: number | null;
+            /** Emit Baseline */
+            emit_baseline?: boolean | null;
+            /** Enabled */
+            enabled: boolean;
+            /** Exclude Senders */
+            exclude_senders?: string[] | null;
+            /** Fetch Content */
+            fetch_content?: boolean | null;
+            /** Folders */
+            folders?: string[] | null;
+            /** Host */
+            host?: string | null;
+            /** Id */
+            id: string;
+            /** Include Subfolders */
+            include_subfolders?: boolean | null;
+            /** Initial Days */
+            initial_days?: number | null;
+            /** Max Age Days */
+            max_age_days?: number | null;
+            /** Max Fetch */
+            max_fetch?: number | null;
+            /** Max Input Chars */
+            max_input_chars?: number | null;
+            /** Max Items */
+            max_items?: number | null;
+            /** Mode */
+            mode?: ("list" | "page" | "llm") | null;
+            /** Model */
+            model?: string | null;
+            /** Name */
+            name?: string | null;
+            /** On Detail Error */
+            on_detail_error?: ("fail_batch" | "record_and_skip") | null;
+            /** Page Url */
+            page_url?: string | null;
+            /** Pipelines */
+            pipelines?: string[];
+            /** Port */
+            port?: number | null;
+            /** Schedule */
+            schedule: string;
+            /** Search */
+            search?: string | null;
+            /** Selector */
+            selector?: string | null;
+            /** Selectors */
+            selectors?: {
+                [key: string]: string;
+            } | null;
+            /** Ssl */
+            ssl?: boolean | null;
+            /** Task */
+            task?: string | null;
+            /** Timeout */
+            timeout?: number | null;
+            /**
+             * Type
+             * @enum {string}
+             */
+            type: "rss" | "imap" | "web" | "browser";
+            /**
+             * Update Existing
+             * @default false
+             */
+            update_existing: boolean;
+            /** Url */
+            url?: string | null;
+        };
+        /** SourceCreate */
+        SourceCreate: {
+            /** Chrome Profile */
+            chrome_profile?: string | null;
+            /** Concurrency */
+            concurrency?: number | null;
+            /** Emit Baseline */
+            emit_baseline?: boolean | null;
+            /**
+             * Enabled
+             * @default true
+             */
+            enabled: boolean;
+            /** Fetch Content */
+            fetch_content?: boolean | null;
+            /** Id */
+            id: string;
+            /** Max Age Days */
+            max_age_days?: number | null;
+            /** Max Input Chars */
+            max_input_chars?: number | null;
+            /** Max Items */
+            max_items?: number | null;
+            /** Mode */
+            mode?: ("list" | "page" | "llm") | null;
+            /** Model */
+            model?: string | null;
+            /** Name */
+            name?: string | null;
+            /** On Detail Error */
+            on_detail_error?: ("fail_batch" | "record_and_skip") | null;
+            /** Page Url */
+            page_url?: string | null;
+            /** Pipelines */
+            pipelines?: string[];
+            /**
+             * Schedule
+             * @default 1h
+             */
+            schedule: string;
+            /** Selector */
+            selector?: string | null;
+            /** Selectors */
+            selectors?: {
+                [key: string]: string;
+            } | null;
+            /** Task */
+            task?: string | null;
+            /** Timeout */
+            timeout?: number | null;
+            /**
+             * Type
+             * @default rss
+             * @enum {string}
+             */
+            type: "rss" | "web" | "browser";
+            /**
+             * Update Existing
+             * @default false
+             */
+            update_existing: boolean;
+            /** Url */
+            url?: string | null;
+        };
         /** SourceFetch */
         SourceFetch: {
             /** Ids */
             ids?: string[] | null;
+        };
+        /** SourceUpdate */
+        SourceUpdate: {
+            /** Chrome Profile */
+            chrome_profile?: string | null;
+            /** Concurrency */
+            concurrency?: number | null;
+            /** Emit Baseline */
+            emit_baseline?: boolean | null;
+            /** Enabled */
+            enabled?: boolean | null;
+            /** Exclude Senders */
+            exclude_senders?: string[] | null;
+            /** Fetch Content */
+            fetch_content?: boolean | null;
+            /** Folders */
+            folders?: string[] | null;
+            /** Host */
+            host?: string | null;
+            /** Include Subfolders */
+            include_subfolders?: boolean | null;
+            /** Initial Days */
+            initial_days?: number | null;
+            /** Max Age Days */
+            max_age_days?: number | null;
+            /** Max Fetch */
+            max_fetch?: number | null;
+            /** Max Input Chars */
+            max_input_chars?: number | null;
+            /** Max Items */
+            max_items?: number | null;
+            /** Mode */
+            mode?: ("list" | "page" | "llm") | null;
+            /** Model */
+            model?: string | null;
+            /** Name */
+            name?: string | null;
+            /** On Detail Error */
+            on_detail_error?: ("fail_batch" | "record_and_skip") | null;
+            /** Page Url */
+            page_url?: string | null;
+            /** Pipelines */
+            pipelines?: string[] | null;
+            /** Port */
+            port?: number | null;
+            /** Schedule */
+            schedule?: string | null;
+            /** Search */
+            search?: string | null;
+            /** Selector */
+            selector?: string | null;
+            /** Selectors */
+            selectors?: {
+                [key: string]: string;
+            } | null;
+            /** Ssl */
+            ssl?: boolean | null;
+            /** Task */
+            task?: string | null;
+            /** Timeout */
+            timeout?: number | null;
+            /** Update Existing */
+            update_existing?: boolean | null;
+            /** Url */
+            url?: string | null;
         };
         /** SourceView */
         SourceView: {
@@ -4076,6 +4299,93 @@ export interface operations {
             };
         };
     };
+    create_source_api_sources_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SourceCreate"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SourceConfigView"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Bad Gateway */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
     fetch_sources_api_sources_fetch_post: {
         parameters: {
             query?: never;
@@ -4096,6 +4406,180 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["FetchOutcome"][];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Bad Gateway */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    source_detail_api_sources__source_id__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                source_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SourceConfigView"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Bad Gateway */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    update_source_api_sources__source_id__patch: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                source_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SourceUpdate"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SourceConfigView"];
                 };
             };
             /** @description Bad Request */

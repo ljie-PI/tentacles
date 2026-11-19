@@ -18,8 +18,12 @@ class ModelRegistry:
         self._clock = clock
         self._chats: dict[str, ChatModel] = {}
         self._decisions: dict[str, DecisionModel] = {}
-        self._keys = sorted((s.api_key.get_secret_value() for s in specs.values()
-                             if s.api_key.get_secret_value()), key=len, reverse=True)
+        raw_keys = [s.api_key.get_secret_value() for s in specs.values() if s.api_key.get_secret_value()]
+        for spec in specs.values():
+            for header_name, header_val in spec.headers.items():
+                if header_val and any(tok in header_name.lower() for tok in ('key', 'token', 'secret', 'auth', 'session')):
+                    raw_keys.append(header_val)
+        self._keys = sorted(set(raw_keys), key=len, reverse=True)
 
     def redact(self, text: str) -> str:
         for key in self._keys:

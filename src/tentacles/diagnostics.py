@@ -227,6 +227,7 @@ def configured_secrets(config: AppConfig) -> list[str]:
         key = spec.api_key.get_secret_value()
         if key:
             secrets.append(key)
+        secrets.extend(_option_secrets(spec.headers))
     for source in config.sources:
         secrets.extend(_option_secrets(source.options))
     return list(dict.fromkeys(secrets))

@@ -17,6 +17,14 @@ app:
 # provider: openai（包括 DeepSeek/Moonshot/Ollama/vLLM）、anthropic、openrouter。
 # kind 默认为 chat。base_url 是 API 根路径；模型 ID 请按服务商当前可用型号调整。
 models:
+  chat:
+    provider: openai
+    model: deepseek-flash
+    base_url: https://api.deepseek.com
+    api_key: ${DEEPSEEK_API_KEY:-}
+    max_tokens: 4096
+    timeout: 60
+    retries: 2
   fast:
     provider: openai
     model: deepseek-flash
@@ -26,15 +34,23 @@ models:
     timeout: 60
     retries: 2
   smart:
-    provider: anthropic
-    model: claude-sonnet-5-5
-    api_key: ${ANTHROPIC_API_KEY:-}
+    provider: openai
+    model: deepseek-flash
+    base_url: https://api.deepseek.com
+    api_key: ${DEEPSEEK_API_KEY:-}
     max_tokens: 4096
+    timeout: 60
+    retries: 2
   max:
-    provider: anthropic
-    model: claude-opus-5-5
-    api_key: ${ANTHROPIC_API_KEY:-}
+    provider: openai
+    model: deepseek-v4-pro
+    base_url: https://api.deepseek.com
+    api_key: ${DEEPSEEK_API_KEY:-}
     max_tokens: 8192
+    timeout: 120
+    retries: 2
+  # 若需切换回 OpenCode Go，可将 provider 设为 opencode-go、api_key 设为 ${OPENCODE_GO_API_KEY:-}，
+  # model 使用 deepseek-v4.1-flash 或 glm-5.3（已内置 x-opencode-session 兼容）。
   decision:
     provider: openrouter
     kind: decision
@@ -77,16 +93,16 @@ personas:
 # 通过 CDP 附着或按需拉起可见窗口，并在新建的隔离工作 Tab 中重放固化脚本。
 # 前置条件、Profile 核验与脚本规范见 README.md 与 scripts/browser_sources/README.md。
 browser:
-  cdp_url: http://127.0.0.1:9222          # Chrome Remote Debugging 端点（connect_over_cdp 附着）
+  cdp_url: http://127.0.0.1:9223          # Chrome Remote Debugging 端点（connect_over_cdp 附着）
   webbridge_url: http://127.0.0.1:10086   # 冷启动探索的一次性本地工具桥接端点（仅回环地址）
-  auto_launch: false                      # CDP 无人监听时是否自动拉起有界面 Chrome（绝不传 --headless）
+  auto_launch: true                       # CDP 无人监听时自动拉起有界面 Chrome（绝不传 --headless）
   chrome_executable: null                 # 可选显式 Chrome 可执行文件路径
-  chrome_user_data_dir: null              # 可选 Chrome User Data 根目录（auto_launch 时必填）
+  chrome_user_data_dir: ../data/chrome_profile  # 软连接到 ~/.hermes/workspace/chrome_profile
   default_profile: Default                # 默认 Chrome Profile 目录名（如 Default、Profile 1）
   scripts_dir: ../scripts/browser_sources # 固化 Playwright 脚本目录；相对本文件解析
   pi:                                     # 冷启动探索、提炼与重放自愈所用的 Agent 模型
     binary: pi
-    model: anthropic/claude-sonnet-4-6
+    model: opencode-go/deepseek-v4.1-flash
     reasoning_level: high                 # off | minimal | low | medium | high | xhigh | max
     timeout: 300
   pr:                                     # 提炼/自愈脚本的评审分支与 GitHub PR（需本机 gh 已登录）
@@ -118,20 +134,51 @@ sources:
   - {id: ars-technica, type: rss, url: "https://feeds.arstechnica.com/arstechnica/index", schedule: 2h}
   - {id: nytimes-world, type: rss, url: "https://rss.nytimes.com/services/xml/rss/nyt/World.xml", schedule: 1h}
   - {id: cnbc-top, type: rss, url: "https://search.cnbc.com/rs/search/combinedcms/view.xml?partnerId=wrss01", schedule: 1h}
+  # 从 TrendRadar 迁移的 RSS 订阅（已去重 hacker-news、techcrunch、the-verge；reddit-localllama-rss 避开 browser 示例重名）
+  - {id: product-hunt, name: Product Hunt, type: rss, url: "http://www.producthunt.com/feed", schedule: 1h, max_age_days: 1}
+  - {id: fast-company, name: Fast Company, type: rss, url: "http://www.fastcodesign.com/rss.xml", schedule: 1h, max_age_days: 1}
+  - {id: engadget, name: Engadget, type: rss, url: "http://www.engadget.com/rss-full.xml", schedule: 1h, max_age_days: 1}
+  - {id: facebook-engineering, name: Facebook Engineering, type: rss, url: "https://code.facebook.com/posts/rss", schedule: 1h, max_age_days: 1}
+  - {id: twitter-engineering, name: Twitter Engineering, type: rss, url: "https://blog.twitter.com/engineering/en_us/blog.rss", schedule: 1h, max_age_days: 1}
+  - {id: shopify-engineering, name: Shopify Engineering, type: rss, url: "https://shopifyengineering.myshopify.com/blogs/engineering.atom", schedule: 1h, max_age_days: 1}
+  - {id: nvidia-developer, name: Nvidia Developer, type: rss, url: "https://developer.nvidia.com/blog/feed", schedule: 1h, max_age_days: 1}
+  - {id: cmu-machine-learning, name: Machine Learning Blog @CMU, type: rss, url: "https://blog.ml.cmu.edu/feed/", schedule: 1h, max_age_days: 1}
+  - {id: deepmind-blog, name: DeepMind Blog, type: rss, url: "https://deepmind.com/blog/feed/basic/", schedule: 1h, max_age_days: 1}
+  - {id: mit-news-ai, name: MIT News - Artificial intelligence, type: rss, url: "http://news.mit.edu/rss/topic/artificial-intelligence2", schedule: 1h, max_age_days: 1}
+  - {id: berkeley-ai-research, name: The Berkeley AI Research Blog, type: rss, url: "http://bair.berkeley.edu/blog/feed.xml", schedule: 1h, max_age_days: 1}
+  - {id: openai-engineering, name: OpenAI Engineering, type: rss, url: "https://openai.com/news/engineering/rss.xml", schedule: 1h, max_age_days: 1}
+  - {id: nlp-news, name: NLP News, type: rss, url: "http://newsletter.ruder.io/?format=rss", schedule: 1h, max_age_days: 1}
+  - {id: google-ai, name: Google AI Blog, type: rss, url: "http://googleresearch.blogspot.com/atom.xml", schedule: 1h, max_age_days: 1}
+  - {id: towards-data-science, name: Towards Data Science, type: rss, url: "https://towardsdatascience.com/feed", schedule: 1h, max_age_days: 1}
+  - {id: reddit-computervision, name: r/computervision, type: rss, url: "https://www.reddit.com/r/computervision/.rss", schedule: 1h, max_age_days: 1}
+  - {id: reddit-languagetechnology, name: r/LanguageTechnology, type: rss, url: "https://www.reddit.com/r/LanguageTechnology/.rss", schedule: 1h, max_age_days: 1}
+  - {id: reddit-machinelearning, name: r/MachineLearning, type: rss, url: "https://www.reddit.com/r/MachineLearning/.rss", schedule: 1h, max_age_days: 1}
+  - {id: reddit-llm, name: r/LLM, type: rss, url: "https://www.reddit.com/r/LLM/.rss", schedule: 1h, max_age_days: 1}
+  - {id: reddit-localllama-rss, name: r/LocalLLaMA (RSS), type: rss, url: "https://www.reddit.com/r/LocalLLaMA/.rss", schedule: 1h, max_age_days: 1}
+  - {id: reddit-localllm, name: r/LocalLLM, type: rss, url: "https://www.reddit.com/r/LocalLLM/.rss", schedule: 1h, max_age_days: 1}
+  - {id: reddit-unsloth, name: r/unsloth, type: rss, url: "https://www.reddit.com/r/unsloth/.rss", schedule: 1h, max_age_days: 1}
+  - {id: reddit-vibecoding, name: r/vibecoding, type: rss, url: "https://www.reddit.com/r/vibecoding/.rss", schedule: 1h, max_age_days: 1}
+  - {id: jiqizhixin, name: 微信公众号-机器之心, type: rss, url: "https://decemberpei.cyou/rssbox/wechat-jiqizhixin.xml", schedule: 1h, max_age_days: 1}
+  - {id: liangziwei, name: 微信公众号-量子位, type: rss, url: "https://decemberpei.cyou/rssbox/wechat-liangziwei.xml", schedule: 1h, max_age_days: 1}
+  - {id: xinzhiyuan, name: 微信公众号-新智元, type: rss, url: "https://decemberpei.cyou/rssbox/wechat-xinzhiyuan.xml", schedule: 1h, max_age_days: 1}
+  - {id: deeptech, name: 微信公众号-DeepTech深科技, type: rss, url: "https://decemberpei.cyou/rssbox/wechat-shenkeji.xml", schedule: 1h, max_age_days: 1}
+  - {id: paperweekly, name: 微信公众号-PaperWeekly, type: rss, url: "https://decemberpei.cyou/rssbox/wechat-paperweekly.xml", schedule: 1h, max_age_days: 1}
+  - {id: ai-frontier, name: 微信公众号-AI前线, type: rss, url: "https://decemberpei.cyou/rssbox/wechat-aiqianxian.xml", schedule: 1h, max_age_days: 1}
 
   # 邮箱默认关闭，避免配置尚未完成时连接真实邮箱；显式 sources fetch inbox 可手动测试。
   # 仅支持密码/应用专用密码登录，不支持 Outlook.com 要求的 OAuth2。
   - id: inbox
     type: imap
     name: 邮箱
-    enabled: false
+    enabled: true
     schedule: 30m
     host: ${IMAP_HOST:-imap.gmail.com}
     port: 993
     ssl: true
     username: ${IMAP_USERNAME:-}
     password: ${IMAP_PASSWORD:-}
-    folders: [INBOX]
+    folders: ["Tech News", "Finance"]
+    include_subfolders: true
     initial_days: 30
     max_fetch: 100          # 所有文件夹合计；被排除/已删除的 UID 也计入上限
     search: ALL            # 可用 UNSEEN、FROM "sender@example.com" 等 IMAP 搜索条件
@@ -218,7 +265,47 @@ pipelines:
   - id: daily-tech
     name: 每日科技日报
     persona: default
-    sources: [solidot, 36kr, sspai, bbc-zh, jiemian, hacker-news, techcrunch, the-verge, ars-technica, nytimes-world, cnbc-top]
+    sources:
+      - solidot
+      - 36kr
+      - sspai
+      - bbc-zh
+      - jiemian
+      - hacker-news
+      - techcrunch
+      - the-verge
+      - ars-technica
+      - nytimes-world
+      - cnbc-top
+      - product-hunt
+      - fast-company
+      - engadget
+      - facebook-engineering
+      - twitter-engineering
+      - shopify-engineering
+      - nvidia-developer
+      - cmu-machine-learning
+      - deepmind-blog
+      - mit-news-ai
+      - berkeley-ai-research
+      - openai-engineering
+      - nlp-news
+      - google-ai
+      - towards-data-science
+      - reddit-computervision
+      - reddit-languagetechnology
+      - reddit-machinelearning
+      - reddit-llm
+      - reddit-localllama-rss
+      - reddit-localllm
+      - reddit-unsloth
+      - reddit-vibecoding
+      - jiqizhixin
+      - liangziwei
+      - xinzhiyuan
+      - deeptech
+      - paperweekly
+      - ai-frontier
     window: 24h
     schedule: '@daily'
     filter_schedule: 30m      # 可省略；此处更频繁地只过滤，到午夜再生成日报
@@ -258,7 +345,47 @@ pipelines:
   - id: weekly-deep
     name: 每周重大事件
     persona: default
-    sources: [solidot, 36kr, sspai, bbc-zh, jiemian, hacker-news, techcrunch, the-verge, ars-technica, nytimes-world, cnbc-top]
+    sources:
+      - solidot
+      - 36kr
+      - sspai
+      - bbc-zh
+      - jiemian
+      - hacker-news
+      - techcrunch
+      - the-verge
+      - ars-technica
+      - nytimes-world
+      - cnbc-top
+      - product-hunt
+      - fast-company
+      - engadget
+      - facebook-engineering
+      - twitter-engineering
+      - shopify-engineering
+      - nvidia-developer
+      - cmu-machine-learning
+      - deepmind-blog
+      - mit-news-ai
+      - berkeley-ai-research
+      - openai-engineering
+      - nlp-news
+      - google-ai
+      - towards-data-science
+      - reddit-computervision
+      - reddit-languagetechnology
+      - reddit-machinelearning
+      - reddit-llm
+      - reddit-localllama-rss
+      - reddit-localllm
+      - reddit-unsloth
+      - reddit-vibecoding
+      - jiqizhixin
+      - liangziwei
+      - xinzhiyuan
+      - deeptech
+      - paperweekly
+      - ai-frontier
     enabled: false
     window: 7d
     schedule: '@weekly'
@@ -279,7 +406,7 @@ pipelines:
     name: 邮件简报
     persona: default
     sources: [inbox]
-    enabled: false
+    enabled: true
     window: 7d
     schedule: '@daily'
     filters: []             # 可按需求添加 keyword / semantic；此处保留全部邮件

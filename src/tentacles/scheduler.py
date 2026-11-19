@@ -38,13 +38,23 @@ class Scheduler:
         self._config, self._store, self._models, self._clock = config, store, models, clock
         self._transport, self._imap_factory = transport, imap_factory
         self._runs = RunLifecycle(store, clock, secrets=configured_secrets(config))
+        self._tasks = self._build_tasks(config)
+        self.pipelines = PipelineManager(config, store, models, clock, task=self.task)
+
+    @staticmethod
+    def _build_tasks(config: AppConfig) -> dict[tuple[str, str], Task]:
         tasks = [Task('fetch', s.id, s.schedule, config.app.timezone, s.enabled) for s in config.sources]
         tasks.extend(Task(kind, spec.id,
                           spec.filter_schedule if kind == 'filter' and spec.filter_schedule else spec.schedule,
                           config.app.timezone, spec.enabled and (kind != 'filter' or spec.filter_schedule is not None))
                      for kind in ('filter', 'pipeline') for spec in config.pipelines)
-        self._tasks = {(task.kind, task.target): task for task in tasks}
-        self.pipelines = PipelineManager(config, store, models, clock, task=self.task)
+        return {(task.kind, task.target): task for task in tasks}
+
+    def reload_config(self, config: AppConfig) -> None:
+        self._config = config
+        self._tasks = self._build_tasks(config)
+        self.pipelines.reload_config(config)
+        self._store.register_tasks(list(self._tasks.values()), to_utc(self._clock()))
 
     def initialize(self) -> None:
         self._store.register_tasks(list(self._tasks.values()), to_utc(self._clock()))

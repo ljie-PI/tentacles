@@ -9,16 +9,23 @@ from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator, m
 
 Stage = Literal['extract', 'filter', 'decision', 'persona', 'process']
 ModelKind = Literal['chat', 'decision']
+Provider = Literal['openai', 'anthropic', 'openrouter', 'opencode-go']
 STAGES: tuple[Stage, ...] = ('extract', 'filter', 'decision', 'persona', 'process')
 _BASE_URLS = {'openai': 'https://api.openai.com/v1',
               'anthropic': 'https://api.anthropic.com/v1',
-              'openrouter': 'https://openrouter.ai/api/v1'}
+              'openrouter': 'https://openrouter.ai/api/v1',
+              'opencode-go': 'https://opencode.ai/zen/go/v1'}
+_RESERVED_HEADERS = frozenset({'authorization', 'x-api-key', 'host', 'content-length'})
+
+
+def _has_controls(value: str) -> bool:
+    return any(ord(c) < 32 or ord(c) == 127 for c in value)
 
 
 class ModelSpec(BaseModel):
     model_config = ConfigDict(extra='forbid')
 
-    provider: Literal['openai', 'anthropic', 'openrouter'] = 'openai'
+    provider: Provider = 'openai'
     kind: ModelKind = 'chat'
     model: str = Field(min_length=1)
     base_url: str | None = None
@@ -28,6 +35,7 @@ class ModelSpec(BaseModel):
     timeout: float = Field(default=60, gt=0, allow_inf_nan=False)
     retries: int = Field(default=2, ge=0)
     concurrency: int = Field(default=8, gt=0)
+    headers: dict[str, str] = Field(default_factory=dict)
     extra_body: dict[str, Any] = Field(default_factory=dict)
 
     @field_validator('api_key', mode='before')
@@ -55,6 +63,26 @@ class ModelSpec(BaseModel):
                 url.query or url.fragment):
             raise ValueError('base_url must be http(s), without credentials, query or fragment')
         return str(url).rstrip('/')
+
+    @field_validator('headers')
+    @classmethod
+    def _custom_headers(cls, value: dict[str, str]) -> dict[str, str]:
+        cleaned: dict[str, str] = {}
+        seen: set[str] = set()
+        for raw_name, raw_val in value.items():
+            name = raw_name.strip()
+            if not name or _has_controls(name) or any(ch.isspace() or ch == ':' for ch in name):
+                raise ValueError('header names must be valid HTTP token names')
+            lowered = name.lower()
+            if lowered in _RESERVED_HEADERS:
+                raise ValueError(f'headers cannot override {lowered}')
+            if lowered in seen:
+                raise ValueError(f'duplicate header {lowered}')
+            if _has_controls(raw_val):
+                raise ValueError('header values must not contain control characters')
+            seen.add(lowered)
+            cleaned[name] = raw_val
+        return cleaned
 
     @field_validator('extra_body')
     @classmethod
@@ -88,6 +116,15 @@ class ModelSpec(BaseModel):
         if self.kind == 'decision' and endpoint.endswith('/v1'):
             endpoint = endpoint[:-3]
         return endpoint
+
+    @property
+    def is_opencode_go(self) -> bool:
+        if self.provider == 'opencode-go':
+            return True
+        parsed = httpx.URL(self.endpoint)
+        return parsed.host == 'opencode.ai' and (
+            parsed.path.startswith('/zen/go') or parsed.path.startswith('/inference/go')
+        )
 
 
 class Defaults(BaseModel):

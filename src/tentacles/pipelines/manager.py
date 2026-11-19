@@ -34,6 +34,10 @@ class PipelineManager:
             raise NotFound(f'unknown pipeline {pipeline_id!r}')
         return self._specs[pipeline_id]
 
+    def reload_config(self, config: AppConfig) -> None:
+        self._config = config
+        self._specs = {spec.id: spec for spec in config.pipelines}
+
     def pending_counts(self, now: datetime) -> dict[str, int]:
         counts = {}
         for spec in self._specs.values():
