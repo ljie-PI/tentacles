@@ -1,25 +1,20 @@
 # Tentacles 文档总览
 
-`docs/` 按目标受众划分为三个已追踪区域（另含本地 `.gitignore` 忽略的 `docs/plans/` 计划草稿区）：
+`docs/` 按目标受众划分为以下区域（另含本地 `.gitignore` 忽略的 `docs/plans/` 计划草稿区）：
 
-## 1. 用户手册：配置与运行项目（面向人类使用者）
+## 1. 配置、部署与使用入口（根目录）
 
-位于 **[`manual/user/`](manual/user/README.md)**：
+- **[项目配置与部署手册](../README.md)**：安装、`.env` 与 `config/tentacles.yaml` 全部配置项、冷热存储、命名模型、信息源、流水线、安全边界与 `launchd` 调度。
+- **[Agent Skills 目录](../skills/)**：面向 AI Agent 与日常 CLI 操作的技能集合：
+  - [`tentacles-feed`](../skills/tentacles-feed/SKILL.md)：检索条目（`items list/search/show`）与阅读报告（`reports list/show`）
+  - [`tentacles-persona`](../skills/tentacles-persona/SKILL.md)：查看、反馈、编辑、演化与回滚 Persona
+  - [`tentacles-ops`](../skills/tentacles-ops/SKILL.md)：抓取、过滤、成稿、`tick` 调度、浏览器源运维、故障账本排障与冷热存储维护
 
-- [快速开始与手册导览](manual/user/README.md)
-- [基础配置与命名模型](manual/user/configuration-and-models.md)
-- [信息源配置（RSS / IMAP / Web）与原位更新](manual/user/sources.md)
-- [个人画像（Persona）、级联过滤与报告流水线](manual/user/pipelines-and-personas.md)
-- [Web 管理界面、常驻服务、安全鉴权与定时调度](manual/user/server-and-web.md)
+## 2. Web 与接口文档
 
-## 2. Agent CLI 手册：使用采集信息与操控画像（面向消费侧 AI Agent）
-
-位于 **[`manual/agent-cli/`](manual/agent-cli/README.md)**：
-
-- [全局 JSON 调用契约与错误退出码](manual/agent-cli/README.md)
-- [读取与消费采集结果（Items & Reports）](manual/agent-cli/consuming-items-and-reports.md)
-- [通过 Agent CLI 反馈、修改与演化 Persona](manual/agent-cli/persona-and-feedback.md)
-- [触发抓取、运行流水线与状态/计费审计速查](manual/agent-cli/operations-reference.md)
+- **[Web 管理界面与 HTTP REST API 参考](api.md)**：Web 六大页面导览、Bearer 鉴权、错误码映射与完整 REST API 路由表。
+- **[前端开发说明](../frontend/README.md)**：Vite 开发代理、OpenAPI 类型生成与生产构建。
+- **[有界面浏览器脚本契约](../scripts/browser_sources/README.md)**：`extract()` 契约、AST 静态门禁与自愈/PR 流程。
 
 ## 3. 代码研发 Agent 规范与内部参考（Dev Agents）
 
