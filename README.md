@@ -22,10 +22,10 @@ cp .env.example .env              # 按需填入模型 API Key、IMAP 密码或 
 tentacles config check            # 无副作用校验 config/tentacles.yaml
 ```
 
-默认示例开启了中英文科技与新闻 RSS 源（纯 RSS 抓取与 `keyword` 过滤无需填写任何模型 Key）：
+默认配置开启了中英文科技与新闻 RSS 源及 `inbox` 邮箱源（纯 RSS 抓取与 `keyword` 过滤无需填写任何模型 Key；若尚未配置 `.env` 邮箱凭据，可在 Web **Sources** 页停用 `inbox` 或指定单源抓取）：
 
 ```bash
-tentacles sources fetch           # 并发抓取全部启用的信息源
+tentacles sources fetch solidot   # 单源测试抓取（配置好邮箱后可直接运行 tentacles sources fetch）
 tentacles items list --since 24h  # 查看最近 24 小时入库的条目
 ```
 
@@ -47,7 +47,7 @@ tentacles serve                   # 托管前端、REST API 与内置调度器�
 默认配置文件为 `config/tentacles.yaml`，可通过 `--config/-c PATH` 或环境变量 `$TENTACLES_CONFIG` 覆盖：
 
 - **环境变量插值**：配置值支持 `${VAR}` 或 `${VAR:-默认值}`。启动时依次读取项目根目录与配置文件所在目录的 `.env`，**不会覆盖进程已有环境变量**。密钥一律放在 `.env` 中，勿写入 YAML（注意 `TENTACLES_CONFIG` 与 `TENTACLES_JSON=1` 须作为真实环境变量设置，写在 `.env` 内不生效）。
-- **相对路径基准**：`app.data_dir`、`app.reports_dir`、`app.storage.archive_dir`、`personas.*.profile_file`、`processor.prompt_file`、`server.static_dir`、`browser.scripts_dir` 均相对于该 YAML 所在目录解析。
+- **相对路径基准**：`app.data_dir`、`app.reports_dir`、`app.storage.archive_dir`、`personas.*.profile_file`、`processor.prompt_file`、`server.static_dir`、`browser.chrome_user_data_dir`、`browser.scripts_dir` 均相对于该 YAML 所在目录解析。
 - **配置校验**：`tentacles config check` 只读核验 YAML 结构、插值、ID 唯一性、模型种类匹配、Jinja 模板与已有数据库中的 Persona 名称，不修改原库、不联网、不创建目录或调度任务。
 
 ```yaml
@@ -101,7 +101,7 @@ app:
 
 ## 信息源配置（`sources` & `browser`）
 
-通用必填字段：`id`（全局唯一）、`type`（`rss` \| `imap` \| `web` \| `browser`）、`schedule`；可选 `name`、`enabled`（默认 `true`；`false` 跳过定时 `tick`，显式 `sources fetch <ID>` 仍可执行）、`update_existing`（默认 `false`）。
+通用必填字段：`id`（全局唯一，`1..128` 位字母/数字/`_` /`.`/`-`，首字符须为字母或数字，禁止保留字 `fetch`、`..` 及末尾 `.` / `.lock`）、`type`（`rss` \| `imap` \| `web` \| `browser`）、`schedule`；可选 `name`、`enabled`（默认 `true`；`false` 跳过定时 `tick`，显式 `sources fetch <ID>` 仍可执行）、`update_existing`（默认 `false`）。
 
 - **统一入库规则**：正文 `content` 截断至 **1000 units**（1 个 CJK 字符或 1 个连续非 CJK 词元计 1 unit，`content_truncated` 标记截断），`summary` 不超过 **300 units**；非邮件条目必须保留合法 `http(s)` 的 `url` 或入口 `page_url`；讨论页链接写入 `meta.comments_url`。
 

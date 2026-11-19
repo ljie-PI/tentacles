@@ -322,6 +322,14 @@ def load_raw_yaml(config_path: Path) -> tuple[str, dict[str, Any]]:
     return text, raw
 
 
+def load_env_values(config_path: Path, env: Mapping[str, str] | None = None) -> dict[str, str]:
+    """Load merged .env and process environment values, wrapping decode/IO errors."""
+    try:
+        return _load_env(config_path, env)
+    except (OSError, UnicodeError):
+        raise ConfigValidationError([ConfigIssue('<root>', 'cannot read UTF-8 environment file')]) from None
+
+
 def load_config(path: Path | str | None = None, *, env: Mapping[str, str] | None = None) -> AppConfig:
     from tentacles.config_validation import parse_config
 
@@ -329,9 +337,6 @@ def load_config(path: Path | str | None = None, *, env: Mapping[str, str] | None
     _, raw = load_raw_yaml(config_path)
 
     errors: list[ConfigIssue] = []
-    try:
-        env_values = _load_env(config_path, env)
-    except (OSError, UnicodeError):
-        raise ConfigValidationError([ConfigIssue('<root>', 'cannot read UTF-8 environment file')]) from None
+    env_values = load_env_values(config_path, env)
     data = interpolate(raw, env_values, errors=errors)
     return parse_config(data, config_path, errors)

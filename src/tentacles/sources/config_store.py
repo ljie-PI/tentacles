@@ -8,13 +8,13 @@ import os
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 from typing import Any, cast
-from urllib.parse import urlsplit
+from urllib.parse import unquote, urlsplit, urlunsplit
 
 import yaml
 
-from tentacles.config import AppConfig, SourceSpec, _ENV_REF, _load_env, interpolate, load_raw_yaml
+from tentacles.config import AppConfig, SourceSpec, _ENV_REF, interpolate, load_env_values, load_raw_yaml
 from tentacles.config_validation import parse_config, validate_source
-from tentacles.diagnostics import redact_url
+from tentacles.diagnostics import REDACTED, _sensitive_name
 from tentacles.errors import ConfigError, ConfigIssue, ConfigValidationError, Conflict, NotFound
 from tentacles.schemas import SourceConfigView, SourceCreate, SourceUpdate
 
@@ -37,11 +37,27 @@ class _YamlPatch:
     changed_pipelines: Mapping[int, list[str]] = field(default_factory=dict)
 
 
-def _safe_load_env(config_path: Path) -> dict[str, str]:
-    try:
-        return _load_env(config_path, None)
-    except (OSError, UnicodeError):
-        raise ConfigValidationError([ConfigIssue('<root>', 'cannot read UTF-8 environment file')]) from None
+def _redact_url_preserving_env(url: str) -> str:
+    """Redact literal userinfo and sensitive query values while keeping ${VAR} placeholders."""
+    if '://' not in url:
+        return url
+    parsed = urlsplit(url)
+    netloc = parsed.netloc
+    if '@' in netloc:
+        userinfo, hostpart = netloc.rsplit('@', 1)
+        if not _ENV_REF.search(userinfo):
+            netloc = f'{REDACTED}@{hostpart}'
+    query = parsed.query
+    if query:
+        kept: list[str] = []
+        for part in query.split('&'):
+            name, sep, val = part.partition('=')
+            if sep and _sensitive_name(unquote(name)) and not _ENV_REF.search(val):
+                kept.append(f'{name}={REDACTED}')
+            else:
+                kept.append(part)
+        query = '&'.join(kept)
+    return urlunsplit((parsed.scheme, netloc, parsed.path, query, parsed.fragment))
 
 
 def _strings_with_env_refs(value: Any) -> set[str]:
@@ -98,9 +114,7 @@ def _raw_str(raw: Mapping[str, Any], key: str, fallback: str | None) -> str | No
 
 def _safe_view_url(raw: Mapping[str, Any], key: str, fallback: str | None) -> str | None:
     candidate = _raw_str(raw, key, fallback)
-    if candidate is None or _ENV_REF.search(candidate):
-        return candidate
-    return redact_url(candidate) if '://' in candidate else candidate
+    return _redact_url_preserving_env(candidate) if candidate is not None else None
 
 
 def _raw_str_list(raw: Mapping[str, Any], key: str, fallback: Any) -> list[str] | None:
@@ -131,7 +145,7 @@ def get_source_config(config: AppConfig, source_id: str) -> SourceConfigView:
     raw_entry: Mapping[str, Any] = {}
     if config.path.is_file():
         _, raw_doc = load_raw_yaml(config.path)
-        env_values = _safe_load_env(config.path)
+        env_values = load_env_values(config.path)
         for item in raw_doc.get('sources') or []:
             if _matches_source_id(item, source_id, env_values):
                 raw_entry = item
@@ -224,7 +238,7 @@ def _apply_fields(entry: dict[str, Any], source_type: str, values: dict[str, Any
             if val == existing_raw or val == _runtime_field_value(config, current_spec, coerced_opts, key):
                 continue
         if key in ('url', 'page_url') and isinstance(existing_raw, str) and '://' in existing_raw:
-            if val == redact_url(existing_raw):
+            if val == _redact_url_preserving_env(existing_raw):
                 continue
         if key == 'url' and has_attached_creds and val is not None:
             if _url_origin(val, env_values) != _url_origin(existing_raw, env_values):
@@ -470,7 +484,7 @@ def create_source_in_config(config: AppConfig, payload: SourceCreate, *,
     if any(s.id == source_id for s in config.sources):
         raise Conflict(f'source {source_id!r} already exists')
     original_text, raw = load_raw_yaml(config.path) if config.path.is_file() else ('', {})
-    env_values = _safe_load_env(config.path)
+    env_values = load_env_values(config.path)
     sources = list(raw.get('sources') or [])
     entry: dict[str, Any] = {'id': source_id, 'type': payload.type}
     fields = set(payload.model_fields_set) | {'schedule', 'enabled', 'update_existing'}
@@ -494,7 +508,7 @@ def update_source_in_config(config: AppConfig, source_id: str, payload: SourceUp
                             existing_personas: Collection[str]) -> tuple[AppConfig, SourceConfigView]:
     spec = config.source(source_id)
     original_text, raw = load_raw_yaml(config.path)
-    env_values = _safe_load_env(config.path)
+    env_values = load_env_values(config.path)
     sources = raw.get('sources')
     if not isinstance(sources, list):
         raise NotFound(f'unknown source {source_id!r}')
