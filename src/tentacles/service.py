@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import threading
 from datetime import datetime
 from pathlib import Path
 from typing import Callable, Literal, Mapping, Any
@@ -18,13 +19,18 @@ from tentacles.net import HttpPool
 from tentacles.llm.registry import ModelRegistry
 from tentacles.llm.config import Stage
 from tentacles.llm.json import extract_json
-from tentacles.schemas import ConfigCheck, ErrorEventDetail, ErrorEventView, FetchOutcome, ItemDetail, ItemSearchView, ItemView, Page, RunDetail, RunView, SourceView, TaskView, ModelView, Completion, ModelTest, TickOutcome, StorageArchive, StorageReindex, StorageStatus
+from tentacles.schemas import (
+    ConfigCheck, ErrorEventDetail, ErrorEventView, FetchOutcome, ItemDetail, ItemSearchView,
+    ItemView, Page, RunDetail, RunView, SourceConfigView, SourceCreate, SourceUpdate, SourceView,
+    TaskView, ModelView, Completion, ModelTest, TickOutcome, StorageArchive, StorageReindex, StorageStatus,
+)
 from tentacles.store import ItemQuery, RunErrorQuery, Store
 from tentacles.personas.manager import PersonaManager
 from tentacles.personas.models import FeedbackView, PersonaProposal, PersonaView
 from tentacles.pipelines.models import PipelineOutcome, ReportView, PipelineView
 from tentacles.scheduler import Scheduler
 from tentacles.timeutil import parse_since, utcnow, to_utc
+from tentacles.sources.config_store import create_source_in_config, get_source_config as read_source_config, update_source_in_config
 from tentacles.sources.imap_client import ImapFactory, connect_imap
 
 class TentaclesService:
@@ -41,6 +47,7 @@ class TentaclesService:
         self.config = config
         self.store = store
         self._clock = clock
+        self._config_lock = threading.RLock()
         self.archive = ArchiveManager(config, store, clock=clock)
         self._model_http = HttpPool(transport)
         self.models = ModelRegistry(config.models, config.defaults, self._model_http, clock=clock)
@@ -202,6 +209,32 @@ class TentaclesService:
 
     def list_sources(self) -> list[SourceView]:
         return self.scheduler.list_sources()
+
+    def _apply_reloaded_config(self, updated: AppConfig) -> None:
+        if updated.models != self.config.models or updated.defaults != self.config.defaults:
+            self.models = ModelRegistry(updated.models, updated.defaults, self._model_http, clock=self._clock)
+        self.personas.reload_config(updated, self.models)
+        self.archive = ArchiveManager(updated, self.store, clock=self._clock)
+        self.config = updated
+        self.scheduler.reload_config(updated, models=self.models)
+
+    def get_source_config(self, source_id: str) -> SourceConfigView:
+        with self._config_lock:
+            return read_source_config(self.config, source_id)
+
+    def create_source(self, payload: SourceCreate) -> SourceConfigView:
+        with self._config_lock:
+            personas = {persona.name for persona in self.store.list_personas()}
+            updated, view = create_source_in_config(self.config, payload, existing_personas=personas)
+            self._apply_reloaded_config(updated)
+            return view
+
+    def update_source(self, source_id: str, payload: SourceUpdate) -> SourceConfigView:
+        with self._config_lock:
+            personas = {persona.name for persona in self.store.list_personas()}
+            updated, view = update_source_in_config(self.config, source_id, payload, existing_personas=personas)
+            self._apply_reloaded_config(updated)
+            return view
 
     async def fetch_sources(self, ids: list[str] | None = None) -> list[FetchOutcome]:
         """Fetch the named sources (even disabled ones), or every enabled source."""

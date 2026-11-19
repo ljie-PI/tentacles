@@ -87,18 +87,36 @@ class AppSpec(BaseModel):
         return v
 
 
+_SOURCE_ID_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9_.-]*$"
+_RESERVED_SOURCE_IDS = frozenset({"fetch"})
+
+
+def validate_source_id(value: str) -> str:
+    """Validate a source identifier for URL routing, file paths and git branches."""
+    cleaned = value.strip()
+    if not cleaned or len(cleaned) > 128 or not re.fullmatch(_SOURCE_ID_PATTERN, cleaned):
+        raise ValueError("source id must be 1..128 chars of letters, digits, '_', '.' or '-'")
+    if cleaned in _RESERVED_SOURCE_IDS:
+        raise ValueError(f"source id {cleaned!r} is reserved")
+    if ".." in cleaned or cleaned.endswith(".") or cleaned.endswith(".lock"):
+        raise ValueError("source id must not contain '..' or end with '.' or '.lock'")
+    return cleaned
+
+
 class SourceSpec(BaseModel):
     """Fields common to every source; type-specific options stay in the extras
     and are validated by the source type's own options model."""
 
     model_config = ConfigDict(extra="allow")
 
-    id: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
+    id: str = Field(min_length=1, max_length=128, pattern=_SOURCE_ID_PATTERN)
     type: str
     schedule: str
     name: str | None = None
     enabled: bool = True
     update_existing: bool = False
+
+    _valid_id = field_validator("id")(validate_source_id)
 
     @field_validator("schedule")
     @classmethod
@@ -285,14 +303,14 @@ def _load_env(config_path: Path, env: Mapping[str, str] | None) -> dict[str, str
     return merged
 
 
-def load_config(path: Path | str | None = None, *, env: Mapping[str, str] | None = None) -> AppConfig:
-    from tentacles.config_validation import parse_config
-
-    config_path = find_config(path, env)
+def load_raw_yaml(config_path: Path) -> tuple[str, dict[str, Any]]:
+    """Read UTF-8 YAML text and its uninterpolated top-level mapping."""
     try:
-        raw = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        text = config_path.read_text(encoding="utf-8")
     except (OSError, UnicodeError):
         raise ConfigValidationError([ConfigIssue('<root>', 'cannot read UTF-8 config file')]) from None
+    try:
+        raw = yaml.safe_load(text)
     except yaml.YAMLError as exc:
         mark = getattr(exc, 'problem_mark', None)
         location = f' at line {mark.line + 1}, column {mark.column + 1}' if mark is not None else ''
@@ -301,11 +319,24 @@ def load_config(path: Path | str | None = None, *, env: Mapping[str, str] | None
         raw = {}
     if not isinstance(raw, dict):
         raise ConfigValidationError([ConfigIssue('<root>', 'top level must be a mapping')])
+    return text, raw
 
-    errors: list[ConfigIssue] = []
+
+def load_env_values(config_path: Path, env: Mapping[str, str] | None = None) -> dict[str, str]:
+    """Load merged .env and process environment values, wrapping decode/IO errors."""
     try:
-        env_values = _load_env(config_path, env)
+        return _load_env(config_path, env)
     except (OSError, UnicodeError):
         raise ConfigValidationError([ConfigIssue('<root>', 'cannot read UTF-8 environment file')]) from None
+
+
+def load_config(path: Path | str | None = None, *, env: Mapping[str, str] | None = None) -> AppConfig:
+    from tentacles.config_validation import parse_config
+
+    config_path = find_config(path, env)
+    _, raw = load_raw_yaml(config_path)
+
+    errors: list[ConfigIssue] = []
+    env_values = load_env_values(config_path, env)
     data = interpolate(raw, env_values, errors=errors)
     return parse_config(data, config_path, errors)

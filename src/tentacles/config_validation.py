@@ -385,12 +385,15 @@ def validate_config(config: AppConfig | Mapping[str, Any], existing_personas: Co
     return errors
 
 
-def parse_config(data: Mapping[str, Any], path: Path, errors: list[ConfigIssue]) -> AppConfig:
+def parse_config(data: Mapping[str, Any], path: Path, errors: list[ConfigIssue], *,
+                 existing_personas: Collection[str] | None = None) -> AppConfig:
     """Resolve database-only names before checking references, never via Store."""
     data_dir = _path(_mapping(data.get('app')).get('data_dir', AppSpec().data_dir), path)
     names: set[str] = set()
     if data_dir is None:
         errors.append(ConfigIssue('app.data_dir', 'invalid data directory path'))
+    elif existing_personas is not None:
+        names = set(existing_personas)
     else:
         try:
             names = read_persona_names(data_dir / 'tentacles.db')

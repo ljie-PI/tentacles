@@ -4,6 +4,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Callable
 
+from tentacles.diagnostics import header_secret_values
 from tentacles.timeutil import utcnow
 from tentacles.errors import ConfigError, NotFound
 from tentacles.llm.client import ChatModel, DecisionModel
@@ -18,8 +19,10 @@ class ModelRegistry:
         self._clock = clock
         self._chats: dict[str, ChatModel] = {}
         self._decisions: dict[str, DecisionModel] = {}
-        self._keys = sorted((s.api_key.get_secret_value() for s in specs.values()
-                             if s.api_key.get_secret_value()), key=len, reverse=True)
+        raw_keys = [s.api_key.get_secret_value() for s in specs.values() if s.api_key.get_secret_value()]
+        for spec in specs.values():
+            raw_keys.extend(header_secret_values(spec.headers))
+        self._keys = sorted(set(raw_keys), key=len, reverse=True)
 
     def redact(self, text: str) -> str:
         for key in self._keys:

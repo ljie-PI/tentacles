@@ -22,10 +22,10 @@ cp .env.example .env              # 按需填入模型 API Key、IMAP 密码或 
 tentacles config check            # 无副作用校验 config/tentacles.yaml
 ```
 
-默认示例开启了中英文科技与新闻 RSS 源（纯 RSS 抓取与 `keyword` 过滤无需填写任何模型 Key）：
+默认配置开启了中英文科技与新闻 RSS 源及 `inbox` 邮箱源（纯 RSS 抓取与 `keyword` 过滤无需填写任何模型 Key；若尚未配置 `.env` 邮箱凭据，可在 Web **Sources** 页停用 `inbox` 或指定单源抓取）：
 
 ```bash
-tentacles sources fetch           # 并发抓取全部启用的信息源
+tentacles sources fetch solidot   # 单源测试抓取（配置好邮箱后可直接运行 tentacles sources fetch）
 tentacles items list --since 24h  # 查看最近 24 小时入库的条目
 ```
 
@@ -47,7 +47,7 @@ tentacles serve                   # 托管前端、REST API 与内置调度器�
 默认配置文件为 `config/tentacles.yaml`，可通过 `--config/-c PATH` 或环境变量 `$TENTACLES_CONFIG` 覆盖：
 
 - **环境变量插值**：配置值支持 `${VAR}` 或 `${VAR:-默认值}`。启动时依次读取项目根目录与配置文件所在目录的 `.env`，**不会覆盖进程已有环境变量**。密钥一律放在 `.env` 中，勿写入 YAML（注意 `TENTACLES_CONFIG` 与 `TENTACLES_JSON=1` 须作为真实环境变量设置，写在 `.env` 内不生效）。
-- **相对路径基准**：`app.data_dir`、`app.reports_dir`、`app.storage.archive_dir`、`personas.*.profile_file`、`processor.prompt_file`、`server.static_dir`、`browser.scripts_dir` 均相对于该 YAML 所在目录解析。
+- **相对路径基准**：`app.data_dir`、`app.reports_dir`、`app.storage.archive_dir`、`personas.*.profile_file`、`processor.prompt_file`、`server.static_dir`、`browser.chrome_user_data_dir`、`browser.scripts_dir` 均相对于该 YAML 所在目录解析。
 - **配置校验**：`tentacles config check` 只读核验 YAML 结构、插值、ID 唯一性、模型种类匹配、Jinja 模板与已有数据库中的 Persona 名称，不修改原库、不联网、不创建目录或调度任务。
 
 ```yaml
@@ -84,13 +84,14 @@ app:
 
 | 字段 | 说明与默认值 |
 | :--- | :--- |
-| `provider` | `openai`（默认，兼容 DeepSeek / Moonshot / Ollama / vLLM）、`anthropic`、`openrouter` |
+| `provider` | `openai`（默认，兼容 DeepSeek / Moonshot / Ollama / vLLM）、`anthropic`、`openrouter`、`opencode-go`（自动附带 `x-opencode-session`） |
 | `kind` | `chat`（默认）或 `decision`（仅限 `provider: openrouter`） |
 | `model` | 服务商侧真实模型 ID（必填） |
 | `base_url` | API 根路径（如本地 Ollama `http://localhost:11434/v1`）；禁止携带凭据、query 或 fragment |
 | `api_key` | 支持为空；仅实际发起调用时检查非空。本地无鉴权服务填任意非空占位值（如 `local`） |
 | `temperature` / `max_tokens` | `temperature` 可选 `0~2`；`max_tokens` 默认 `4096`（OpenAI 接口若在 `extra_body` 设了 `max_completion_tokens` 则省略 `max_tokens`） |
 | `timeout` / `retries` / `concurrency` | 默认超时 `60`s、重试 `2` 次；`decision` 并发 worker 上限默认 `8` |
+| `headers` | 可选自定义 HTTP 请求头字典；禁止覆盖 `authorization / x-api-key / host / content-length / content-type`，敏感头自动脱敏 |
 | `extra_body` | 合并进请求 JSON 的扩展参数；禁止覆盖 `model / messages / system / stream / state / questions` |
 
 - **重试与脱敏**：对 `408 / 409 / 425 / 429`、所有 `5xx`、网络错误和超时自动重试（优先遵守 `Retry-After`，上限 60s，否则指数退避上限 30s），不跟随 HTTP 重定向。所有模型 `api_key` 均全局脱敏为 `[REDACTED]`。
@@ -100,7 +101,7 @@ app:
 
 ## 信息源配置（`sources` & `browser`）
 
-通用必填字段：`id`（全局唯一）、`type`（`rss` \| `imap` \| `web` \| `browser`）、`schedule`；可选 `name`、`enabled`（默认 `true`；`false` 跳过定时 `tick`，显式 `sources fetch <ID>` 仍可执行）、`update_existing`（默认 `false`）。
+通用必填字段：`id`（全局唯一，`1..128` 位字母/数字/`_` /`.`/`-`，首字符须为字母或数字，禁止保留字 `fetch`、`..` 及末尾 `.` / `.lock`）、`type`（`rss` \| `imap` \| `web` \| `browser`）、`schedule`；可选 `name`、`enabled`（默认 `true`；`false` 跳过定时 `tick`，显式 `sources fetch <ID>` 仍可执行）、`update_existing`（默认 `false`）。
 
 - **统一入库规则**：正文 `content` 截断至 **1000 units**（1 个 CJK 字符或 1 个连续非 CJK 词元计 1 unit，`content_truncated` 标记截断），`summary` 不超过 **300 units**；非邮件条目必须保留合法 `http(s)` 的 `url` 或入口 `page_url`；讨论页链接写入 `meta.comments_url`。
 
@@ -109,7 +110,7 @@ app:
 - 自动处理条件 GET（`ETag` / `Last-Modified` -> `304`）；执行多级去重（同源 `external_id`、规范化 URL 剥离追踪参数、标题+摘要指纹及 48h 跨源近似标题去重）。
 
 ### 2. IMAP 邮箱（`type: imap`）
-- 字段：`host`、`port`（默认 SSL `993` / 非 SSL `143`）、`ssl`（默认 `true` 严格校验证书；`false` 不升级 STARTTLS 仅限可信本地桥接）、`username`、`password`、`folders`（默认 `[INBOX]`）、`initial_days`（默认 30）、`max_fetch`（默认 100，所有文件夹合计）、`search`（默认 `ALL`）、`exclude_senders`、`max_body_chars`（20000）、`max_summary_chars`（2000）、`timeout`（30）。
+- 字段：`host`、`port`（默认 SSL `993` / 非 SSL `143`）、`ssl`（默认 `true` 严格校验证书；`false` 不升级 STARTTLS 仅限可信本地桥接）、`username`、`password`、`folders`（默认 `[INBOX]`）、`include_subfolders`（默认 `false`，为 `true` 时通过 IMAP `LIST` 递归展开子文件夹）、`initial_days`（默认 30）、`max_fetch`（默认 100，所有文件夹合计）、`search`（默认 `ALL`）、`exclude_senders`、`max_body_chars`（20000）、`max_summary_chars`（2000）、`timeout`（30）。
 - **认证要求**：Gmail 须启用两步验证并使用**应用专用密码**；Outlook.com / Hotmail 已停用 Basic Auth 强制 OAuth2，当前仅支持 `IMAP LOGIN` 暂不适用。
 - **只读语义**：始终以只读模式和 `BODY.PEEK[]` 读取，绝不标记已读、移动或删除；按文件夹独立维护 `UIDVALIDITY + 最后 UID` 游标；优先取 `text/plain`，清理引用块并仅记录附件名；不做指纹/近似标题去重；单封坏信跳过并推进游标。
 

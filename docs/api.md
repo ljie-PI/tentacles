@@ -10,7 +10,7 @@ Tentacles 通过 `tentacles serve` 在同一服务进程内托管已构建的前
 ## 1. Web 管理界面功能概览
 
 - **Feed**：按来源、时间、搜索词（SQLite FTS5 全文索引）、Pipeline 及通过/淘汰状态筛选资讯；抽屉展示正文（截断至 1000 字/词时提示）、原文与入口页 `page_url`、各阶段评分轨迹，并支持按 Persona 点赞/点踩。
-- **Sources**：查看各源最近状态、累计条目数、下次运行时间，支持单源或全量立即抓取。
+- **Sources**：查看各源最近状态、累计条目数、下次运行时间，支持在线新增信息源、逐行编辑配置与关联 Pipeline、一键启停调度以及单源手动抓取（保留 YAML 注释与 `${VAR}` 环境变量占位符）。
 - **Pipelines**：查看待报告条目数（`pending`），手动触发「仅过滤」或「立即生成报告」。
 - **Reports**：渲染 GFM Markdown 报告与引用条目（禁用原始 HTML、不自动加载外部图片，图片转为无引荐来源链接），点击引用可跳回 Feed 原文。
 - **Personas**：编辑画像与关键词、输入演化指令预览行级 Diff 后应用、查看不可变版本历史并一键回滚。
@@ -33,6 +33,9 @@ Tentacles 通过 `tentacles serve` 在同一服务进程内托管已构建的前
 | `GET /api/health` | `{"ok": true}`（免 Token） |
 | `GET /api/settings` | `{"timezone": "Asia/Shanghai"}`（仅公开元数据，不含密钥或本地路径） |
 | `GET /api/sources` | `SourceView[]` |
+| `POST /api/sources` | 新增信息源（`rss` / `web` / `browser`）并同步可选 `pipelines` 与运行时调度，返回 `201` + `SourceConfigView`；重名 `409`，配置非法 `400` |
+| `GET /api/sources/{source_id}` | 读取单个信息源可编辑配置 `SourceConfigView`（字符串字段保留原始 YAML `${VAR}` 占位符，不展开 `.env` 密钥、不含认证凭据）；未知 ID `404` |
+| `PATCH /api/sources/{source_id}` | 局部更新信息源配置、启停状态或关联 `pipelines`，原子写回 YAML 并热刷新调度，返回 `SourceConfigView` |
 | `POST /api/sources/fetch` | 可选请求体 `{"ids": ["id"]}`，返回 `FetchOutcome[]`（省略时抓取全部启用源） |
 | `POST /api/sources/{source_id}/fetch` | 单个 `FetchOutcome`；未知 ID `404`，运行中 `409`，抓取失败 `502` |
 | `POST /api/sources/{source_id}/distill` | 显式重提炼 `type: browser` 源的固化脚本，返回 `FetchOutcome` |

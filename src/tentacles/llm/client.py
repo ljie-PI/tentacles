@@ -5,6 +5,7 @@ import asyncio
 import math
 from datetime import datetime
 from typing import Any, Callable
+from uuid import uuid4
 
 import httpx
 
@@ -22,6 +23,25 @@ class ModelClient:
                  clock: Callable[[], datetime]):
         self.name, self.spec, self._http, self._redact = name, spec, http, redact
         self._clock = clock
+        self._opencode_session = f'ses_{uuid4().hex[:24]}'
+
+    def _request_headers(self, key: str, headers: dict[str, str] | None) -> dict[str, str]:
+        merged = dict(self.spec.headers)
+        existing_lower = {k.lower(): k for k in merged}
+        if self.spec.is_opencode_go and 'x-opencode-session' not in existing_lower:
+            merged['x-opencode-session'] = self._opencode_session
+            existing_lower['x-opencode-session'] = 'x-opencode-session'
+        for name, val in (headers or {'Authorization': f'Bearer {key}'}).items():
+            lowered = name.lower()
+            if lowered in {'authorization', 'x-api-key'}:
+                if lowered in existing_lower:
+                    merged.pop(existing_lower[lowered], None)
+                merged[name] = val
+                existing_lower[lowered] = name
+            elif lowered not in existing_lower:
+                merged[name] = val
+                existing_lower[lowered] = name
+        return merged
 
     async def _post(self, path: str, body: dict[str, Any], *, headers: dict[str, str] | None = None,
                     gate: RequestGate | None = None) -> dict[str, Any]:
@@ -31,7 +51,7 @@ class ModelClient:
             if gate is not None:
                 gate.stop(error)
             raise error
-        auth = headers or {'Authorization': f'Bearer {key}'}
+        auth = self._request_headers(key, headers)
         for attempt in range(self.spec.retries + 1):
             if gate is not None:
                 await gate.wait()

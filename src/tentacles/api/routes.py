@@ -8,7 +8,11 @@ from fastapi import APIRouter, Query, Request
 from tentacles.api.models import DisplaySettings, SchedulerLoopView, SourceFetch
 from tentacles.models import ItemKind
 from tentacles.errors import Busy, UpstreamError
-from tentacles.schemas import ErrorEventDetail, ErrorEventView, FetchOutcome, ItemDetail, ItemView, Page, RunDetail, RunView, SourceView, TaskView, TickOutcome
+from tentacles.schemas import (
+    ErrorEventDetail, ErrorEventView, FetchOutcome, ItemDetail, ItemView, Page,
+    RunDetail, RunView, SourceConfigView, SourceCreate, SourceUpdate, SourceView,
+    TaskView, TickOutcome,
+)
 from tentacles.api.dependencies import Service
 
 
@@ -18,6 +22,21 @@ router = APIRouter()
 @router.get('/sources', response_model=list[SourceView])
 def sources(svc: Service):
     return svc.list_sources()
+
+
+@router.post('/sources', response_model=SourceConfigView, status_code=201)
+def create_source(body: SourceCreate, svc: Service):
+    return svc.create_source(body)
+
+
+@router.get('/sources/{source_id}', response_model=SourceConfigView)
+def source_detail(source_id: str, svc: Service):
+    return svc.get_source_config(source_id)
+
+
+@router.patch('/sources/{source_id}', response_model=SourceConfigView)
+def update_source(source_id: str, body: SourceUpdate, svc: Service):
+    return svc.update_source(source_id, body)
 
 
 @router.post('/sources/fetch', response_model=list[FetchOutcome])
