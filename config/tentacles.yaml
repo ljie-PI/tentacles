@@ -75,7 +75,7 @@ personas:
 
 # 有界面 Chrome 运行时（type: browser）。严格禁止无头模式：复用你已登录的 Chrome Profile，
 # 通过 CDP 附着或按需拉起可见窗口，并在新建的隔离工作 Tab 中重放固化脚本。
-# 前置条件、Profile 核验与脚本规范见 docs/manual/user/sources.md 与 scripts/browser_sources/README.md。
+# 前置条件、Profile 核验与脚本规范见 README.md 与 scripts/browser_sources/README.md。
 browser:
   cdp_url: http://127.0.0.1:9222          # Chrome Remote Debugging 端点（connect_over_cdp 附着）
   webbridge_url: http://127.0.0.1:10086   # 冷启动探索的一次性本地工具桥接端点（仅回环地址）
@@ -140,7 +140,7 @@ sources:
     max_summary_chars: 2000
     timeout: 30
 
-  # 网页示例均默认关闭；URL 和 CSS 需替换为实际站点，完整语义见 docs/manual/user/sources.md。
+  # 网页示例均默认关闭；URL 和 CSS 需替换为实际站点，完整语义见 README.md。
   - id: web-list
     type: web
     mode: list
@@ -194,7 +194,7 @@ sources:
     proxy: ${HTTP_PROXY:-}
 
   # 有界面浏览器源：附着已登录的 Chrome Profile，重放 scripts/browser_sources/ 下的固化脚本。
-  # 默认关闭；需先启动带调试端口的 Chrome（见 docs/manual/user/sources.md）。
+  # 默认关闭；需先启动带调试端口的 Chrome（见 README.md）。
   - id: reddit-localllama
     type: browser
     name: r/LocalLLaMA 最新讨论

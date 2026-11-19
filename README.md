@@ -1,524 +1,212 @@
 # tentacles
 
-个人信息与新闻管理系统：从多种信息源抓取内容，按个人 persona 过滤，再用 LLM 加工成日报、深度报道或邮件简报。
+个人信息与新闻管理系统：从 RSS、IMAP 邮箱、静态网页与有界面浏览器抓取内容，按版本化个人画像（Persona）级联过滤，再用大模型加工为日报、深度报道或邮件简报。
 
-> 已支持配置驱动的 RSS、IMAP、网页与有界面 Chrome 浏览器抓取（含 `pi` 冷启动提炼、重放故障自愈与隔离 worktree 自动评审 PR）、去重入库、持久化调度、命名模型、版本化 Persona 与反馈演化，以及 keyword 与统一 semantic 级联过滤和 digest/deep/summarize/none 处理器。Web 端已提供 Feed、Sources、Pipelines、Reports、Runs、Settings 和 Persona 管理；文档见 [用户手册](docs/manual/user/README.md) 与 [Agent CLI 手册](docs/manual/agent-cli/README.md)，实现与验证范围见 [规格核对](docs/agents/spec-18-audit.md)。
+- **AI Agent 使用技能**：见 [`skills/`](skills/)（`tentacles-feed`、`tentacles-persona`、`tentacles-ops`）
+- **Web 与 REST API 参考**：见 [`docs/api.md`](docs/api.md) 与 [`frontend/README.md`](frontend/README.md)
+- **浏览器脚本契约与开发文档**：见 [`scripts/browser_sources/README.md`](scripts/browser_sources/README.md) 与 [`docs/README.md`](docs/README.md)
 
-## 网页与 REST API
-
-```bash
-# 安装后端依赖后，启动 API 与调度器；省略轮询可加 --no-scheduler
-tentacles serve --no-scheduler
-# 另一个终端：构建网页后，后端会直接托管静态产物
-cd frontend
-pnpm install --frozen-lockfile
-pnpm build
-# 浏览 http://127.0.0.1:8000
-```
-
-已提供 Feed（来源／时间／关键词／pipeline 与通过判定筛选、加载更多、正文抽屉）、Sources（状态、立即抓取）、
-Pipelines（过滤／运行）、Reports（Markdown 表格与引用条目）、Runs（自动刷新与成本）和 Settings（token、模型测试、调度状态）。
-支持暗色模式和移动端；Persona 页面可编辑画像与关键词、预览演化差异后应用、查看历史并回滚；Feed 支持按画像点赞／点踩。
-开发模式运行 `pnpm dev`，通过 Vite 代理访问后端。要求 Node >=22.12、pnpm 10.33；
-`pnpm generate:api` 重新生成提交的后端类型，`pnpm check:api` 检查一致性。
-
-默认仅监听本机；对外监听前设置 `.env` 的 `TENTACLES_SERVER_TOKEN`，并配置 HTTPS 代理。
-除了健康检查，API 均需 Bearer token（若已配置），静态网页无需鉴权。
-详细配置、路由、错误及关闭行为见 [Web 与 HTTP API 手册](docs/manual/user/server-and-web.md) 和 [前端开发说明](frontend/README.md)。
+---
 
 ## 快速开始
+
+### 1. 安装后端并校验配置
+
+要求 Python >= 3.10：
 
 ```bash
 python -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
 
-cp .env.example .env              # 可选：存放配置中 ${VAR} 引用的密钥
-tentacles config check            # 校验 config/tentacles.yaml
-tentacles sources fetch           # 抓取全部启用的信息源
-tentacles sources distill ID      # 强制重提炼某个有界面浏览器源的固化脚本
-tentacles items list --since 24h  # 查看最近 24 小时的条目
+cp .env.example .env              # 按需填入模型 API Key、IMAP 密码或 Server Token
+tentacles config check            # 无副作用校验 config/tentacles.yaml
 ```
 
-## 配置
-
-所有配置都在一个 YAML 文件中，默认为 `config/tentacles.yaml`，也可以用 `--config` 或 `$TENTACLES_CONFIG` 指定：
-
-- 值中可以写 `${VAR}` 或 `${VAR:-默认值}`，从环境变量读取。系统也会读取项目根目录或配置所在目录的 `.env`，但不会覆盖已有的环境变量。
-- 相对路径都相对于配置文件所在的目录解析。
-- 每个信息源需要声明 `id`、`type`、`schedule`；不同类型还有各自的选项，示例配置中有完整说明。
-
-## 命令
-
-| 命令 | 作用 |
-| ---- | ---- |
-| `tentacles config check` | 校验配置 |
-| `tentacles models list` | 列出命名模型，不泄露密钥 |
-| `tentacles models test NAME` | 实际调用模型，返回可用性、延迟、样例和用量 |
-| `tentacles persona list/show/history/export` | 查看 Persona、版本历史或导出完整 YAML 快照 |
-| `tentacles persona set NAME` | 从文本/文件/stdin 修改 profile 和关键词，可跳过标签抽取 |
-| `tentacles persona evolve [NAME] --instruction TEXT [--dry-run]` | 用指令和/或反馈演化 Persona，预览模式不写库 |
-| `tentacles persona apply --proposal FILE\|-` | 应用 JSON 提案，过期时返回 conflict |
-| `tentacles feedback ITEM_ID --like/--dislike` | 点赞/点踩，可指定 `--persona` 和 `--note` |
-| `tentacles persona rollback NAME VERSION` | 复制旧内容为新版本，不删除历史 |
-| `tentacles sources list` | 列出信息源及其抓取状态 |
-| `tentacles sources fetch [ID...]` | 立即抓取信息源，不写 ID 时抓取全部启用的源 |
-| `tentacles sources distill ID` | 显式重提炼一个 `type: browser` 源的固化脚本（幂等；按 `browser.pr` 提 PR） |
-| `tentacles items list` | 列出条目（含截断正文、`page_url` 与最新评估），可按来源、时间、关键词、`--persona`、`--min-score`、`--topic` 筛选，支持分页与 `--sort time\|relevance` |
-| `tentacles items search QUERY` | 全文检索条目：默认按 BM25 相关性排序（标题权重最高），返回 `bm25_rank` 与命中高亮 `snippet`；支持与 `items list` 一致的筛选与分页 |
-| `tentacles items show ID` | 查看条目详情（正文、来源元数据与各 Pipeline 最新评估） |
-| `tentacles items list/search/show ... --include-archive` | 跨年只读查询：与各年度冷归档库归并分页，结果用 `archive_year` 标注年份 |
-| `tentacles tick` | 先并发抓取，再依次过滤、依次运行到期 pipeline |
-| `tentacles scheduler status` | 查看任务频率、到期时间、运行状态 |
-| `tentacles pipelines list/filter/run ID` | 查看 pipeline、只过滤或生成报告 |
-| `tentacles reports list/show ID` | 查看报告列表和全文 |
-| `tentacles storage status` | 热库与各年度冷库的体积、WAL 体积、各表行数与 FTS 行数 |
-| `tentacles storage reindex [--optimize] [--include-archive]` | 在线重建（或合并）FTS5 全文索引 |
-| `tentacles storage archive [--before T] [--dry-run] [--vacuum]` | 把超过 `hot_retention_days` 的条目按自然年搬进冷库 |
-| `tentacles runs list` | 查看运行记录 |
-| `tentacles runs show RUN_ID` | 查看单次运行的统计与本次记录的故障列表 |
-| `tentacles errors list` | 检索故障账本，支持 `--unresolved`、`--source`、`--pipeline`、`--phase`、`--error-code`、`--run-id`、`--since/--until` 与分页 |
-| `tentacles errors show ID` | 查看一条故障的完整描述与已脱敏的排障现场 |
-
-所有命令都支持 `--json`：stdout 只输出一个 JSON 值，日志写到 stderr，退出码按错误类型区分。给 agent 用的完整说明见 [Agent CLI 手册](docs/manual/agent-cli/README.md)。
-
-入库正文统一截断到 1000 汉字/英文词（`content_truncated` 标记），摘要不超过 300；非邮件条目必须保留单条原文 `url` 或入口 `page_url`，需要完整原文时顺着链接回访即可。
-检索走 SQLite 内置 FTS5 全文索引：3 个字符及以上的词项命中倒排索引，1–2 字短词（如 `广告`、`AI`）逐列匹配，中英长短词都不会漏召回；`tentacles --json items search QUERY` 有长词时按 BM25 相关性排序，纯短词时标题命中优先，并返回命中高亮 `snippet`。
-`--include-archive` 只扩展读取范围，热库与多年度冷库使用同一排序语义：相关性同分再按发布时间（缺失时为抓取时间）倒序、Item `id` 升序决胜；BM25 仍为各库内统计量。详情始终热库优先，仅热库没有时查冷库。
-`--json items list` 不传 `--pipeline` 时也会自动关联最新一次有效评估，直接给出 `topics`、`match_score`、`match_level`、`match_points`：
+默认示例开启了中英文科技与新闻 RSS 源（纯 RSS 抓取与 `keyword` 过滤无需填写任何模型 Key）：
 
 ```bash
-# 最近 24 小时的条目：正文、入口页链接与最新评估一次拿全
-tentacles --json items list --since 24h --limit 50
-# 只看某画像下匹配度 >= 0.8 且命中指定主题的条目
-tentacles --json items list --persona default --min-score 0.8 --topic 人工智能
-# 按相关性检索，拿回 BM25 排名分与命中高亮摘录
-tentacles --json items search '广告推荐 AI' --limit 20
+tentacles sources fetch           # 并发抓取全部启用的信息源
+tentacles items list --since 24h  # 查看最近 24 小时入库的条目
 ```
 
-## 冷归档：单活跃热库 + 按年冷库
+### 2. 构建前端与启动 Web 服务（可选）
 
-`data/tentacles.db` 始终是唯一的在线库——7 天深度聚类、30 天反馈回溯、跨月原位更新与外键完整性都不拆分。
-超过 `app.storage.hot_retention_days`（默认 365 天）的历史条目可以按发布年份搬进 `data/archive/tentacles-YYYY.db`
-（每个冷库自带 `items_fts`），热库只留下极窄的去重墓碑 `archived_identities`，因此归档后旧文不会被任何源重新当成新条目：
+要求 Node >= 22.12、pnpm 10.33：
 
 ```bash
-# 空跑：只统计会迁出与豁免的条目，不改任何文件
-tentacles --json storage archive --dry-run
-# 正式归档（先写冷库并校验，再在一个热库事务里写墓碑、删冷行），并回收空间
-tentacles --json storage archive --before 365d --vacuum
-# 跨年检索：热库 + 全部冷库归并分页，archive_year 标注年份
-tentacles --json items search 'iPhone' --include-archive
+cd frontend && pnpm install --frozen-lockfile && pnpm build && cd ..
+tentacles serve                   # 托管前端、REST API 与内置调度器（--no-scheduler 关闭后台轮询）
 ```
 
-仍有未决错误、处于反馈窗口内、或最近 30 天还有更新的条目会自动留在热库；中途被打断时热库要么全有要么全无，
-重跑幂等。配置与运维细节见 [配置手册](docs/manual/user/configuration-and-models.md#5-存储冷热分层与年度冷归档appstorage)
-与 [Agent CLI 手册](docs/manual/agent-cli/operations-reference.md#7-存储状态索引重建与冷归档storage)。
+访问 `http://127.0.0.1:8000`；前端开发调试可运行 `tentacles serve --no-scheduler` 并在 `frontend/` 下启动 `pnpm dev`。
 
-## RSS / Atom 与 Web list / llm 原位更新（可选）
+---
 
-每个源默认 `update_existing: false`，省略时保持原有去重、网络请求和模型调用行为。
-目前支持 RSS / Atom 和 Web `mode: list` / `llm`；Web page 及 IMAP 设为 true 会明确报配置错误。
+## 全局配置与存储（`config/tentacles.yaml`）
+
+默认配置文件为 `config/tentacles.yaml`，可通过 `--config/-c PATH` 或环境变量 `$TENTACLES_CONFIG` 覆盖：
+
+- **环境变量插值**：配置值支持 `${VAR}` 或 `${VAR:-默认值}`。启动时依次读取项目根目录与配置文件所在目录的 `.env`，**不会覆盖进程已有环境变量**。密钥一律放在 `.env` 中，勿写入 YAML（注意 `TENTACLES_CONFIG` 与 `TENTACLES_JSON=1` 须作为真实环境变量设置，写在 `.env` 内不生效）。
+- **相对路径基准**：`app.data_dir`、`app.reports_dir`、`app.storage.archive_dir`、`personas.*.profile_file`、`processor.prompt_file`、`server.static_dir`、`browser.scripts_dir` 均相对于该 YAML 所在目录解析。
+- **配置校验**：`tentacles config check` 只读核验 YAML 结构、插值、ID 唯一性、模型种类匹配、Jinja 模板与已有数据库中的 Persona 名称，不修改原库、不联网、不创建目录或调度任务。
 
 ```yaml
-sources:
-  - id: example
-    type: rss
-    url: https://example.com/feed.xml
-    schedule: 30m
-    update_existing: true
+app:
+  timezone: Asia/Shanghai        # 展示与 5 段 cron 计算使用的 IANA 时区；SQLite 内一律存 UTC
+  data_dir: ../data              # SQLite 热库目录（tentacles.db）
+  reports_dir: ../reports        # Markdown 报告落盘目录（文件权限 0600）
+  storage:
+    hot_retention_days: 365      # storage archive 默认截止天数
+    archive_dir: ../data/archive # 按自然年归档目录 tentacles-YYYY.db（不可设为 data_dir 或其父目录）
 ```
 
-RSS 开启后，仅 Feed 本轮再次提供、未被 `max_age_days` 排除的条目可原位覆盖：
-先按同源稳定外部 ID（含已确认别名）定位标准 Item；未命中时，仅按本轮实际观察到的规范化 URL
-回退到同源唯一标准 Item。追踪参数和 fragment 不参与 URL 身份，不按指纹或近似标题寻找更新对象。
-缺失字段保留旧值，明确空值可清空；比较完整正文及下游实际字段，而非只比较截断摘要。
-外部 ID A → B → A 保留原 Item ID、原 external_id、首次抓取时间及反馈/消费关系，
-新稳定 ID 作为同源别名保存；仅身份变化仍计重复，不续窗口、不失效评分。
-同批每个目标只采用首条有效观察（包括无内容变化的观察和新插入的目标），未知无标题观察不占位。
-跨源 URL/指纹/近似标题仍仅用于新增去重，不会覆盖赢家；已抑制或只有观察记录的身份不会复活。
-外部 ID 与 URL 指向不同 Item、同源 URL 命中多个标准 Item，或目标 URL 被另一标准 Item 占用，
-均明确报 Conflict 并回滚整个源批次（包括别名、内容、评估、计数和游标），不自动合并或迁移来源。
-只保留最新状态，不保存正文快照。关闭更新时沿用原有去重，IMAP/page 不参与此身份回退。
-条件 GET、304 和发布时间上限不变，不额外请求详情、评论或主动重访历史条目。
+### 冷热存储不变量
 
-Web list / llm 同样在源级设置 `update_existing: true`，只刷新**本轮列表再次发现**的本源标准 Item，
-不遍历历史、不新增独立监控任务，也不清空已见缓存。被抑制、仅有观察身份而没有本源 Item、
-或其他源已保存的文章继续跳过，包括详情请求；页面版本身份不参与普通文章 URL 判重。
-`fetch_content: true` 每轮会为再次发现的可更新条目**额外请求详情**，即使列表文本不变，
-也比较完整正文（包括摘要截断之后的变化）。`fetch_content: false` 仅更新实际提供的列表字段：
-缺少摘要/日期保留旧值，不以列表摘录覆盖旧全文。任一详情失败则整轮不写条目或游标，可稳定重试。
-Web llm 缓存当前已校验的有界条目描述，不缓存详情全文；首次开启或旧游标升级可能付费抽取一次。
-有效输入、完整有效链接集合及模型/抽取配置不变时，后续额外抽取调用为零；仅 API key 轮换不失效。
-缓存命中且开启详情仍会请求本轮存在的可刷新详情；不开详情则跳过写入，不刷新时间或重新评分。
-链接移除后不再重访；源没有再次提供内容时无法更新，模型未抽取的链接也不会凭历史记录补猜。
-开启/关闭方法、空值规则与详情并发/凭据隔离见 [信息源配置手册](docs/manual/user/sources.md)。
+- `data/tentacles.db` 是唯一的在线热库；超过保留期的条目按发布时间（缺失时按抓取时间）自然年迁入 `data/archive/tentacles-YYYY.db`（各自带 `items_fts` 索引）。
+- 迁出时热库保留窄表 `archived_identities` 去重墓碑与 `source_seen_ids`，与热行遵循同一套去重规则（外部身份总是判重；URL 仅 `standard` 判重；指纹仅 `standard` 且非 email 判重），旧文不会复活。
+- 仍有未决错误、处于 `persona_update.feedback_window` 活跃反馈窗口内、或最近 30 天有更新的条目自动豁免留在热库；归档采用两阶段提交，可幂等重跑。
 
-内容变化后，条目保留 ID、首次 `fetched_at` 和消费关系，设置 `updated_at` 并使旧评分失效。
-pipeline 的过滤、手动重评、待报告计数和排序按 `updated_at`（否则 `fetched_at`）进入窗口；
-旧帖更新也可重新评分，**可能产生模型费用**，但同一 pipeline 已消费的条目不再次报告。
-不同 pipeline 独立消费；纯元数据计数变化或再次遇到相同内容不会续窗口或触发重评。
-Feed 保持发布时间优先的排序和时间筛选，列表/详情显示更新时间及“已更新”，搜索读取最新字段。
-抓取及 tick 的 `updated` 默认 0；成功交付存储的条目满足 `fetched = new + updated + dup`。
-评分或报告生成期间内容改变会导致修订冲突，Run 显示失败并保留已知用量/费用，下轮可重试。
+---
 
-改回 `update_existing: false` 或删除该配置即可关闭；不会回滚已保存的新内容。
-旧报告 Markdown、反馈及消费记录不变，但关联 Item 显示最新原文，无法恢复生成旧报告时的原文。
-数据库自动迁移到 schema 13：在 schema 12 内容修订之上增加同源身份别名映射，不改写已有外部身份；
-旧 Item 的 `updated_at` 为 null，内容/评估输入修订初始为 1；
-Persona、报告、反馈、消费、游标和身份记录保持不变。迁移前请做一致的 SQLite 备份（含 WAL 已提交数据）。
-不提供降级迁移；要回退旧程序需恢复迁移前备份，否则旧版按列数写入 evaluations 会失败。
-数据库事务失败会回滚本批内容/评分/游标，报告新文件尽力清理；文件系统和 SQLite 仍非崩溃原子。
+## 命名模型与五阶段路由（`models` / `defaults.models`）
 
-## IMAP 邮箱
+纯 RSS + `keyword` 过滤场景可完全省略 `models` 与 `defaults`。一旦配置 `models`，必须在 `defaults.models` 中为以下 **5 个阶段**指定已存在且 `kind` 匹配的默认模型：
 
-示例配置的 `inbox` 默认 `enabled: false`，不会因升级自动连接邮箱。填好 `.env` 中的
-`IMAP_HOST`、`IMAP_USERNAME`、`IMAP_PASSWORD` 后，可手动抓取；设置 `enabled: true`
-后由 `tick` 按该源的 `schedule` 自动抓取。密码只通过环境变量／`.env` 注入，不写入游标或日志。
+| 阶段 (`stage`) | 要求 `kind` | 用途与触发时机 |
+| :--- | :--- | :--- |
+| `extract` | `chat` | `type: web` + `mode: llm` 网页智能抽取（可在 source 上用 `model:` 覆盖） |
+| `filter` | `chat` | `type: semantic`（或旧写法 `llm`）使用 `chat` 模型时的默认模型（可覆盖） |
+| `decision` | `decision` | `type: semantic`（或旧写法 `decision`）使用 `decision` 模型时的默认模型（仅 OpenRouter JEV） |
+| `persona` | `chat` | `persona set` 修改画像文本自动抽取 5–20 个标签，以及 `persona evolve` 演化 |
+| `process` | `chat` | Pipeline 处理器（`digest` / `deep` / `summarize`）生成报告（可覆盖） |
 
-```sh
-tentacles sources fetch inbox
-tentacles items list --source inbox
-tentacles items show ITEM_ID
-```
+### 模型字段
 
-- **Gmail**：本客户端不使用“通过 Google 登录”，需在账户允许时启用两步验证并创建
-  **应用专用密码**，不要填写日常账户密码。工作／学校账户、Advanced Protection 等策略可能禁止此功能。
-- **Outlook.com / Hotmail**：微软已从 **2024-09-16** 起关闭 Basic Authentication，当前 IMAP
-  需要 OAuth2；应用专用密码不能绕过该限制。本期仅实现 IMAP LOGIN，OAuth2/XOAUTH2 不在范围内，
-  因此暂不支持这些账户。其他允许密码或应用专用密码的 IMAP 服务器可按其实际策略配置。
-- 服务商依据：[Google 应用专用密码](https://support.google.com/accounts/answer/185833)、
-  [Microsoft Outlook 现代认证要求](https://support.microsoft.com/en-us/support/known-issues/modern-authentication-methods-now-needed-to-continue-syncing-outlook-email-in-non-microsoft-email-ap)。
+| 字段 | 说明与默认值 |
+| :--- | :--- |
+| `provider` | `openai`（默认，兼容 DeepSeek / Moonshot / Ollama / vLLM）、`anthropic`、`openrouter` |
+| `kind` | `chat`（默认）或 `decision`（仅限 `provider: openrouter`） |
+| `model` | 服务商侧真实模型 ID（必填） |
+| `base_url` | API 根路径（如本地 Ollama `http://localhost:11434/v1`）；禁止携带凭据、query 或 fragment |
+| `api_key` | 支持为空；仅实际发起调用时检查非空。本地无鉴权服务填任意非空占位值（如 `local`） |
+| `temperature` / `max_tokens` | `temperature` 可选 `0~2`；`max_tokens` 默认 `4096`（OpenAI 接口若在 `extra_body` 设了 `max_completion_tokens` 则省略 `max_tokens`） |
+| `timeout` / `retries` / `concurrency` | 默认超时 `60`s、重试 `2` 次；`decision` 并发 worker 上限默认 `8` |
+| `extra_body` | 合并进请求 JSON 的扩展参数；禁止覆盖 `model / messages / system / stream / state / questions` |
 
-`host`、`username`、`password` 配置连接；`ssl` 默认 true，启用时校验证书和主机名，
-`port` 默认随 SSL 取 993／143（显式端口优先），`timeout` 默认 30 秒。
-`ssl: false` 不会自动升级 STARTTLS，用户名和密码可能明文发送，**只应在可信本地连接使用**。
+- **重试与脱敏**：对 `408 / 409 / 425 / 429`、所有 `5xx`、网络错误和超时自动重试（优先遵守 `Retry-After`，上限 60s，否则指数退避上限 30s），不跟随 HTTP 重定向。所有模型 `api_key` 均全局脱敏为 `[REDACTED]`。
+- **探测**：`tentacles models list` 仅查看密钥是否配置；`tentacles models test <NAME>` 发起真实轻量请求（可能产生微量费用）。
 
-`folders` 默认 `[INBOX]`，支持含空格、引号和非 ASCII 字符的文件夹名。每个文件夹分别保存
-UIDVALIDITY 和最后处理 UID；首次、UIDVALIDITY 或账户身份变化时按 `initial_days`（默认 30）搜索，
-之后仅处理更大的 UID。按 UID 升序处理，所有文件夹合计最多 `max_fetch`（默认 100）个 UID，
-剩余邮件留到下一轮。文件夹按配置顺序处理；排除的发件人和期间被删除的邮件也消耗处理名额并推进游标。
-附加的 `search`（默认 `ALL`）直接与日期／UID 条件组合，例如 `UNSEEN` 或 `FROM "name@example.com"`。
-`exclude_senders` 按 From 中完整邮箱地址不区分大小写精确匹配，不按显示名或子串误排除。
+---
 
-文件夹以只读方式选择，正文使用 `BODY.PEEK[]`；不标已读、不移动、不删除、不 expunge。
-主题缺失用 `(no subject)`，发件人与 MIME 标题会解码，日期统一为 UTC；外部 ID 优先使用 Message-ID，
-缺失时采用“原始文件夹名:UIDVALIDITY:UID”。正文优先纯文本，否则 HTML 转文本；附件及附带邮件的正文
-不进入信息流，只记录附件名。清理常见 `>` 引用、回复头及 HTML quote 容器后，正文和摘要分别截断到
-`max_body_chars`（默认 20000）、`max_summary_chars`（默认 2000）。邮件不按内容指纹或近似标题去重，
-因此内容相同、Message-ID 不同的两封邮件都能保留。认证／连接等失败按 upstream 处理，错误不回显密码、
-服务端响应或邮件内容；像其他来源一样，单个失败以抓取结果的 `status=error` 返回，不阻断其他源。
+## 信息源配置（`sources` & `browser`）
 
-## 网页 list / page / llm 信息源
+通用必填字段：`id`（全局唯一）、`type`（`rss` \| `imap` \| `web` \| `browser`）、`schedule`；可选 `name`、`enabled`（默认 `true`；`false` 跳过定时 `tick`，显式 `sources fetch <ID>` 仍可执行）、`update_existing`（默认 `false`）。
 
-没有 RSS 的站点可以配置 `type: web`：list 用 CSS 选择器提取文章，可选并发抓详情和原位更新；page 保存内容版本，
-内容变化时生成带增删行差异的条目。同 URL 的页面版本可独立入库，不会被普通文章判重吞掉。
-示例 `web-list` / `web-page` 默认关闭，不会因升级新增网络请求。
+- **统一入库规则**：正文 `content` 截断至 **1000 units**（1 个 CJK 字符或 1 个连续非 CJK 词元计 1 unit，`content_truncated` 标记截断），`summary` 不超过 **300 units**；非邮件条目必须保留合法 `http(s)` 的 `url` 或入口 `page_url`；讨论页链接写入 `meta.comments_url`。
 
-```sh
-tentacles sources fetch web-list web-page
-tentacles items list --source web-page
-tentacles items show ITEM_ID
-```
+### 1. RSS / Atom（`type: rss`）
+- 字段：`url`（必填）、`max_age_days`、`headers`、`proxy`、`timeout`（默认 30s）。
+- 自动处理条件 GET（`ETag` / `Last-Modified` -> `304`）；执行多级去重（同源 `external_id`、规范化 URL 剥离追踪参数、标题+摘要指纹及 48h 跨源近似标题去重）。
 
-使用前替换 URL 与选择器；属性写法、500-id 缓存、Cookie 隔离和页面版本身份见 [信息源配置手册](docs/manual/user/sources.md)。
-仅支持静态页面；非 2xx（含重定向）会失败并保留旧游标。
-杂乱页面还可用 `mode: llm`，由 extract 阶段模型从有界“文本 + 链接”中抽取；编造链接被丢弃。
-`web-llm` 示例默认关闭，启用后会发送页面内容并可能产生费用；严格 JSON、缓存与计费规则同见协议。
+### 2. IMAP 邮箱（`type: imap`）
+- 字段：`host`、`port`（默认 SSL `993` / 非 SSL `143`）、`ssl`（默认 `true` 严格校验证书；`false` 不升级 STARTTLS 仅限可信本地桥接）、`username`、`password`、`folders`（默认 `[INBOX]`）、`initial_days`（默认 30）、`max_fetch`（默认 100，所有文件夹合计）、`search`（默认 `ALL`）、`exclude_senders`、`max_body_chars`（20000）、`max_summary_chars`（2000）、`timeout`（30）。
+- **认证要求**：Gmail 须启用两步验证并使用**应用专用密码**；Outlook.com / Hotmail 已停用 Basic Auth 强制 OAuth2，当前仅支持 `IMAP LOGIN` 暂不适用。
+- **只读语义**：始终以只读模式和 `BODY.PEEK[]` 读取，绝不标记已读、移动或删除；按文件夹独立维护 `UIDVALIDITY + 最后 UID` 游标；优先取 `text/plain`，清理引用块并仅记录附件名；不做指纹/近似标题去重；单封坏信跳过并推进游标。
 
-## 有界面浏览器信息源（`type: browser`）
+### 3. Web 网页源（`type: web`）
+仅处理静态 HTTP `2xx`（不执行前端 JS、不跟随 `3xx` 重定向）；自定义 `headers` / `cookies` 仅发往同源，跨域抓取详情时自动剥离凭据：
+- **`mode: list`**：必填 `url` 与 `selectors`（`item`、`title`、`link`，可选 `summary`、`date`；支持 `选择器@属性` 与 `@属性`）；可选 `fetch_content`（提取 `article -> main -> body`）、`concurrency`（1–16，默认 4）、`on_detail_error`（`fail_batch` 整批回滚并落账本 \| `record_and_skip` 单篇落账本下轮重试）。
+- **`mode: page`**：`url` + 可选 `selector`（匹配 0 个节点时报错保留旧快照防误判）、`emit_baseline`（默认 `true`）；区域文本变化时生成 `identity_policy="revision"` 的 `unified_diff` 版本条目。
+- **`mode: llm`**：使用 `defaults.models.extract`（可用 `model:` 覆盖）和 `max_input_chars`（1–200000）；丢弃页面内不存在的幻觉链接并记账；页面有效文本、链接集合及抽取模型配置未变时命中持久游标缓存（零模型调用）。
 
-静态抓取拿不到的动态流与登录态页面，可以用 `type: browser`：在**你自己已登录的可见 Chrome** 里新建一个隔离工作 Tab，
-确定性重放仓库内的固化 Playwright 脚本，把文字条目转成 `kind: "browser"` 入库。**严格禁止无头模式**——
-配置里的 `headless: true` 会直接报错，运行时也没有任何无头分支。
-
-```bash
-# 1) 先用手动启动的 Chrome 开好调试端口（用你日常的 Profile，正常登录目标站点）
-"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
-  --remote-debugging-port=9222 --profile-directory="Profile 1"
-# 2) 示例源默认关闭，显式抓取即可（脚本在 scripts/browser_sources/reddit-localllama.py）
-tentacles sources fetch reddit-localllama
-tentacles items list --source reddit-localllama
-```
+### 4. 有界面浏览器源（`type: browser`）
+适用于需登录态或动态渲染站点。在真实可见 Chrome 中开隔离工作 Tab 重放 `scripts/browser_sources/<id>.py`；**严格禁止无头模式**（`headless: true` 直接报错）。
 
 ```yaml
 browser:
-  cdp_url: http://127.0.0.1:9222          # connect_over_cdp 附着的调试端点
-  webbridge_url: http://127.0.0.1:10086   # 冷启动探索的一次性工具桥接地址（仅回环）
-  auto_launch: false                      # 端口无人监听时是否自动拉起有界面 Chrome
-  default_profile: Default                # 默认 Chrome Profile，源级 chrome_profile 可覆盖
-  scripts_dir: ../scripts/browser_sources # 固化脚本目录（相对本文件）
-  pi:                                     # 冷启动探索、提炼与重放自愈的 Agent 模型
+  cdp_url: http://127.0.0.1:9222          # Chrome Remote Debugging 端点（须带显式端口）
+  webbridge_url: http://127.0.0.1:10086   # 冷启动探索的一次性本地回环桥接地址
+  auto_launch: false                      # true 且端口无监听时以有界面模式拉起目标 Profile
+  chrome_executable: null                 # 可选 Chrome 可执行文件路径
+  chrome_user_data_dir: null              # User Data 根目录（auto_launch 时必填）
+  default_profile: Default                # 默认 Chrome Profile 目录名（禁止路径穿越或前导 '-'）
+  scripts_dir: ../scripts/browser_sources # 固化脚本目录，源级 script_path 须位于其内
+  pi:
     binary: pi
     model: anthropic/claude-sonnet-4-6
-    reasoning_level: high
+    reasoning_level: high                 # off | minimal | low | medium | high | xhigh | max
     timeout: 300
-  pr:                                     # 提炼/自愈脚本的评审分支与 PR
-    enabled: true
-    base_branch: master
+  pr:
+    enabled: true                         # false 时仍提交到本机评审分支，只跳过 push 与 gh
+    base_branch: master                   # PR 目标分支（永不直接推送）
     branch_prefix: auto/browser-source-
     labels: [ready-for-human]
-
-sources:
-  - id: reddit-localllama
-    type: browser
-    enabled: false
-    schedule: 1h
-    page_url: https://www.reddit.com/r/LocalLLaMA/new/
-    chrome_profile: Profile 1
-    on_detail_error: record_and_skip      # fail_batch | record_and_skip
-    max_items: 25
-    timeout: 60
 ```
 
-- **复用登录态、不抢窗口**：附着后先用 `chrome://version` 核验实际 `--profile-directory`（不匹配或带 `--headless` 立即报错），
-  同一 `(cdp_url, profile)` 串行执行；无论成功、异常、超时还是 Ctrl-C，都只关闭本次新建的 Tab，绝不关闭你的 Chrome。
-- **固化脚本契约**：`scripts/browser_sources/<id>.py` 实现
-  `async def extract(page, *, page_url, max_items, timeout_ms=30_000) -> BrowserExtractOutput`；
-  加载前经 `ast.parse` 静态导入白名单门禁，禁止 `os` / `subprocess` / `socket` / `open` / `eval` / `__import__` 等。
-  路径必须落在 `browser.scripts_dir` 内，`../../` 越界在 `config check` 阶段即报错。
-- **失败可排障**：重放超时/脚本失败/返回 0 条都会写入 `run_errors` 的 `browser_replay` 阶段，
-  带上失败瞬间的 `current_url`、`page_title`、精简 A11y 快照与脚本栈帧（`errors show`）。
-- **冷启动自动提炼**：当 `scripts/browser_sources/<id>.py` 还不存在时，本轮按 `browser.pi`（`binary` / `model` /
-  `reasoning_level` / `timeout`）拉起受控 `pi --mode rpc` 探索页面，把每一步动作与页面决策上下文写入
-  `data/trajectories/<id>/<run_id>.jsonl`（本地、脱敏、不入 Git），再从轨迹提炼固定脚本；提炼出的脚本必须先通过
-  同一套 AST 门禁**且在真实工作 Tab 上独立试跑成功**（最多一次修正）才会写入仓库，选择器摘要写到
-  `data/browser_sources/<id>.meta.json`。`stats.browser_mode = "distill"` 时报告 `trajectory_path` /
-  `script_path`，Token 与费用归入当轮 Run；未通过则不写脚本并在 `run_errors` 的 `browser_distill` 阶段留现场。
-- **重放故障自愈**：报错、超时或返回 0 条时，自动唤醒**一次**受控 `pi --mode rpc` 自愈会话（旧脚本 + 报错栈 +
-  本地 meta 选择器摘要 + 实时页面快照，可在真实工作 Tab 上现场探测），修复后的脚本必须先通过同一套 AST 门禁
-  **且在真实工作 Tab 上独立试跑成功**（最多 2 个候选）；通过则原子覆盖本地脚本、本轮条目正常入库
-  （`stats.browser_mode = "heal"`），否则**熔断**：旧脚本一字不改、不提 PR，记 `run_errors`
-  （`phase: browser_heal`, `error_code: pi_heal_exhausted`）并把本轮 Run 记为 `failed`，已花的 `pi` 费用照旧保留。
-- **共同候选生命周期**：冷启动、显式刷新与自愈共用代码提取、最多一次纠正、双门禁及临时文件回收；
-  只有实际通过静态门禁与独立试跑的同一份脚本及输出才能安装。冷启动保留探索后的同一 `pi` 会话，
-  自愈保留每轮实时探查 Tab（先释放再独立试跑）。安装前拒绝/取消不改旧脚本和 meta；脚本原子替换与
-  meta 写入不是跨文件事务，安装 I/O 故障会报错而非继续发布。AST 静态筛查不等于已证明安全的 Python 隔离器。
-- **隔离 worktree 自动提 PR**：首次提炼或自愈通过的脚本在本地生效后，还会在系统临时目录的一次性 `git worktree` 中
-  **只提交 `<scripts_dir>/<source_id>.py` 这一个文件**到 `auto/browser-source-<id>`，再 `gh pr create`（已有开放 PR 则追加
-  commit + `gh pr comment`）。PR 固定打上 `ready-for-human` 等配置标签且正文声明“机器生成、需人工 review”；
-  绝不强推、绝不直接推 `base_branch`、绝不提交 `data/` 下的轨迹与 meta。`gh` 未登录/离线时只软降级：
-  脚本与条目照常保留，`stats.pr_status = "error"` 并记 `git_or_pr_failed`（成功时报告 `pr_status` / `pr_url`）。
-  `browser.pr.enabled: false` 时仍会把脚本提交到**本机**评审分支（不 push、不调 `gh`，`pr_status = "disabled"`）。
-- **主动重提炼**：`tentacles --json sources distill <ID>`（等价 `POST /api/sources/<id>/distill`）跳过“脚本已存在就重放”，
-  强制再探索一遍；与评审分支内容一致时为 `pr_status = "unchanged"`，因此重复执行幂等。
-- 完整字段说明见[信息源配置手册](docs/manual/user/sources.md#5-有界面浏览器源type-browser)与
-  [脚本契约](scripts/browser_sources/README.md)，排障见 [Agent CLI 运维速查](docs/manual/agent-cli/operations-reference.md)。
+- **源级字段**：`page_url`、`task`（冷启动探索提示）、`chrome_profile`、`script_path`、`max_items`（1–200，默认 25）、`timeout`（默认 60s）、`on_detail_error`（仅控制冷启动失败：`record_and_skip` \| `fail_batch`）、`pi`（源级覆盖）。
+- **运行时隔离与生命周期**：按 `(cdp_url, profile)` 串行获取焦点；通过 `chrome://version` 核验真实 Profile 且禁用该 Tab 的 HTTP 缓存；退出时仅关闭工作 Tab。缺少脚本时走受控 `pi --mode rpc` 探索与提炼（轨迹写入 gitignored 的 `data/trajectories/`），重放异常/0 条时触发一次 `pi` 自愈（最多 2 候选）；脚本须通过 AST 静态门禁与真实试跑门禁才落盘，并按 `browser.pr` 在系统临时目录的隔离 `git worktree` 中单文件提交并开/更新评审 PR（软降级不阻断采集；命中凭据扫描则中止推送）。
 
-## 模型配置
+### 5. 原位更新（`update_existing: true`）
+支持 **RSS / Atom**、**Web `list` / `llm`** 与 **`type: browser`**（IMAP 与 Web `page` 设为 `true` 报错）：
+- 仅当本轮源列表再次出现该本源标准条目时才核验更新（RSS 先按同源稳定外部 ID/别名定位再回退规范化 URL；Web/Browser 按规范化 URL 定位；身份冲突整批回滚）。
+- `fetch_content: true` 会重新抓取详情并与 `meta.full_content_sha1` 全文哈希比对；发生实质变更时保留 `id` 与首次 `fetched_at`，更新 `updated_at`、递增 `content_revision` 并使旧评分失效，按 `updated_at` 重新进入 Pipeline 窗口重评，但**同一 Pipeline 已消费过的条目不会重复生成报告**。
 
-示例提供 `fast`（DeepSeek）、`smart`（Claude Sonnet）、`max`（Claude Opus）和 `decision`（JEV）。
-在 `.env` 中按需填写 key，然后运行 `tentacles models test fast`；这会真实调用模型并可能产生费用。
-注册表懒加载，不会在启动、检查配置或列出模型时请求服务商。
+---
 
-纯 RSS 配置可以完全省略 `models` 和 `defaults`。一旦配置模型，就必须在 `defaults.models`
-为 `extract`、`filter`、`decision`、`persona`、`process` 五个阶段指定已存在、种类匹配的默认模型。
-`api_key` 可以为空；只有真正调用模型时才报错。`models list` 仅显示 key 是否配置。
-本地 Ollama/vLLM 等无鉴权服务也请填写非空占位 key，例如 `local`。
-
-OpenAI 兼容接口使用 `provider: openai` 和服务的 API 根路径 `base_url`（如 `http://localhost:11434/v1`）；
-Anthropic 使用 `provider: anthropic`，OpenRouter 用 `provider: openrouter`。
-详细字段、重试规则和 JSON 输出见 [基础配置与命名模型](docs/manual/user/configuration-and-models.md) 与 [Agent CLI 手册](docs/manual/agent-cli/README.md)。
-
-## Persona 与兴趣标签
-
-配置里的 `personas` 是初始种子，每项的 `profile`（内联文本）和 `profile_file`（UTF-8 文件）二选一。
-同名 persona 已存在时，启动会忽略种子内容及文件；数据库是唯一来源。启动导入不调用模型。
-
-```sh
-tentacles persona list
-tentacles persona show default
-tentacles persona set default --file ./my-interests.md --note "调整优先级"
-tentacles persona set default --include 机器人 --remove-exclude 科学 --note "更新关键词"
-tentacles persona set default --hard-exclude 限时特惠 --remove-hard-exclude 扫码加群 --note "收紧硬排除"
-cat ./my-interests.md | tentacles persona set work --stdin --skip-tags
-tentacles persona history default
-tentacles persona rollback default 1 --note "恢复初始方向"
-tentacles persona export default > default-snapshot.yaml
-```
-
-`set` 修改 profile 时使用 `persona` 阶段的模型抽取 5–20 个按优先级排序的标签；
-已有标签会提供给模型，语义相同应保留旧名。模型失败或标签无效时，profile 修改仍会保存，
-旧标签保持不变，版本和运行记录中标记降级。`--skip-tags` 明确禁止本次模型调用；
-仅修改关键词/备注或 profile 未变化时也不会调用模型。
-
-关键词去重/删除不区分大小写（Unicode casefold），保留最早的拼写和顺序。
-每次编辑写成新版本；回滚同样追加版本。并发的纯关键词编辑会合并。提供 profile 且未跳过标签时，
-若提交前 persona 已被修改（包括内容相同的快捷路径），旧请求返回 `conflict`，请刷新后重试。导出的是完整版本快照，不是只有 profile 的文本，也不会直接覆盖任何文件。
-
-## 点踩 → 提案 → 应用
-
-```sh
-tentacles feedback ITEM_ID --dislike --note "减少无依据的炒作"
-tentacles --json persona evolve default --instruction "多关注机器人" --dry-run > proposal.json
-cat proposal.json                            # 检查 summary、diff、标签与关键词
-tentacles --json persona apply --proposal proposal.json
-# 已确认可以直接应用时，也可以通过 JSON 管道：
-tentacles --json persona evolve default --instruction "多关注机器人" --dry-run | tentacles --json persona apply --proposal -
-tentacles pipelines filter daily-tech --reevaluate --since 7d
-```
-
-`feedback` 未指定 persona 时，只有一个就使用它，否则使用 `default`；未知条目或 persona 返回 `not_found`。
-`evolve` 的名称默认 `default`，至少需要非空指令或有效反馈之一；不加 `--dry-run` **直接应用**。
-模型使用 `defaults.models.persona`（示例设为 `max`），尊重已有配置，不会擅自升级模型。
-预览仍会调用模型并可能产生费用，但不创建版本、运行记录或任何数据库写入。
-CLI 预览在内存中的数据库快照运行，迁移、种子导入和调度初始化的改动仅保存在内存，
-不更新原库的 schema 或数据。读取既有 WAL 数据库时，SQLite 可能创建或更新 `-wal` / `-shm`
-协调文件；这些文件可能正被其他进程使用，预览不会主动删除它们。没有原库时不会创建数据目录。
-应用不再次调用模型；基准版本已被其他修改替换时返回 `conflict`，请刷新并重新生成提案。
-成功应用追加 `source=llm` 的新版本，备注是变更摘要；无效模型输出不会修改 persona。
-
-`persona_update` 可配置 `feedback_window`（默认 `30d`）、`max_feedback`（默认 100，范围 1–1000）
-和 `max_profile_chars`（默认 12000，上限 50000）。仅选窗口内、不在未来、严格晚于最近 LLM
-版本创建时间的反馈，按时间与 id 倒序取上限条数；手动编辑或回滚不会重置这个界线。
-反馈条目标题、摘要与备注作为有界的证据传入，不视为指令。演化保留结构、优先级与旧标签名，
-严格执行指令，不因单条反馈过度泛化；返回的新 profile、5–20 个标签、关键词和摘要均会校验。
-
-`--since` 只可用于 `--reevaluate`，接受时长或 ISO 时间，覆盖 pipeline 的默认窗口起点
-（按条目**抓取时间**选取，截止当前时间）。仅清除该 pipeline 当前 persona 版本在窗口内的评估；
-不会清除旧版本评估或消费账本，因此重新打分或 persona 改版也不会重复报告已消费的条目。
-
-## Keyword 过滤与 digest 日报
-
-示例配置声明了 `daily-tech` pipeline：使用 default Persona、最近 24h **抓取**的条目，
-先用 keyword 级联筛选，再选择分数最高的最多 60 条生成日报。
-
-```sh
-tentacles pipelines filter daily-tech
-tentacles items list --pipeline daily-tech --passed
-tentacles pipelines run daily-tech       # 显式调用 process 模型，可能产生费用
-tentacles reports list --pipeline daily-tech
-tentacles reports show REPORT_ID
-```
-
-`tick` 按顺序执行全部到期任务：先并发抓取，再逐条只过滤，最后逐条运行 pipeline。
-重叠调用中遇到来源 busy 时，其依赖的 pipeline 会延期而不推进时间，避免提前空跑漏报；无关 pipeline 仍继续。
-每条启用的 pipeline 按 `schedule` 处理；可选 `filter_schedule` 提供更频繁的只过滤轮次。
-`pipelines list` 和 `scheduler status` 显示下次执行时间与当前待报告数量。
-**注意：`tick` 现在可能调用配置中的模型并产生费用。** 关闭自动运行可设置 pipeline `enabled: false`；
-只想抓取可用 `sources fetch`。
-过滤和运行各有独立的持久化锁；运行遇到过滤锁被占用时，会直接处理之前已通过的条目。
-消费记录独立于 Persona 版本，同一 pipeline 中的条目只消费一次。报告失败时保留未报告状态，修复问题后可以重试。
-报告存入 SQLite，同时按 pipeline 写入 `reports_dir` 下的 Markdown 文件（新文件默认私有权限）。
-
-关键词在标题和摘要中不区分大小写匹配：命中 `hard_exclude` 无条件 0 分淘汰；只命中软 `exclude` 也是 0 分；
-但软 `exclude` 与正向词（`include` 或兴趣标签）同时命中时给 0.55 分转交下一关语义精判（`guard_ambiguous_exclude: false` 可关闭）；
-仅正向命中给 1.0 分（配置了 `accept_above: 1.0` 时）或 0.85 分，均未命中 0.5 分。
-每条评估都记录实际命中的具体词项（`match_points`）。
-可启用有执行时限的正则匹配。级联保留每阶段分数、理由及统计；最后阶段出错的条目不缓存，之后可以重试。
-`items list --pipeline ... --rejected` 查看淘汰结果；`items show ID` 包含各 pipeline 的最新评估。
-`items list --persona ... --min-score ... --topic ...` 可不指定 pipeline 直接按画像、匹配分与主题筛选。
-
-`pipelines filter ID --reevaluate` 会删除窗口内当前 Persona 版本的已有评估并重算，
-消费账本不会被清除，不会让已报告条目重新进入报告。
-`processor.type: none` 不调用模型、不生成文件，但将选中的条目标记为已消费。
-完整参数和自定义提示词格式见 [画像、过滤与报告流水线](docs/manual/user/pipelines-and-personas.md)。
-
-## deep 重大事件深度报道
-
-```bash
-tentacles pipelines run weekly-deep
-tentacles --json pipelines run weekly-deep
-tentacles reports list --pipeline weekly-deep
-```
-
-示例 `weekly-deep` 每周运行，窗口 7 天，使用 `max` 模型，默认关闭。
-手动运行仍可能产生费用。`min_cluster_size`（默认 3）是事件条目数阈值，
-`max_reports`（默认 3）限制每次报道数量；均可配置为 1–500。
-沿用既有标题聚类算法，按事件规模、来源数排序，每个达标事件生成一份
-“深度报道：事件标题”，保留背景、各方说法、数据与疑点、影响与后续及待确认问题。
-
-一次运行可能生成多份报告：`report_id` 是第一份，`stats.report_ids` 列出全部 ID。
-通过过滤、按分数选出的前 `max_items` 条全部标记为已消费，包括未达阈值或超出报道上限的事件。
-整个批次成功才发布报告和消费条目；生成或发布失败则整批保留待重试，已知模型费用仍记入运行记录。
-`none` 处理器完全不生成报告，也按同样的条目上限消费。详见 [画像、过滤与报告流水线](docs/manual/user/pipelines-and-personas.md)。
-
-## summarize 邮件简报与待办
-
-示例 `mail-summary` 使用 `inbox` 邮件源，二者默认关闭。配置好邮箱和 process 模型后，可以手动运行：
-
-```sh
-tentacles sources fetch inbox
-tentacles pipelines run mail-summary       # 会调用模型，可能产生费用
-tentacles reports list --pipeline mail-summary
-tentacles reports show REPORT_ID
-```
-
-处理器每 10 条一批生成结构化简报，再汇总成“需要处理”“仅供参考”“未能解析”三部分。
-待办用勾选框列出，条目保留发件人、时间及原文／邮件定位。格式错误的一批整体进入“未能解析”，
-仍视为已报告；传输或模型调用失败则不消费本次条目，可以重试。设置 `enabled: true` 后会按
-pipeline 的频率自动运行；手动命名调用不受开关限制。确认隐私和费用后再开启。
-
-批次关联规则、截止日期排序、提示词格式和费用语义见 [画像、过滤与报告流水线](docs/manual/user/pipelines-and-personas.md)。
-
-## 语义过滤（`type: semantic`）
-
-Chat 模型与 OpenRouter Decisions（JEV）共用同一个配置块；**跑哪条链路由模型自身的 `kind` 决定**，不必改配置结构。
-旧的 `type: llm` / `type: decision` 写法仍然合法，只会影响省略 `model` 时取哪个默认值。
+## Persona 种子与流水线（`personas` / `pipelines`）
 
 ```yaml
-- type: semantic
-  model: fast               # 可省略：semantic/llm 用 defaults.models.filter，decision 用 defaults.models.decision
-  batch_size: 20            # 每次 20 条一个 batch，也是增量落库检查点（1–100）
-  summary_chars: 160        # 每条附带的短摘要上限，0 表示只发标题（0–1000）
-  reject_below: 0.5
-  accept_above: 0.85
-  # 仅当所选模型 kind 为 decision（JEV）时生效：
-  relevance_type: noul              # 或 score：四级有序量表归一化
-  jev_batch_mode: packed_questions  # 或 windowed_pool：逐条并发
+persona_update:
+  feedback_window: 30d       # 演化采纳最近多久的反馈
+  max_feedback: 100          # 单次演化最多附带反馈条数（1~1000）
+  max_profile_chars: 12000   # 画像文本上限（最高 50000）
+
+personas:
+  default:
+    profile: |               # 与 profile_file 二选一
+      优先关注人工智能与开源软件的实质进展。
+    include: [人工智能, AI, 开源]
+    exclude: [广告, 促销]                # 软排除：同时命中正向词时豁免转交语义关
+    hard_exclude: ['限时特惠', '扫码加群'] # 硬排除：命中即 0 分淘汰
 ```
 
-**Chat 链路**：每批最多 20 条，请求包含有序兴趣标签、画像与编号条目（含 `summary[:summary_chars]`）。
-每条可返回多个 `tag_ids` 与多条具体 `match_points`（兼容旧的单 `tag_id` / 单 `reason`）。
-未返回的编号按 0 分处理，未知编号忽略。脏 JSON 先由共享提取器恢复；无法可靠解析的批次仅拆成两半各重试一次，
-失败半批不会被误存成“无关”，而是写入故障账本（`llm_batch_parse_error`）并交给下一阶段或留待重试。重试仍计入已知用量/成本。
-无兴趣标签时，使用 profile 中非空条目行作为有序兴趣单元；空画像不盲目生成负面评估。
+- **数据库是唯一权威来源**：`personas` 仅在数据库尚无同名 Persona 时作为 `v1 (source=seed)` 导入（不调用模型），后续改动请通过 Web **Personas** 页或 `tentacles persona` CLI 进行。
 
-**JEV 链路**：利用 `/alpha/decisions` 在同一 `state` 上同时回答多道命名题的能力做两步打包，20 条共享同一份 Persona：
-先问 `r_1..r_20` 相关性，只为过线幸存项补问 `t_<编号>` 兴趣标签，Persona 的重复传输从 20 份降到 2 份。
-端点以 HTTP 400/413 拒绝打包体时，该批自动对半重试一次；对半后仍被拒则剩余批次回退 `windowed_pool`
-（固定 `min(concurrency, batch_size)` 个 worker 逐条并发），429 暂停点与 401/403/非瞬时 402 终止信号对整批共享。
-匹配点不再硬编码 `decision relevance`，而是生成可读文本，例如
-`JEV 相关性 0.91，命中优先兴趣「AI与广告算法」（推荐系统、CTR预估与机器学习论文）`；`score` 模式还会写明量表档位。
-默认要求服务方不收集数据，额外 provider 路由偏好不会移除这个默认值；只有显式 `data_collection: allow` 才放宽。
+### 级联过滤（`pipelines[].filters`）
+Pipeline 按 `window`（`COALESCE(updated_at, fetched_at)`）与 `max_items`（1–5000）拉取候选：
+1. 得分 `< reject_below`（默认 `0.5`）立即淘汰；`>= accept_above` 立即通过；介于两者之间转交下一阶段；最后阶段未淘汰即通过（`filters: []` 全部按 `1.0` 通过）；末阶段出错暂不落库并写入故障账本等待重试。
+2. **`keyword`**：合并 Persona 与阶段词表，不区分大小写匹配标题+摘要（`regex: true` 时单条限时 50ms）。命中 `hard_exclude` 得 `0.0`；只命中软 `exclude` 得 `0.0`；软 `exclude` 与正向词同时命中且 `guard_ambiguous_exclude: true`（默认）得 `0.55` 转交下一关；仅命中正向词在 `accept_above: 1.0` 时给 `1.0` 短路，否则 `0.85`；均未命中给 `0.5`。
+3. **`semantic`**（推荐写法；兼容旧 `llm` / `decision`）：根据所选模型自身的 `kind` 自动分派 **Chat 批量链路**（`batch_size` 1–100 默认 20，`summary_chars` 0–1000 默认 160，脏 JSON 自动恢复/折半重试）或 **JEV 链路**（`relevance_type`: `noul` \| `score`，`jev_batch_mode`: `packed_questions` \| `windowed_pool`，`400/413` 自动折半并回退逐条并发，默认 `provider.data_collection = "deny"`）。每完成一个 `batch_size` 分块即在租约保护下增量落库。
 
-**跨阶段汇总**：最终评估合并条目走过所有阶段的正向证据 —— `topics` / `tags` 与 `match_points` 按阶段顺序去重
-（匹配点最多保留 5 条），兼容字段 `reason` 取首条匹配点。Web `Feed` 与 `items list/show` 展示同一份数据。
+### 报告处理器（`pipelines[].processor`）
+按分数倒序选出窗口内已通过且未被本 Pipeline 消费的前 `max_items` 条，**同一条目在同一 Pipeline 中终身只消费一次**：
+- `digest`：日报，强制校验 `[编号]` 引用并追加来源目录。
+- `deep`：周报/事件深度报道，按标题聚类选条目数 `>= min_cluster_size`（默认 3）的前 `max_reports`（默认 3）个事件分别成稿，选中条目一并标记已消费。
+- `summarize`：邮件简报，每 10 封抽结构化待办，输出「需要处理」「仅供参考」「未能解析」三栏。
+- `none`：只标记已消费，不调用模型也不写报告文件。
+- 生成类处理器均支持 `language`（默认 `zh-CN`）、`instructions` 与 `prompt_file`（`[system]` 纯文本 + `[user]` 沙箱 Jinja2，可用变量 `persona` / `items` / `groups` / `tags` / `now` / `pipeline`）。
 
-**每批增量落库**：候选按 `batch_size` 分块推进（纯 `keyword` 流水线按 100 条一块），每完成一块立即在 Run 租约与
-`input_revision` 围栏下写入 `evaluations`。中途取消、断网或崩溃保留已完成分块的结论与已知用量/成本，
-重跑只评估剩余未评条目。
+---
 
-默认示例仍把该阶段保持注释，确认模型和费用后可取消配置注释。`models test decision` 可先用固定 noul 题探测连通性。
+## Web 服务、安全边界与自动调度（`server` / `schedule`）
 
-## 自动抓取
+```yaml
+server:
+  host: 127.0.0.1
+  port: 8000
+  token: ${TENTACLES_SERVER_TOKEN:-}
+  cors_origins: []           # 仅允许显式列出的无尾斜杠 origin
+  scheduler: true
+  poll_interval: 30          # 内置调度轮询秒数
+  static_dir: ../frontend/dist
+```
 
-`schedule` 支持正整数间隔（`30s`、`30m`、`2h`、`1d`、`1w`）、
-`@hourly` / `@daily` / `@weekly`，或五段 cron（分、时、日、月、星期）。
-cron 支持 `*`、范围、步长、列表（如 `0,30 9-17/2 * * 1-5`），星期 0 和 7 都是周日。
-日和星期同时限定时取或（Vixie 语义：任一字段以 `*` 开头时，包括 `*/N`，两者取且），
-按 `app.timezone` 计算；夏令时不存在的时刻跳过，
-回拨产生的两个真实时刻分别触发。非法频率在加载配置时拒绝。
+- **安全边界**：`server.token` 非空时（无空白可打印 ASCII），除 `/api/health` 与静态页面外全部 `/api/*` 须带 `Authorization: Bearer <TOKEN>`；未配置 Token 时服务端严格校验 `Host` 与 `Origin` / `Sec-Fetch-Site` 阻断跨站与 DNS Rebinding；公网或局域网访问**必须设置高强度 Token 并前置 HTTPS 反向代理**。访问日志默认关闭，收到退出信号时等待当前 `tick` 收尾后优雅关闭。
+- **调度规则（`schedule`）**：支持间隔（`30s`、`30m`、`2h`、`1d`、`1w`）、`@hourly/@daily/@weekly` 及五段 Cron（按 `app.timezone` 计算）。间隔任务首次立即到期，Cron 等待下一个触发点，进度与 1 小时原子租约锁持久化在 SQLite 中。每轮 `tick` 严格按 **① 并发抓源（上限 4） → ② 过滤（`filter_schedule`） → ③ Pipeline 成稿** 执行，上游源 `busy` 时下游自动延期。
 
-间隔任务首次立即到期，cron 首次等待下一个触发点。状态保存在 SQLite 中，重启不会重置；
-修改频率后以持久化的上次开始时间（尚未执行则用首次出现时间）重新计算。
-成功和失败均推进到期时间。配置变更在下次打开 Service/CLI 进程后生效，常驻服务需重启。
-从未执行过的 source / filter / pipeline cron 在首次启用、禁用后重新启用
-（或首次添加只过滤频率）时，等到启用后的下一个触发点；
-已有手动运行历史则保留上次开始时间，不重置进度。`sources fetch` 忽略频率立即执行（也推进调度时间），
-但与 `tick` 共用原子任务锁；锁被占用时返回 `busy`，一小时后过期可抢占。
+### macOS `launchd` 无常驻调度示例
 
-全部 Task 由同一个 Scheduler 注册、分派和计算状态。`scheduler status` 包含禁用任务
-（下次执行时间为空），与 `sources list` / `pipelines list` 共用下次执行时间、
-运行中状态和最近结果；pipeline 额外显示只过滤任务的运行中状态。
-每轮先等待抓取结束，再执行到期过滤和 pipeline；抓取返回 `busy` 时，本轮跳过依赖它的
-过滤和 pipeline，不推进这些任务的调度时间。显式手动抓取、过滤和运行仍可执行禁用任务。
-
-### launchd 示例（macOS）
-
-保存为 `~/Library/LaunchAgents/local.tentacles.tick.plist`，把下面所有路径替换成你的绝对路径。
-launchd 每 30 秒启动一次短进程，不需要另行运行常驻调度器；SQLite 锁防止重复执行同一任务。
-到期的 pipeline 也会运行，因此启用 digest 等处理器前请确认模型配置和费用。
-日志目录需要预先存在。密钥继续通过配置目录的 `.env` 加载，不要写进 plist。
+保存为 `~/Library/LaunchAgents/local.tentacles.tick.plist`（替换为实际绝对路径，并确保 `data/` 目录存在）：
 
 ```xml
 <?xml version="1.0" encoding="UTF-8"?>
@@ -537,13 +225,17 @@ launchd 每 30 秒启动一次短进程，不需要另行运行常驻调度器�
 </dict></plist>
 ```
 
-```sh
+```bash
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/local.tentacles.tick.plist
 # 卸载：launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/local.tentacles.tick.plist
 ```
 
-## 开发
+---
+
+## 开发与校验
 
 ```bash
-mypy src/tentacles     # 类型检查
+mypy src/tentacles                        # 后端类型检查
+tentacles config check                    # 配置文件无副作用校验
+cd frontend && pnpm check:api && pnpm build  # 校验前后端 OpenAPI 类型一致性并构建
 ```

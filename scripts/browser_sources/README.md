@@ -8,7 +8,7 @@
 把动作与页面决策上下文录到 `data/trajectories/<id>/<run_id>.jsonl`，再从轨迹提炼出一个符合下面契约的脚本。
 **提炼出的脚本必须先通过同一套静态门禁、且在真实工作 Tab 上独立试跑成功**才会出现在本目录；
 未通过则本目录不会新增文件，失败现场记入 `run_errors` 的 `browser_distill` 阶段（详见
-[信息源手册](../../docs/manual/user/sources.md#5-有界面浏览器源type-browser)）。
+[README 配置说明](../../README.md#4-有界面浏览器源type-browser) 与 [`tentacles-ops` 技能](../../skills/tentacles-ops/SKILL.md)）。
 
 重放报错、超时或返回 0 条时，会自动唤醒**一次**同一模型的 `pi` 自愈会话：旧脚本 + 失败栈 + 本地 meta 选择器摘要 +
 实时页面快照，修出的候选脚本同样要过静态门禁与真实试跑（最多 2 个候选）。通过才覆写本目录的脚本；
