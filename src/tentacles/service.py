@@ -210,6 +210,13 @@ class TentaclesService:
     def list_sources(self) -> list[SourceView]:
         return self.scheduler.list_sources()
 
+    def _apply_reloaded_config(self, updated: AppConfig) -> None:
+        if updated.models != self.config.models or updated.defaults != self.config.defaults:
+            self.models = ModelRegistry(updated.models, updated.defaults, self._model_http, clock=self._clock)
+            self.personas._models = self.models
+        self.config = updated
+        self.scheduler.reload_config(updated, models=self.models)
+
     def get_source_config(self, source_id: str) -> SourceConfigView:
         with self._config_lock:
             return read_source_config(self.config, source_id)
@@ -218,16 +225,14 @@ class TentaclesService:
         with self._config_lock:
             personas = {persona.name for persona in self.store.list_personas()}
             updated, view = create_source_in_config(self.config, payload, existing_personas=personas)
-            self.config = updated
-            self.scheduler.reload_config(updated)
+            self._apply_reloaded_config(updated)
             return view
 
     def update_source(self, source_id: str, payload: SourceUpdate) -> SourceConfigView:
         with self._config_lock:
             personas = {persona.name for persona in self.store.list_personas()}
             updated, view = update_source_in_config(self.config, source_id, payload, existing_personas=personas)
-            self.config = updated
-            self.scheduler.reload_config(updated)
+            self._apply_reloaded_config(updated)
             return view
 
     async def fetch_sources(self, ids: list[str] | None = None) -> list[FetchOutcome]:

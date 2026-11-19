@@ -38,11 +38,14 @@ class PipelineManager:
             raise NotFound(f'unknown pipeline {pipeline_id!r}')
         return specs[pipeline_id]
 
-    def reload_config(self, config: AppConfig, *, secrets: Iterable[str] | None = None) -> None:
+    def reload_config(self, config: AppConfig, *, secrets: Iterable[str] | None = None,
+                      models: ModelRegistry | None = None) -> None:
         resolved_secrets = list(secrets) if secrets is not None else configured_secrets(config)
         new_specs = {spec.id: spec for spec in config.pipelines}
         with self._lock:
             self._config = config
+            if models is not None:
+                self._models = models
             self._specs = new_specs
             self._runs.set_secrets(resolved_secrets)
 

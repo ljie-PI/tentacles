@@ -56,15 +56,17 @@ class Scheduler:
         with self._lock:
             return self._config, self._tasks
 
-    def reload_config(self, config: AppConfig) -> None:
+    def reload_config(self, config: AppConfig, *, models: ModelRegistry | None = None) -> None:
         tasks = self._build_tasks(config)
         secrets = configured_secrets(config)
         self._store.register_tasks(list(tasks.values()), to_utc(self._clock()))
         with self._lock:
             self._config = config
+            if models is not None:
+                self._models = models
             self._tasks = tasks
             self._runs.set_secrets(secrets)
-            self.pipelines.reload_config(config, secrets=secrets)
+            self.pipelines.reload_config(config, secrets=secrets, models=models)
 
     def initialize(self) -> None:
         _, tasks = self._snapshot()

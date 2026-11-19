@@ -50,7 +50,7 @@ class SourceView(BaseModel):
 class _WebAndBrowserSourceFields(BaseModel):
     url: str | None = None
     max_age_days: int | None = None
-    timeout: float | None = Field(default=None, allow_inf_nan=False)
+    timeout: float | None = Field(default=None, gt=0, allow_inf_nan=False)
     mode: Literal['list', 'page', 'llm'] | None = None
     selectors: dict[str, str] | None = None
     selector: str | None = None

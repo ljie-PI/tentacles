@@ -28,7 +28,7 @@ class RssOptions(BaseModel):
     max_age_days: int | None = Field(default=None, ge=0)
     headers: dict[str, str] = Field(default_factory=dict)
     proxy: str | None = None
-    timeout: float = 30
+    timeout: float = Field(default=30, gt=0, allow_inf_nan=False)
 
     @field_validator("proxy")
     @classmethod

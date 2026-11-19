@@ -11,7 +11,7 @@ from typing import Any, cast
 import yaml
 
 from tentacles.config import AppConfig, SourceSpec, _ENV_REF, _load_env, interpolate, load_raw_yaml
-from tentacles.config_validation import parse_config
+from tentacles.config_validation import parse_config, validate_source
 from tentacles.errors import ConfigError, ConfigIssue, ConfigValidationError, Conflict, NotFound
 from tentacles.schemas import SourceConfigView, SourceCreate, SourceUpdate
 
@@ -25,6 +25,7 @@ _TYPE_FIELDS: dict[str, tuple[str, ...]] = {
 }
 
 _NULL_IF_BLANK = frozenset({'name', 'selector', 'model', 'chrome_profile', 'task'})
+_ENV_REF_FORBIDDEN_MSG = 'environment variable references (${...}) must be edited in tentacles.yaml directly'
 
 
 def _safe_load_env(config_path: Path) -> dict[str, str]:
@@ -32,6 +33,22 @@ def _safe_load_env(config_path: Path) -> dict[str, str]:
         return _load_env(config_path, None)
     except (OSError, UnicodeError):
         raise ConfigValidationError([ConfigIssue('<root>', 'cannot read UTF-8 environment file')]) from None
+
+
+def _collect_env_refs(value: Any) -> set[str]:
+    if isinstance(value, str):
+        return {match.group(0) for match in _ENV_REF.finditer(value)}
+    if isinstance(value, Mapping):
+        refs: set[str] = set()
+        for item in value.values():
+            refs.update(_collect_env_refs(item))
+        return refs
+    if isinstance(value, (list, tuple)):
+        refs = set()
+        for item in value:
+            refs.update(_collect_env_refs(item))
+        return refs
+    return set()
 
 
 def _matches_source_id(item: Any, source_id: str, env_values: Mapping[str, str]) -> bool:
@@ -66,6 +83,15 @@ def _raw_selectors(raw: Mapping[str, Any], fallback: Any) -> dict[str, str] | No
     return None
 
 
+def _coerced_options(config: AppConfig, spec: SourceSpec) -> dict[str, Any]:
+    raw_opts = spec.options
+    try:
+        validated = validate_source(spec, 'source', config).model_dump()
+    except ConfigValidationError:
+        return raw_opts
+    return {key: validated.get(key, raw_opts[key]) for key in raw_opts}
+
+
 def get_source_config(config: AppConfig, source_id: str) -> SourceConfigView:
     spec = config.source(source_id)
     raw_entry: Mapping[str, Any] = {}
@@ -80,7 +106,7 @@ def get_source_config(config: AppConfig, source_id: str) -> SourceConfigView:
 
 
 def _view_of(config: AppConfig, spec: SourceSpec, raw_entry: Mapping[str, Any] | None = None) -> SourceConfigView:
-    opts = spec.options
+    opts = _coerced_options(config, spec)
     source_type = cast(Any, spec.type)
     raw_map = dict(raw_entry) if raw_entry is not None else {}
     return SourceConfigView(
@@ -129,27 +155,38 @@ def _clean_value(key: str, value: Any) -> Any:
     return value
 
 
-def _runtime_field_value(spec: SourceSpec | None, key: str) -> Any:
-    if spec is None:
+def _runtime_field_value(config: AppConfig | None, spec: SourceSpec | None,
+                         coerced_opts: Mapping[str, Any], key: str) -> Any:
+    if spec is None or config is None:
         return object()
     if key in SourceSpec.model_fields:
         return getattr(spec, key)
-    return spec.options.get(key)
+    return coerced_opts.get(key)
 
 
 def _apply_fields(entry: dict[str, Any], source_type: str, values: dict[str, Any],
-                  fields: set[str], *, current_spec: SourceSpec | None = None) -> None:
+                  fields: set[str], *, config: AppConfig | None = None,
+                  current_spec: SourceSpec | None = None) -> None:
     allowed = {'name', 'schedule', 'enabled', 'update_existing', *_TYPE_FIELDS[source_type]}
-    for key in fields & allowed:
+    coerced_opts = (_coerced_options(config, current_spec)
+                    if config is not None and current_spec is not None else {})
+    issues: list[ConfigIssue] = []
+    for key in sorted(fields & allowed):
         val = _clean_value(key, values.get(key))
         existing_raw = entry.get(key)
+        new_refs = _collect_env_refs(val) - _collect_env_refs(existing_raw)
+        if new_refs:
+            issues.append(ConfigIssue(f'sources.{key}', _ENV_REF_FORBIDDEN_MSG))
+            continue
         if isinstance(existing_raw, str) and _ENV_REF.search(existing_raw):
-            if val == existing_raw or val == _runtime_field_value(current_spec, key):
+            if val == existing_raw or val == _runtime_field_value(config, current_spec, coerced_opts, key):
                 continue
         if val is None:
             entry.pop(key, None)
         else:
             entry[key] = val
+    if issues:
+        raise ConfigValidationError(issues)
     if source_type == 'web':
         mode = entry.get('mode', 'list')
         if mode == 'list':
@@ -162,11 +199,20 @@ def _apply_fields(entry: dict[str, Any], source_type: str, values: dict[str, Any
             if 'update_existing' not in fields or not values.get('update_existing'):
                 entry.pop('update_existing', None)
         elif mode == 'llm':
-            for stale in ('selectors', 'selector', 'emit_baseline', 'concurrency', 'on_detail_error'):
+            for stale in ('selectors', 'selector', 'emit_baseline'):
                 entry.pop(stale, None)
 
 
-def _sync_pipelines(raw: dict[str, Any], source_id: str, selected: list[str]) -> dict[int, list[str]]:
+def _resolve_scalar(value: Any, env_values: Mapping[str, str]) -> Any:
+    if isinstance(value, str) and _ENV_REF.search(value):
+        return interpolate(value, env_values, errors=[])
+    return value
+
+
+def _sync_pipelines(raw: dict[str, Any], source_id: str, selected: list[str],
+                    env_values: Mapping[str, str]) -> dict[int, list[str]]:
+    if _collect_env_refs(selected):
+        raise ConfigValidationError([ConfigIssue('pipelines', _ENV_REF_FORBIDDEN_MSG)])
     pipelines = raw.get('pipelines')
     if pipelines is None:
         if selected:
@@ -174,11 +220,11 @@ def _sync_pipelines(raw: dict[str, Any], source_id: str, selected: list[str]) ->
         return {}
     if not isinstance(pipelines, list):
         raise ConfigError('pipelines must be a list')
-    indexed: dict[str, tuple[int, dict[str, Any]]] = {
-        p['id']: (idx, p)
-        for idx, p in enumerate(pipelines)
-        if isinstance(p, dict) and isinstance(p.get('id'), str)
-    }
+    indexed: dict[str, tuple[int, dict[str, Any]]] = {}
+    for idx, p in enumerate(pipelines):
+        if isinstance(p, dict) and isinstance(p.get('id'), str):
+            resolved_pid = str(_resolve_scalar(p['id'], env_values))
+            indexed[resolved_pid] = (idx, p)
     target = set(selected)
     for pid in selected:
         if pid not in indexed:
@@ -186,11 +232,12 @@ def _sync_pipelines(raw: dict[str, Any], source_id: str, selected: list[str]) ->
     changed: dict[int, list[str]] = {}
     for pid, (idx, p) in indexed.items():
         current = list(p.get('sources') or [])
+        resolved_current = [_resolve_scalar(sid, env_values) for sid in current]
         updated = list(current)
-        if pid in target and source_id not in updated:
+        if pid in target and source_id not in resolved_current:
             updated.append(source_id)
-        elif pid not in target and source_id in updated:
-            updated = [sid for sid in updated if sid != source_id]
+        elif pid not in target and source_id in resolved_current:
+            updated = [sid for sid, rsid in zip(current, resolved_current) if rsid != source_id]
         if updated != current:
             p['sources'] = updated
             changed[idx] = updated
@@ -223,16 +270,8 @@ def _dump_flow(value: Any) -> str:
                           default_flow_style=True, width=100000).strip()
 
 
-def _dump_block_map_at_col(mapping: dict[str, Any], col: int) -> str:
-    dumped = yaml.safe_dump(mapping, allow_unicode=True, sort_keys=False,
-                            default_flow_style=False, width=120).rstrip('\n')
-    lines = dumped.split('\n')
-    prefix = ' ' * col
-    return '\n'.join([lines[0], *(prefix + line for line in lines[1:])])
-
-
-def _dump_block_seq_at_col(items: list[str], col: int) -> str:
-    dumped = yaml.safe_dump(items, allow_unicode=True, sort_keys=False,
+def _dump_block_at_col(value: Any, col: int) -> str:
+    dumped = yaml.safe_dump(value, allow_unicode=True, sort_keys=False,
                             default_flow_style=False, width=120).rstrip('\n')
     lines = dumped.split('\n')
     prefix = ' ' * col
@@ -277,34 +316,47 @@ def _splice_yaml(text: str, raw: dict[str, Any], *,
 
     if updated_source_idx is not None or appended_source is not None:
         sources_pair = _mapping_lookup(root, 'sources')
-        if sources_pair is None or not isinstance(sources_pair[1], yaml.SequenceNode):
-            return None
-        sources_node = sources_pair[1]
-        if sources_node.flow_style:
-            return None
-        if updated_source_idx is not None:
-            if updated_source_idx >= len(sources_node.value):
+        if sources_pair is None:
+            if appended_source is None or updated_source_idx is not None:
                 return None
-            item_node = sources_node.value[updated_source_idx]
-            entry_dict = raw['sources'][updated_source_idx]
-            if getattr(item_node, 'flow_style', False):
-                edits.append((item_node.start_mark.index, item_node.end_mark.index, _dump_flow(entry_dict)))
-            else:
-                col = item_node.start_mark.column
-                end = _line_end(text, _content_end(text, item_node))
-                edits.append((item_node.start_mark.index, end, _dump_block_map_at_col(entry_dict, col)))
-        if appended_source is not None:
-            if not sources_node.value:
-                return None
-            last_node = sources_node.value[-1]
-            line_start = text.rfind('\n', 0, last_node.start_mark.index) + 1
-            dash_pos = text.find('-', line_start, last_node.start_mark.index)
-            if dash_pos == -1:
-                return None
-            dash_col = dash_pos - line_start
-            insert_at = _line_end(text, _content_end(text, last_node))
-            formatted = '\n' + (' ' * dash_col) + '- ' + _dump_block_map_at_col(appended_source, dash_col + 2)
-            edits.append((insert_at, insert_at, formatted))
+            sep = '' if text.endswith('\n') else '\n'
+            block = f'{sep}sources:\n  - {_dump_block_at_col(appended_source, 4)}\n'
+            edits.append((len(text), len(text), block))
+        else:
+            sk_node, sv_node = sources_pair
+            if updated_source_idx is not None:
+                if not isinstance(sv_node, yaml.SequenceNode) or sv_node.flow_style:
+                    return None
+                if updated_source_idx >= len(sv_node.value):
+                    return None
+                item_node = sv_node.value[updated_source_idx]
+                entry_dict = raw['sources'][updated_source_idx]
+                if getattr(item_node, 'flow_style', False):
+                    edits.append((item_node.start_mark.index, item_node.end_mark.index, _dump_flow(entry_dict)))
+                else:
+                    col = item_node.start_mark.column
+                    end = _line_end(text, _content_end(text, item_node))
+                    edits.append((item_node.start_mark.index, end, _dump_block_at_col(entry_dict, col)))
+            if appended_source is not None:
+                if isinstance(sv_node, yaml.SequenceNode) and not sv_node.flow_style and sv_node.value:
+                    last_node = sv_node.value[-1]
+                    line_start = text.rfind('\n', 0, last_node.start_mark.index) + 1
+                    dash_pos = text.find('-', line_start, last_node.start_mark.index)
+                    if dash_pos == -1:
+                        return None
+                    dash_col = dash_pos - line_start
+                    insert_at = _line_end(text, _content_end(text, last_node))
+                    formatted = '\n' + (' ' * dash_col) + '- ' + _dump_block_at_col(appended_source, dash_col + 2)
+                    edits.append((insert_at, insert_at, formatted))
+                elif (
+                    (isinstance(sv_node, yaml.SequenceNode) and not sv_node.value)
+                    or (isinstance(sv_node, yaml.ScalarNode) and sv_node.value == '')
+                ):
+                    end = _line_end(text, sv_node.end_mark.index)
+                    formatted = ':\n  - ' + _dump_block_at_col(appended_source, 4)
+                    edits.append((sk_node.end_mark.index, end, formatted))
+                else:
+                    return None
 
     if changed_pipelines:
         pipelines_pair = _mapping_lookup(root, 'pipelines')
@@ -331,7 +383,7 @@ def _splice_yaml(text: str, raw: dict[str, Any], *,
             else:
                 col = pv_node.start_mark.column
                 end = _line_end(text, _content_end(text, pv_node))
-                edits.append((pv_node.start_mark.index, end, _dump_block_seq_at_col(new_sources, col)))
+                edits.append((pv_node.start_mark.index, end, _dump_block_at_col(new_sources, col)))
 
     edits.sort(key=lambda item: (item[0], item[1]), reverse=True)
     prev_start = len(text) + 1
@@ -346,10 +398,10 @@ def _splice_yaml(text: str, raw: dict[str, Any], *,
 
 def _validate_and_save(original_text: str, raw: dict[str, Any], path: Path,
                        existing_personas: Collection[str], *,
+                       env_values: Mapping[str, str],
                        updated_source_idx: int | None = None,
                        appended_source: dict[str, Any] | None = None,
                        changed_pipelines: Mapping[int, list[str]] = {}) -> AppConfig:
-    env_values = _safe_load_env(path)
     errors: list[ConfigIssue] = []
     interpolated = interpolate(deepcopy(raw), env_values, errors=errors)
     parsed = parse_config(interpolated, path, errors, existing_personas=existing_personas)
@@ -381,21 +433,26 @@ def _validate_and_save(original_text: str, raw: dict[str, Any], path: Path,
 def create_source_in_config(config: AppConfig, payload: SourceCreate, *,
                             existing_personas: Collection[str]) -> tuple[AppConfig, SourceConfigView]:
     source_id = payload.id.strip()
+    if _collect_env_refs(source_id):
+        raise ConfigValidationError([ConfigIssue('sources.id', _ENV_REF_FORBIDDEN_MSG)])
     if any(s.id == source_id for s in config.sources):
         raise Conflict(f'source {source_id!r} already exists')
     original_text, raw = load_raw_yaml(config.path) if config.path.is_file() else ('', {})
+    env_values = _safe_load_env(config.path)
     sources = list(raw.get('sources') or [])
     entry: dict[str, Any] = {'id': source_id, 'type': payload.type}
     fields = set(payload.model_fields_set) | {'schedule', 'enabled', 'update_existing'}
     _apply_fields(entry, payload.type, payload.model_dump(), fields)
     sources.append(entry)
     raw['sources'] = sources
-    changed_pipelines = _sync_pipelines(raw, source_id, payload.pipelines) if payload.pipelines else {}
+    changed_pipelines = (_sync_pipelines(raw, source_id, payload.pipelines, env_values)
+                         if payload.pipelines else {})
     updated = _validate_and_save(
         original_text,
         raw,
         config.path,
         existing_personas,
+        env_values=env_values,
         appended_source=entry,
         changed_pipelines=changed_pipelines,
     )
@@ -419,15 +476,19 @@ def update_source_in_config(config: AppConfig, source_id: str, payload: SourceUp
             break
     if target is None or target_idx is None:
         raise NotFound(f'unknown source {source_id!r}')
-    _apply_fields(target, spec.type, payload.model_dump(), set(payload.model_fields_set), current_spec=spec)
+    _apply_fields(
+        target, spec.type, payload.model_dump(), set(payload.model_fields_set),
+        config=config, current_spec=spec,
+    )
     changed_pipelines: dict[int, list[str]] = {}
     if 'pipelines' in payload.model_fields_set:
-        changed_pipelines = _sync_pipelines(raw, source_id, payload.pipelines or [])
+        changed_pipelines = _sync_pipelines(raw, source_id, payload.pipelines or [], env_values)
     updated = _validate_and_save(
         original_text,
         raw,
         config.path,
         existing_personas,
+        env_values=env_values,
         updated_source_idx=target_idx,
         changed_pipelines=changed_pipelines,
     )

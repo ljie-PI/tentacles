@@ -141,19 +141,27 @@ def _parse_list_entry(item: Any) -> tuple[set[str], str, str] | None:
     return flags, delim, _decode_mailbox_name(raw_name)
 
 
+def _canonical_mailbox(mailbox: str, delim: str) -> str:
+    if mailbox.casefold() == 'inbox':
+        return 'INBOX'
+    if delim:
+        prefix = 'inbox' + delim.casefold()
+        if mailbox[:len(prefix)].casefold() == prefix:
+            return 'INBOX' + delim + mailbox[len(prefix):]
+    return mailbox
+
+
 def _expand_folders(connection: Any, configured: list[str]) -> list[str]:
     entries = [parsed for item in _ok(connection.list()) if (parsed := _parse_list_entry(item)) is not None]
     expanded: list[str] = []
     for target in configured:
         matched: list[str] = []
         saw_nonselectable = False
-        is_inbox = target.casefold() == 'inbox'
         for flags, delim, name in entries:
-            exact = name.casefold() == 'inbox' if is_inbox else name == target
-            is_child = bool(delim) and (
-                name.startswith(target + delim)
-                or (is_inbox and name.casefold().startswith('inbox' + delim))
-            )
+            canon_target = _canonical_mailbox(target, delim)
+            canon_name = _canonical_mailbox(name, delim)
+            exact = canon_name == canon_target
+            is_child = bool(delim) and canon_name.startswith(canon_target + delim)
             if not exact and not is_child:
                 continue
             if '\\noselect' in flags or '\\nonexistent' in flags:

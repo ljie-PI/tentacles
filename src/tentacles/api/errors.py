@@ -11,7 +11,7 @@ from starlette.exceptions import HTTPException
 
 from tentacles.api.models import ErrorDetail, ErrorResponse
 from tentacles.config import AppConfig
-from tentacles.diagnostics import configured_secrets
+from tentacles.diagnostics import configured_secrets, redact_text
 from tentacles.errors import TentaclesError
 
 log = logging.getLogger(__name__)
@@ -30,11 +30,9 @@ def install_error_handlers(app: FastAPI, config: AppConfig) -> None:
         return sorted(set(raw), key=len, reverse=True)
 
     def response(request: Request, code: str, message: str, status: int, headers=None) -> JSONResponse:
-        for secret in active_secrets(request):
-            if secret:
-                message = message.replace(secret, '[redacted]')
+        sanitized = redact_text(message, active_secrets(request))
         return JSONResponse(status_code=status, headers=headers,
-                            content=ErrorResponse(error=ErrorDetail(code=code, message=message)).model_dump())
+                            content=ErrorResponse(error=ErrorDetail(code=code, message=sanitized)).model_dump())
 
     @app.exception_handler(TentaclesError)
     async def domain_error(request: Request, exc: TentaclesError):

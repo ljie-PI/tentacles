@@ -76,6 +76,7 @@ _SENSITIVE_NAMES = frozenset({
     'api_key', 'apikey', 'access_token', 'refresh_token', 'client_secret', 'auth',
     'session', 'sessionid', 'csrf', 'bearer',
 })
+_SCALAR_SECRET_NAMES = _SENSITIVE_NAMES - frozenset({'cookies'})
 _SENSITIVE_NAME_TOKENS = frozenset({
     'auth', 'bearer', 'cookie', 'cookies', 'csrf', 'key', 'passwd', 'password',
     'secret', 'session', 'sessionid', 'sig', 'signature', 'token',
@@ -235,51 +236,49 @@ def configured_secrets(config: AppConfig) -> list[str]:
         secrets.extend(header_secret_values(spec.headers))
     for source in config.sources:
         secrets.extend(_option_secrets(source.options))
-    return list(dict.fromkeys(secrets))
+    return sorted(set(secrets), key=len, reverse=True)
+
+
+def _extract_secret_tokens(value: str, *, exact_scalar: bool) -> list[str]:
+    found: list[str] = []
+    stripped = value.strip()
+    if stripped and (exact_scalar or len(stripped) >= _MIN_COMPOSITE_SECRET_LEN):
+        found.append(value)
+    for raw_part in re.split(r'[\s;,]+', value):
+        part = raw_part.strip()
+        if part and part.lower() not in _AUTH_SCHEMES and len(part) >= _MIN_COMPOSITE_SECRET_LEN:
+            found.append(part)
+    return found
 
 
 def header_secret_values(headers: Mapping[str, str]) -> list[str]:
     """Extract credential substrings from custom HTTP headers without matching tiny flags."""
     found: list[str] = []
     for name, value in headers.items():
-        if not value or not _sensitive_name(name):
-            continue
-        exact = name.strip().lower() in _SENSITIVE_NAMES
-        if exact or len(value.strip()) >= _MIN_COMPOSITE_SECRET_LEN:
-            found.append(value)
-        found.extend(
-            part for part in value.split()
-            if part.lower() not in _AUTH_SCHEMES and (exact or len(part) >= _MIN_COMPOSITE_SECRET_LEN)
-        )
+        if value and _sensitive_name(name):
+            found.extend(_extract_secret_tokens(
+                value, exact_scalar=name.strip().lower() in _SCALAR_SECRET_NAMES,
+            ))
     return found
 
 
-def _option_secrets(value: Any, name: str = '', sensitive: bool = False,
-                    composite_only: bool = False) -> list[str]:
+def _option_secrets(value: Any, name: str = '', sensitive: bool = False) -> list[str]:
     """Every credential value below `value`; a sensitive key claims its whole subtree."""
     found: list[str] = []
     lowered = name.strip().lower()
-    if not sensitive and _sensitive_name(name):
-        sensitive = True
-        composite_only = lowered not in _SENSITIVE_NAMES
+    is_sensitive = sensitive or _sensitive_name(name)
     if isinstance(value, Mapping):
         for key, item in value.items():
-            found.extend(_option_secrets(item, str(key), sensitive, composite_only))
+            found.extend(_option_secrets(item, str(key), is_sensitive))
         return found
     if isinstance(value, (list, tuple)):
         for item in value:
-            found.extend(_option_secrets(item, name, sensitive, composite_only))
+            found.extend(_option_secrets(item, name, is_sensitive))
         return found
     if not isinstance(value, str) or not value:
         return found
-    if sensitive:
-        if not composite_only or len(value.strip()) >= _MIN_COMPOSITE_SECRET_LEN:
-            found.append(value)
-        found.extend(
-            part for part in value.split()
-            if part.lower() not in _AUTH_SCHEMES
-            and (not composite_only or len(part) >= _MIN_COMPOSITE_SECRET_LEN)
-        )
+    if is_sensitive:
+        found.extend(_extract_secret_tokens(value, exact_scalar=lowered in _SCALAR_SECRET_NAMES))
     if '://' in value:
         found.extend(_url_secrets(value))
     return found
@@ -325,9 +324,8 @@ def _sensitive_name(name: str) -> bool:
 def redact_text(text: str, secrets: Iterable[str] = ()) -> str:
     """Replace configured credential values and sensitive query values in text."""
     text = _URL_IN_TEXT.sub(lambda match: redact_url(match.group(0)), text)
-    for secret in secrets:
-        if secret:
-            text = text.replace(secret, REDACTED)
+    for secret in sorted((s for s in secrets if s), key=len, reverse=True):
+        text = text.replace(secret, REDACTED)
     return text
 
 

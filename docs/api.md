@@ -34,7 +34,7 @@ Tentacles 通过 `tentacles serve` 在同一服务进程内托管已构建的前
 | `GET /api/settings` | `{"timezone": "Asia/Shanghai"}`（仅公开元数据，不含密钥或本地路径） |
 | `GET /api/sources` | `SourceView[]` |
 | `POST /api/sources` | 新增信息源（`rss` / `web` / `browser`）并同步可选 `pipelines` 与运行时调度，返回 `201` + `SourceConfigView`；重名 `409`，配置非法 `400` |
-| `GET /api/sources/{source_id}` | 读取单个信息源可编辑配置 `SourceConfigView`（返回原始 YAML 值，不展开 `.env` 密钥、不含认证凭据）；未知 ID `404` |
+| `GET /api/sources/{source_id}` | 读取单个信息源可编辑配置 `SourceConfigView`（字符串字段保留原始 YAML `${VAR}` 占位符，不展开 `.env` 密钥、不含认证凭据）；未知 ID `404` |
 | `PATCH /api/sources/{source_id}` | 局部更新信息源配置、启停状态或关联 `pipelines`，原子写回 YAML 并热刷新调度，返回 `SourceConfigView` |
 | `POST /api/sources/fetch` | 可选请求体 `{"ids": ["id"]}`，返回 `FetchOutcome[]`（省略时抓取全部启用源） |
 | `POST /api/sources/{source_id}/fetch` | 单个 `FetchOutcome`；未知 ID `404`，运行中 `409`，抓取失败 `502` |

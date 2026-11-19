@@ -109,7 +109,7 @@ function optionalNumber(raw: string): number | null {
   const trimmed = raw.trim()
   if (!trimmed) return null
   const parsed = Number(trimmed)
-  return Number.isFinite(parsed) ? parsed : -1
+  return Number.isFinite(parsed) ? parsed : null
 }
 
 function optionalInt(raw: string): number | null {
@@ -149,6 +149,8 @@ function applyNonImapFields(
       target.model = draft.model.trim() || null
       target.fetch_content = draft.fetchContent
       target.max_input_chars = optionalInt(draft.maxInputChars)
+      target.on_detail_error = draft.onDetailError
+      target.concurrency = optionalInt(draft.concurrency)
     }
   } else if (type === 'browser') {
     target.page_url = draft.pageUrl.trim()
@@ -249,7 +251,14 @@ function SourceForm({
             name="source-type"
             value={draft.type}
             disabled={!isCreate || busy}
-            onChange={event => setDraft({ ...draft, type: event.target.value as SourceType })}
+            onChange={event => {
+              const nextType = event.target.value as SourceType
+              setDraft({
+                ...draft,
+                type: nextType,
+                onDetailError: nextType === 'browser' ? 'record_and_skip' : 'fail_batch',
+              })
+            }}
           >
             <option value="rss">RSS / Atom 订阅</option>
             <option value="web">Web 网页信息源</option>
@@ -425,7 +434,19 @@ function SourceForm({
             <label>覆盖模型名（可选）<input value={draft.model} disabled={busy} onChange={e => setDraft({ ...draft, model: e.target.value })} placeholder="默认使用 extract 模型" /></label>
             <label>最大输入字符（1–200000）<input type="number" min={1} max={200000} value={draft.maxInputChars} disabled={busy} onChange={e => setDraft({ ...draft, maxInputChars: e.target.value })} /></label>
           </div>
-          <label className="checkbox-label"><input type="checkbox" checked={draft.fetchContent} disabled={busy} onChange={e => setDraft({ ...draft, fetchContent: e.target.checked })} />并发抓取详情页正文</label>
+          <div className="form-row">
+            <label className="checkbox-label"><input type="checkbox" checked={draft.fetchContent} disabled={busy} onChange={e => setDraft({ ...draft, fetchContent: e.target.checked })} />并发抓取详情页正文</label>
+            <label>详情并发数（1–16）<input type="number" min={1} max={16} value={draft.concurrency} disabled={busy} onChange={e => setDraft({ ...draft, concurrency: e.target.value })} /></label>
+          </div>
+          {draft.fetchContent && (
+            <label>
+              详情失败策略
+              <select value={draft.onDetailError} disabled={busy} onChange={e => setDraft({ ...draft, onDetailError: e.target.value as DetailErrorMode })}>
+                <option value="fail_batch">fail_batch（整批回滚）</option>
+                <option value="record_and_skip">record_and_skip（记账跳过并重试）</option>
+              </select>
+            </label>
+          )}
         </>}
       </>}
 
@@ -524,11 +545,13 @@ function SourceForm({
 function EditSourceDrawer({
   sourceId,
   pipelines,
+  invalidateAll,
   close,
   onSaved,
 }: {
   sourceId: string
   pipelines: { id: string; name?: string | null }[]
+  invalidateAll: () => Promise<unknown>
   close: () => void
   onSaved: (message: string) => void
 }) {
@@ -537,7 +560,8 @@ function EditSourceDrawer({
     queryKey: ['source-config', sourceId],
     queryFn: () => api('/api/sources/{source_id}', 'get', { path: { source_id: sourceId } }),
   })
-  // Snapshot once per opened sourceId so window-focus refetches never wipe unsaved edits.
+  // Snapshot once fresh data arrives for sourceId so stale caches cannot hydrate old toggles,
+  // and later window-focus refetches never wipe unsaved edits.
   const [loadedId, setLoadedId] = useState<string | null>(null)
   const [draft, setDraft] = useState<SourceDraft | null>(null)
   useEffect(() => {
@@ -545,19 +569,20 @@ function EditSourceDrawer({
       setDraft(null)
       setLoadedId(null)
     }
-    if (detail.data && loadedId !== sourceId) {
+    if (detail.data && !detail.isFetching && loadedId !== sourceId) {
       setDraft(draftFromConfig(detail.data))
       setLoadedId(sourceId)
     }
-  }, [detail.data, loadedId, sourceId])
+  }, [detail.data, detail.isFetching, loadedId, sourceId])
 
   const save = useMutation({
     mutationFn: (next: SourceDraft) => api('/api/sources/{source_id}', 'patch', {
       path: { source_id: sourceId },
       body: toUpdatePayload(next),
     }),
-    onSuccess: async () => {
-      await Promise.all(['sources', 'source-config', 'pipelines', 'scheduler'].map(key => client.invalidateQueries({ queryKey: [key] })))
+    onSuccess: async data => {
+      client.setQueryData(['source-config', data.id], data)
+      await invalidateAll()
       onSaved(`已保存信息源「${sourceId}」的配置并刷新调度。`)
       close()
     },
@@ -565,7 +590,7 @@ function EditSourceDrawer({
 
   return (
     <Drawer title={`编辑信息源 · ${sourceId}`} eyebrow="EDIT SOURCE" close={close}>
-      {detail.isPending && <Notice>正在读取配置…</Notice>}
+      {(detail.isPending || (!draft && detail.isFetching)) && <Notice>正在读取配置…</Notice>}
       {detail.error && <Notice error>{detail.error.message}</Notice>}
       {draft && (
         <SourceForm
@@ -614,6 +639,7 @@ export default function Sources() {
       setTogglingIds(prev => new Set(prev).add(id))
     },
     onSuccess: async data => {
+      client.setQueryData(['source-config', data.id], data)
       setNotice(`已${data.enabled ? '启用' : '停用'}信息源「${data.name || data.id}」。`)
       await invalidateAll()
     },
@@ -629,6 +655,7 @@ export default function Sources() {
   const create = useMutation({
     mutationFn: (draft: SourceDraft) => api('/api/sources', 'post', { body: toCreatePayload(draft) }),
     onSuccess: async data => {
+      client.setQueryData(['source-config', data.id], data)
       setShowCreate(false)
       setCreateDraft(emptyDraft())
       setNotice(`已新增信息源「${data.name || data.id}」并加入调度。`)
@@ -770,6 +797,7 @@ export default function Sources() {
       <EditSourceDrawer
         sourceId={editingId}
         pipelines={pipelineList}
+        invalidateAll={invalidateAll}
         close={() => setEditingId(null)}
         onSaved={setNotice}
       />
