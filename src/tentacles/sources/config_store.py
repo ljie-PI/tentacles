@@ -1,24 +1,26 @@
 """Atomic YAML persistence and validation for Web/API source mutations."""
 from __future__ import annotations
 
-import os
 from collections.abc import Collection, Mapping
 from copy import deepcopy
+from dataclasses import dataclass, field
+import os
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 from typing import Any, cast
+from urllib.parse import urlsplit
 
 import yaml
 
 from tentacles.config import AppConfig, SourceSpec, _ENV_REF, _load_env, interpolate, load_raw_yaml
 from tentacles.config_validation import parse_config, validate_source
+from tentacles.diagnostics import redact_url
 from tentacles.errors import ConfigError, ConfigIssue, ConfigValidationError, Conflict, NotFound
 from tentacles.schemas import SourceConfigView, SourceCreate, SourceUpdate
 
 _TYPE_FIELDS: dict[str, tuple[str, ...]] = {
     'rss': ('url', 'max_age_days', 'timeout'),
-    'imap': ('host', 'port', 'ssl', 'folders', 'include_subfolders', 'initial_days',
-             'max_fetch', 'search', 'exclude_senders', 'timeout'),
+    'imap': ('folders', 'include_subfolders', 'initial_days', 'max_fetch', 'search', 'exclude_senders', 'timeout'),
     'web': ('url', 'mode', 'selectors', 'selector', 'fetch_content', 'on_detail_error',
             'emit_baseline', 'max_input_chars', 'model', 'concurrency', 'timeout'),
     'browser': ('page_url', 'task', 'chrome_profile', 'max_items', 'on_detail_error', 'timeout'),
@@ -28,6 +30,13 @@ _NULL_IF_BLANK = frozenset({'name', 'selector', 'model', 'chrome_profile', 'task
 _ENV_REF_FORBIDDEN_MSG = 'environment variable references (${...}) must be edited in tentacles.yaml directly'
 
 
+@dataclass(frozen=True)
+class _YamlPatch:
+    updated_source_idx: int | None = None
+    appended_source: dict[str, Any] | None = None
+    changed_pipelines: Mapping[int, list[str]] = field(default_factory=dict)
+
+
 def _safe_load_env(config_path: Path) -> dict[str, str]:
     try:
         return _load_env(config_path, None)
@@ -35,20 +44,38 @@ def _safe_load_env(config_path: Path) -> dict[str, str]:
         raise ConfigValidationError([ConfigIssue('<root>', 'cannot read UTF-8 environment file')]) from None
 
 
-def _collect_env_refs(value: Any) -> set[str]:
+def _strings_with_env_refs(value: Any) -> set[str]:
     if isinstance(value, str):
-        return {match.group(0) for match in _ENV_REF.finditer(value)}
+        return {value} if _ENV_REF.search(value) else set()
     if isinstance(value, Mapping):
-        refs: set[str] = set()
-        for item in value.values():
-            refs.update(_collect_env_refs(item))
-        return refs
+        found: set[str] = set()
+        for k, v in value.items():
+            found.update(_strings_with_env_refs(k))
+            found.update(_strings_with_env_refs(v))
+        return found
     if isinstance(value, (list, tuple)):
-        refs = set()
+        found = set()
         for item in value:
-            refs.update(_collect_env_refs(item))
-        return refs
+            found.update(_strings_with_env_refs(item))
+        return found
     return set()
+
+
+def _url_origin(raw_url: Any, env_values: Mapping[str, str]) -> tuple[str, str, int | None] | None:
+    if not isinstance(raw_url, str) or not raw_url.strip():
+        return None
+    resolved = interpolate(raw_url, env_values, errors=[]) if _ENV_REF.search(raw_url) else raw_url
+    try:
+        parsed = urlsplit(resolved.strip())
+        port = parsed.port
+    except ValueError:
+        return None
+    scheme = parsed.scheme.lower()
+    host = (parsed.hostname or '').lower()
+    if not scheme or not host:
+        return None
+    default_port = 443 if scheme == 'https' else 80 if scheme == 'http' else None
+    return scheme, host, port if port is not None else default_port
 
 
 def _matches_source_id(item: Any, source_id: str, env_values: Mapping[str, str]) -> bool:
@@ -67,6 +94,13 @@ def _raw_str(raw: Mapping[str, Any], key: str, fallback: str | None) -> str | No
         val = raw[key]
         return str(val) if val is not None else None
     return fallback
+
+
+def _safe_view_url(raw: Mapping[str, Any], key: str, fallback: str | None) -> str | None:
+    candidate = _raw_str(raw, key, fallback)
+    if candidate is None or _ENV_REF.search(candidate):
+        return candidate
+    return redact_url(candidate) if '://' in candidate else candidate
 
 
 def _raw_str_list(raw: Mapping[str, Any], key: str, fallback: Any) -> list[str] | None:
@@ -116,7 +150,7 @@ def _view_of(config: AppConfig, spec: SourceSpec, raw_entry: Mapping[str, Any] |
         schedule=_raw_str(raw_map, 'schedule', spec.schedule) or spec.schedule,
         enabled=spec.enabled,
         update_existing=spec.update_existing,
-        url=_raw_str(raw_map, 'url', opts.get('url')),
+        url=_safe_view_url(raw_map, 'url', opts.get('url')),
         max_age_days=opts.get('max_age_days'),
         timeout=opts.get('timeout'),
         host=_raw_str(raw_map, 'host', opts.get('host')),
@@ -137,7 +171,7 @@ def _view_of(config: AppConfig, spec: SourceSpec, raw_entry: Mapping[str, Any] |
         max_input_chars=opts.get('max_input_chars'),
         model=_raw_str(raw_map, 'model', opts.get('model')),
         concurrency=opts.get('concurrency'),
-        page_url=_raw_str(raw_map, 'page_url', opts.get('page_url')),
+        page_url=_safe_view_url(raw_map, 'page_url', opts.get('page_url')),
         task=_raw_str(raw_map, 'task', opts.get('task')),
         chrome_profile=_raw_str(raw_map, 'chrome_profile', opts.get('chrome_profile')),
         max_items=opts.get('max_items'),
@@ -165,21 +199,39 @@ def _runtime_field_value(config: AppConfig | None, spec: SourceSpec | None,
 
 
 def _apply_fields(entry: dict[str, Any], source_type: str, values: dict[str, Any],
-                  fields: set[str], *, config: AppConfig | None = None,
+                  fields: set[str], *, env_values: Mapping[str, str],
+                  config: AppConfig | None = None,
                   current_spec: SourceSpec | None = None) -> None:
     allowed = {'name', 'schedule', 'enabled', 'update_existing', *_TYPE_FIELDS[source_type]}
+    issues: list[ConfigIssue] = []
+    for extra_key in sorted(fields - allowed - {'id', 'type', 'pipelines'}):
+        if values.get(extra_key) is not None:
+            issues.append(ConfigIssue(
+                f'sources.{extra_key}',
+                f'{extra_key} is not supported for source type {source_type!r}',
+            ))
     coerced_opts = (_coerced_options(config, current_spec)
                     if config is not None and current_spec is not None else {})
-    issues: list[ConfigIssue] = []
+    has_attached_creds = bool(entry.get('headers')) or bool(entry.get('cookies'))
     for key in sorted(fields & allowed):
         val = _clean_value(key, values.get(key))
         existing_raw = entry.get(key)
-        new_refs = _collect_env_refs(val) - _collect_env_refs(existing_raw)
-        if new_refs:
+        unmatched_env_strings = _strings_with_env_refs(val) - _strings_with_env_refs(existing_raw)
+        if unmatched_env_strings:
             issues.append(ConfigIssue(f'sources.{key}', _ENV_REF_FORBIDDEN_MSG))
             continue
         if isinstance(existing_raw, str) and _ENV_REF.search(existing_raw):
             if val == existing_raw or val == _runtime_field_value(config, current_spec, coerced_opts, key):
+                continue
+        if key in ('url', 'page_url') and isinstance(existing_raw, str) and '://' in existing_raw:
+            if val == redact_url(existing_raw):
+                continue
+        if key == 'url' and has_attached_creds and val is not None:
+            if _url_origin(val, env_values) != _url_origin(existing_raw, env_values):
+                issues.append(ConfigIssue(
+                    'sources.url',
+                    'cannot change URL origin via API when custom headers or cookies are configured',
+                ))
                 continue
         if val is None:
             entry.pop(key, None)
@@ -211,7 +263,7 @@ def _resolve_scalar(value: Any, env_values: Mapping[str, str]) -> Any:
 
 def _sync_pipelines(raw: dict[str, Any], source_id: str, selected: list[str],
                     env_values: Mapping[str, str]) -> dict[int, list[str]]:
-    if _collect_env_refs(selected):
+    if _strings_with_env_refs(selected):
         raise ConfigValidationError([ConfigIssue('pipelines', _ENV_REF_FORBIDDEN_MSG)])
     pipelines = raw.get('pipelines')
     if pipelines is None:
@@ -285,19 +337,10 @@ def _mapping_lookup(node: yaml.MappingNode, key: str) -> tuple[yaml.Node, yaml.N
     return None
 
 
-def _render_yaml(original_text: str, raw: dict[str, Any], *,
-                 updated_source_idx: int | None = None,
-                 appended_source: dict[str, Any] | None = None,
-                 changed_pipelines: Mapping[int, list[str]] = {}) -> str:
+def _render_yaml(original_text: str, raw: dict[str, Any], patch: _YamlPatch) -> str:
     if original_text.strip():
         try:
-            spliced = _splice_yaml(
-                original_text,
-                raw,
-                updated_source_idx=updated_source_idx,
-                appended_source=appended_source,
-                changed_pipelines=changed_pipelines,
-            )
+            spliced = _splice_yaml(original_text, raw, patch)
             if spliced is not None and yaml.safe_load(spliced) == raw:
                 return spliced
         except yaml.YAMLError:
@@ -305,39 +348,36 @@ def _render_yaml(original_text: str, raw: dict[str, Any], *,
     return yaml.safe_dump(raw, allow_unicode=True, sort_keys=False, default_flow_style=False)
 
 
-def _splice_yaml(text: str, raw: dict[str, Any], *,
-                 updated_source_idx: int | None,
-                 appended_source: dict[str, Any] | None,
-                 changed_pipelines: Mapping[int, list[str]]) -> str | None:
+def _splice_yaml(text: str, raw: dict[str, Any], patch: _YamlPatch) -> str | None:
     root = yaml.compose(text)
     if not isinstance(root, yaml.MappingNode) or root.flow_style:
         return None
     edits: list[tuple[int, int, str]] = []
 
-    if updated_source_idx is not None or appended_source is not None:
+    if patch.updated_source_idx is not None or patch.appended_source is not None:
         sources_pair = _mapping_lookup(root, 'sources')
         if sources_pair is None:
-            if appended_source is None or updated_source_idx is not None:
+            if patch.appended_source is None or patch.updated_source_idx is not None:
                 return None
             sep = '' if text.endswith('\n') else '\n'
-            block = f'{sep}sources:\n  - {_dump_block_at_col(appended_source, 4)}\n'
+            block = f'{sep}sources:\n  - {_dump_block_at_col(patch.appended_source, 4)}\n'
             edits.append((len(text), len(text), block))
         else:
             sk_node, sv_node = sources_pair
-            if updated_source_idx is not None:
+            if patch.updated_source_idx is not None:
                 if not isinstance(sv_node, yaml.SequenceNode) or sv_node.flow_style:
                     return None
-                if updated_source_idx >= len(sv_node.value):
+                if patch.updated_source_idx >= len(sv_node.value):
                     return None
-                item_node = sv_node.value[updated_source_idx]
-                entry_dict = raw['sources'][updated_source_idx]
+                item_node = sv_node.value[patch.updated_source_idx]
+                entry_dict = raw['sources'][patch.updated_source_idx]
                 if getattr(item_node, 'flow_style', False):
                     edits.append((item_node.start_mark.index, item_node.end_mark.index, _dump_flow(entry_dict)))
                 else:
                     col = item_node.start_mark.column
                     end = _line_end(text, _content_end(text, item_node))
                     edits.append((item_node.start_mark.index, end, _dump_block_at_col(entry_dict, col)))
-            if appended_source is not None:
+            if patch.appended_source is not None:
                 if isinstance(sv_node, yaml.SequenceNode) and not sv_node.flow_style and sv_node.value:
                     last_node = sv_node.value[-1]
                     line_start = text.rfind('\n', 0, last_node.start_mark.index) + 1
@@ -346,26 +386,26 @@ def _splice_yaml(text: str, raw: dict[str, Any], *,
                         return None
                     dash_col = dash_pos - line_start
                     insert_at = _line_end(text, _content_end(text, last_node))
-                    formatted = '\n' + (' ' * dash_col) + '- ' + _dump_block_at_col(appended_source, dash_col + 2)
+                    formatted = '\n' + (' ' * dash_col) + '- ' + _dump_block_at_col(patch.appended_source, dash_col + 2)
                     edits.append((insert_at, insert_at, formatted))
                 elif (
                     (isinstance(sv_node, yaml.SequenceNode) and not sv_node.value)
                     or (isinstance(sv_node, yaml.ScalarNode) and sv_node.value == '')
                 ):
                     end = _line_end(text, sv_node.end_mark.index)
-                    formatted = ':\n  - ' + _dump_block_at_col(appended_source, 4)
+                    formatted = ':\n  - ' + _dump_block_at_col(patch.appended_source, 4)
                     edits.append((sk_node.end_mark.index, end, formatted))
                 else:
                     return None
 
-    if changed_pipelines:
+    if patch.changed_pipelines:
         pipelines_pair = _mapping_lookup(root, 'pipelines')
         if pipelines_pair is None or not isinstance(pipelines_pair[1], yaml.SequenceNode):
             return None
         pipelines_node = pipelines_pair[1]
         if pipelines_node.flow_style:
             return None
-        for p_idx, new_sources in changed_pipelines.items():
+        for p_idx, new_sources in patch.changed_pipelines.items():
             if p_idx >= len(pipelines_node.value):
                 return None
             p_node = pipelines_node.value[p_idx]
@@ -399,29 +439,21 @@ def _splice_yaml(text: str, raw: dict[str, Any], *,
 def _validate_and_save(original_text: str, raw: dict[str, Any], path: Path,
                        existing_personas: Collection[str], *,
                        env_values: Mapping[str, str],
-                       updated_source_idx: int | None = None,
-                       appended_source: dict[str, Any] | None = None,
-                       changed_pipelines: Mapping[int, list[str]] = {}) -> AppConfig:
+                       patch: _YamlPatch) -> AppConfig:
     errors: list[ConfigIssue] = []
     interpolated = interpolate(deepcopy(raw), env_values, errors=errors)
     parsed = parse_config(interpolated, path, errors, existing_personas=existing_personas)
-    rendered = _render_yaml(
-        original_text,
-        raw,
-        updated_source_idx=updated_source_idx,
-        appended_source=appended_source,
-        changed_pipelines=changed_pipelines,
-    )
+    rendered = _render_yaml(original_text, raw, patch)
     mode = path.stat().st_mode & 0o777 if path.exists() else 0o644
     tmp_path: Path | None = None
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         with NamedTemporaryFile('w', encoding='utf-8', dir=path.parent, prefix='.tentacles-',
                                 suffix='.yaml.tmp', delete=False) as tmp:
+            tmp_path = Path(tmp.name)
             tmp.write(rendered)
             tmp.flush()
             os.fsync(tmp.fileno())
-            tmp_path = Path(tmp.name)
         os.chmod(tmp_path, mode)
         os.replace(tmp_path, path)
     finally:
@@ -433,7 +465,7 @@ def _validate_and_save(original_text: str, raw: dict[str, Any], path: Path,
 def create_source_in_config(config: AppConfig, payload: SourceCreate, *,
                             existing_personas: Collection[str]) -> tuple[AppConfig, SourceConfigView]:
     source_id = payload.id.strip()
-    if _collect_env_refs(source_id):
+    if _strings_with_env_refs(source_id):
         raise ConfigValidationError([ConfigIssue('sources.id', _ENV_REF_FORBIDDEN_MSG)])
     if any(s.id == source_id for s in config.sources):
         raise Conflict(f'source {source_id!r} already exists')
@@ -442,7 +474,7 @@ def create_source_in_config(config: AppConfig, payload: SourceCreate, *,
     sources = list(raw.get('sources') or [])
     entry: dict[str, Any] = {'id': source_id, 'type': payload.type}
     fields = set(payload.model_fields_set) | {'schedule', 'enabled', 'update_existing'}
-    _apply_fields(entry, payload.type, payload.model_dump(), fields)
+    _apply_fields(entry, payload.type, payload.model_dump(), fields, env_values=env_values)
     sources.append(entry)
     raw['sources'] = sources
     changed_pipelines = (_sync_pipelines(raw, source_id, payload.pipelines, env_values)
@@ -453,8 +485,7 @@ def create_source_in_config(config: AppConfig, payload: SourceCreate, *,
         config.path,
         existing_personas,
         env_values=env_values,
-        appended_source=entry,
-        changed_pipelines=changed_pipelines,
+        patch=_YamlPatch(appended_source=entry, changed_pipelines=changed_pipelines),
     )
     return updated, get_source_config(updated, source_id)
 
@@ -478,7 +509,7 @@ def update_source_in_config(config: AppConfig, source_id: str, payload: SourceUp
         raise NotFound(f'unknown source {source_id!r}')
     _apply_fields(
         target, spec.type, payload.model_dump(), set(payload.model_fields_set),
-        config=config, current_spec=spec,
+        env_values=env_values, config=config, current_spec=spec,
     )
     changed_pipelines: dict[int, list[str]] = {}
     if 'pipelines' in payload.model_fields_set:
@@ -489,7 +520,6 @@ def update_source_in_config(config: AppConfig, source_id: str, payload: SourceUp
         config.path,
         existing_personas,
         env_values=env_values,
-        updated_source_idx=target_idx,
-        changed_pipelines=changed_pipelines,
+        patch=_YamlPatch(updated_source_idx=target_idx, changed_pipelines=changed_pipelines),
     )
     return updated, get_source_config(updated, source_id)

@@ -213,7 +213,8 @@ class TentaclesService:
     def _apply_reloaded_config(self, updated: AppConfig) -> None:
         if updated.models != self.config.models or updated.defaults != self.config.defaults:
             self.models = ModelRegistry(updated.models, updated.defaults, self._model_http, clock=self._clock)
-            self.personas._models = self.models
+        self.personas.reload_config(updated, self.models)
+        self.archive = ArchiveManager(updated, self.store, clock=self._clock)
         self.config = updated
         self.scheduler.reload_config(updated, models=self.models)
 

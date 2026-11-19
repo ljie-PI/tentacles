@@ -47,7 +47,7 @@ class SourceView(BaseModel):
     running: bool = False
 
 
-class _WebAndBrowserSourceFields(BaseModel):
+class _CreatableSourceFields(BaseModel):
     url: str | None = None
     max_age_days: int | None = None
     timeout: float | None = Field(default=None, gt=0, allow_inf_nan=False)
@@ -66,10 +66,7 @@ class _WebAndBrowserSourceFields(BaseModel):
     max_items: int | None = None
 
 
-class _AllSourceOptionFields(_WebAndBrowserSourceFields):
-    host: str | None = None
-    port: int | None = None
-    ssl: bool | None = None
+class _EditableImapSourceFields(_CreatableSourceFields):
     folders: list[str] | None = None
     include_subfolders: bool | None = None
     initial_days: int | None = None
@@ -78,14 +75,20 @@ class _AllSourceOptionFields(_WebAndBrowserSourceFields):
     exclude_senders: list[str] | None = None
 
 
+class _AllSourceOptionFields(_EditableImapSourceFields):
+    host: str | None = None
+    port: int | None = None
+    ssl: bool | None = None
+
+
 _NON_NULLABLE_SOURCE_PATCH_FIELDS = frozenset({
     'schedule', 'enabled', 'update_existing', 'pipelines',
-    'url', 'mode', 'page_url', 'host', 'ssl', 'folders',
+    'url', 'mode', 'page_url', 'folders',
     'include_subfolders', 'search', 'exclude_senders',
 })
 
 
-class SourceCreate(_WebAndBrowserSourceFields):
+class SourceCreate(_CreatableSourceFields):
     model_config = ConfigDict(extra='forbid')
     id: str = Field(min_length=1, max_length=128)
     type: Literal['rss', 'web', 'browser'] = 'rss'
@@ -96,7 +99,7 @@ class SourceCreate(_WebAndBrowserSourceFields):
     pipelines: list[str] = Field(default_factory=list)
 
 
-class SourceUpdate(_AllSourceOptionFields):
+class SourceUpdate(_EditableImapSourceFields):
     model_config = ConfigDict(extra='forbid')
     name: str | None = None
     schedule: str | None = None

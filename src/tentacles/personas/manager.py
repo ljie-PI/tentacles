@@ -10,6 +10,7 @@ from typing import Any, Awaitable, Callable
 
 from tentacles.asyncutil import run_store_call
 from tentacles.config import AppConfig
+from tentacles.diagnostics import configured_secrets
 from tentacles.errors import ConfigError, Conflict, NotFound, UpstreamError
 from tentacles.llm.registry import ModelRegistry
 from tentacles.llm.json import extract_json
@@ -35,6 +36,12 @@ class PersonaManager:
     def __init__(self, store: Store, models: ModelRegistry, clock: Callable[[], datetime], update: PersonaUpdate):
         self._store, self._models, self._clock, self._update = store, models, clock, update
         self._runs = RunLifecycle(store, clock)
+
+    def reload_config(self, config: AppConfig, models: ModelRegistry) -> None:
+        self._models = models
+        self._update = config.persona_update
+        self._runs.set_secrets(configured_secrets(config))
+        self.seed(config)
 
     def seed(self, config: AppConfig) -> None:
         def loader(name: str, seed: PersonaSeed) -> Callable[[], PersonaView]:

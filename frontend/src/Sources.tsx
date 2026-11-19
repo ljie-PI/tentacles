@@ -188,9 +188,6 @@ function toUpdatePayload(draft: SourceDraft): SourceUpdate {
     applyNonImapFields(patch, draft, draft.type, true)
   } else {
     patch.timeout = optionalNumber(draft.timeout)
-    patch.host = draft.host.trim()
-    patch.port = optionalInt(draft.port)
-    patch.ssl = draft.ssl
     patch.folders = parseLines(draft.folders)
     patch.include_subfolders = draft.includeSubfolders
     patch.initial_days = optionalInt(draft.initialDays)
@@ -488,13 +485,12 @@ function SourceForm({
       </>}
 
       {draft.type === 'imap' && <>
-        <p className="small muted">邮箱凭据（用户名与密码）仍由 .env 注入，此处仅调整文件夹、查询条件与抓取限额。</p>
+        <p className="small muted">邮箱连接端点（主机、端口、SSL）与凭据由 tentacles.yaml / .env 管理；此处仅调整文件夹、查询条件与抓取限额。</p>
         <div className="form-row">
-          <label>IMAP 主机<input value={draft.host} disabled={busy} onChange={e => setDraft({ ...draft, host: e.target.value })} required /></label>
-          <label>端口（可选）<input type="number" min={1} max={65535} value={draft.port} disabled={busy} placeholder={draft.ssl ? '默认 993' : '默认 143'} onChange={e => setDraft({ ...draft, port: e.target.value })} /></label>
+          <label>IMAP 主机（只读）<input value={draft.host} disabled readOnly /></label>
+          <label>端口 / 传输（只读）<input value={`${draft.port || (draft.ssl ? '993' : '143')} (${draft.ssl ? 'SSL' : '非 SSL'})`} disabled readOnly /></label>
         </div>
         <div className="form-row">
-          <label className="checkbox-label"><input type="checkbox" checked={draft.ssl} disabled={busy} onChange={e => setDraft({ ...draft, ssl: e.target.checked })} />启用 SSL</label>
           <label className="checkbox-label"><input type="checkbox" checked={draft.includeSubfolders} disabled={busy} onChange={e => setDraft({ ...draft, includeSubfolders: e.target.checked })} />递归读取全部子文件夹</label>
         </div>
         <label>
@@ -569,11 +565,11 @@ function EditSourceDrawer({
       setDraft(null)
       setLoadedId(null)
     }
-    if (detail.data && !detail.isFetching && loadedId !== sourceId) {
+    if (detail.data && !detail.isFetching && !detail.isError && loadedId !== sourceId) {
       setDraft(draftFromConfig(detail.data))
       setLoadedId(sourceId)
     }
-  }, [detail.data, detail.isFetching, loadedId, sourceId])
+  }, [detail.data, detail.isError, detail.isFetching, loadedId, sourceId])
 
   const save = useMutation({
     mutationFn: (next: SourceDraft) => api('/api/sources/{source_id}', 'patch', {

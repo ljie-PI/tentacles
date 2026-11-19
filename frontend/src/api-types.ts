@@ -1592,8 +1592,6 @@ export interface components {
             fetch_content?: boolean | null;
             /** Folders */
             folders?: string[] | null;
-            /** Host */
-            host?: string | null;
             /** Include Subfolders */
             include_subfolders?: boolean | null;
             /** Initial Days */
@@ -1618,8 +1616,6 @@ export interface components {
             page_url?: string | null;
             /** Pipelines */
             pipelines?: string[] | null;
-            /** Port */
-            port?: number | null;
             /** Schedule */
             schedule?: string | null;
             /** Search */
@@ -1630,8 +1626,6 @@ export interface components {
             selectors?: {
                 [key: string]: string;
             } | null;
-            /** Ssl */
-            ssl?: boolean | null;
             /** Task */
             task?: string | null;
             /** Timeout */
