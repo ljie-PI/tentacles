@@ -3,7 +3,8 @@ from __future__ import annotations
 
 from dataclasses import replace
 from datetime import datetime
-from typing import Callable
+import threading
+from typing import Callable, Iterable
 
 from tentacles.asyncutil import run_store_call
 from tentacles.config import AppConfig
@@ -25,22 +26,31 @@ class PipelineManager:
     def __init__(self, config: AppConfig, store: Store, models: ModelRegistry,
                  clock: Callable[[], datetime], *, task: Callable[[str, str], Task]):
         self._config, self._store, self._models, self._clock = config, store, models, clock
+        self._lock = threading.RLock()
         self._runs = RunLifecycle(store, clock, secrets=configured_secrets(config))
         self._specs = {spec.id: spec for spec in config.pipelines}
         self._task = task
 
     def spec(self, pipeline_id: str) -> PipelineSpec:
-        if pipeline_id not in self._specs:
+        with self._lock:
+            specs = self._specs
+        if pipeline_id not in specs:
             raise NotFound(f'unknown pipeline {pipeline_id!r}')
-        return self._specs[pipeline_id]
+        return specs[pipeline_id]
 
-    def reload_config(self, config: AppConfig) -> None:
-        self._config = config
-        self._specs = {spec.id: spec for spec in config.pipelines}
+    def reload_config(self, config: AppConfig, *, secrets: Iterable[str] | None = None) -> None:
+        resolved_secrets = list(secrets) if secrets is not None else configured_secrets(config)
+        new_specs = {spec.id: spec for spec in config.pipelines}
+        with self._lock:
+            self._config = config
+            self._specs = new_specs
+            self._runs.set_secrets(resolved_secrets)
 
     def pending_counts(self, now: datetime) -> dict[str, int]:
+        with self._lock:
+            specs = list(self._specs.values())
         counts = {}
-        for spec in self._specs.values():
+        for spec in specs:
             persona = self._store.get_persona(spec.persona)
             assert persona is not None
             counts[spec.id] = self._store.pending_count(self._query(spec, persona, now, spec.processor.max_items))

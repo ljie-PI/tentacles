@@ -5,6 +5,7 @@ import { Drawer, Notice } from './shared'
 import { useDisplayTime } from './display-time'
 
 type SourceType = 'rss' | 'web' | 'browser' | 'imap'
+type CreatableSourceType = Exclude<SourceType, 'imap'>
 type WebMode = 'list' | 'page' | 'llm'
 type DetailErrorMode = 'fail_batch' | 'record_and_skip'
 
@@ -50,12 +51,12 @@ type SourceDraft = {
 function emptyDraft(): SourceDraft {
   return {
     id: '', type: 'rss', name: '', schedule: '1h', enabled: true, updateExisting: false,
-    url: '', maxAgeDays: '', timeout: '30',
+    url: '', maxAgeDays: '', timeout: '',
     mode: 'list', selItem: 'article', selTitle: 'h2', selLink: 'a@href', selSummary: '', selDate: '',
     selector: 'main', fetchContent: false, onDetailError: 'fail_batch', emitBaseline: true,
     maxInputChars: '20000', model: '', concurrency: '4',
     pageUrl: '', task: '', chromeProfile: '', maxItems: '25',
-    host: 'imap.gmail.com', port: '993', ssl: true, folders: 'INBOX', includeSubfolders: false,
+    host: 'imap.gmail.com', port: '', ssl: true, folders: 'INBOX', includeSubfolders: false,
     initialDays: '30', maxFetch: '100', search: 'ALL', excludeSenders: '',
     pipelines: [],
   }
@@ -71,7 +72,7 @@ function draftFromConfig(cfg: SourceConfig): SourceDraft {
     updateExisting: cfg.update_existing ?? false,
     url: cfg.url || '',
     maxAgeDays: cfg.max_age_days != null ? String(cfg.max_age_days) : '',
-    timeout: cfg.timeout != null ? String(cfg.timeout) : cfg.type === 'browser' ? '60' : '30',
+    timeout: cfg.timeout != null ? String(cfg.timeout) : '',
     mode: cfg.mode || 'list',
     selItem: cfg.selectors?.item || '',
     selTitle: cfg.selectors?.title || '',
@@ -90,7 +91,7 @@ function draftFromConfig(cfg: SourceConfig): SourceDraft {
     chromeProfile: cfg.chrome_profile || '',
     maxItems: cfg.max_items != null ? String(cfg.max_items) : '25',
     host: cfg.host || 'imap.gmail.com',
-    port: cfg.port != null ? String(cfg.port) : '993',
+    port: cfg.port != null ? String(cfg.port) : '',
     ssl: cfg.ssl ?? true,
     folders: (cfg.folders || ['INBOX']).join('\n'),
     includeSubfolders: cfg.include_subfolders ?? false,
@@ -102,57 +103,74 @@ function draftFromConfig(cfg: SourceConfig): SourceDraft {
   }
 }
 
-const parseLines = (raw: string) => raw.split(/\r?\n|,/).map(v => v.trim()).filter(Boolean)
-const optionalInt = (raw: string): number | null => raw.trim() ? Number(raw.trim()) : null
-const optionalFloat = (raw: string): number | null => raw.trim() ? Number(raw.trim()) : null
+const parseLines = (raw: string) => raw.split(/\r?\n/).map(v => v.trim()).filter(Boolean)
 
-function toCreatePayload(draft: SourceDraft): SourceCreate {
-  const base: SourceCreate = {
-    id: draft.id.trim(),
-    type: draft.type === 'imap' ? 'rss' : draft.type,
-    name: draft.name.trim() || null,
-    schedule: draft.schedule.trim(),
-    enabled: draft.enabled,
-    update_existing: draft.type === 'web' && draft.mode === 'page' ? false : draft.updateExisting,
-    pipelines: draft.pipelines,
-  }
-  const timeout = optionalFloat(draft.timeout)
-  if (timeout !== null) base.timeout = timeout
-  if (base.type === 'rss') {
-    base.url = draft.url.trim()
-    base.max_age_days = optionalInt(draft.maxAgeDays)
-  } else if (base.type === 'web') {
-    base.url = draft.url.trim()
-    base.mode = draft.mode
+function optionalNumber(raw: string): number | null {
+  const trimmed = raw.trim()
+  if (!trimmed) return null
+  const parsed = Number(trimmed)
+  return Number.isFinite(parsed) ? parsed : -1
+}
+
+function optionalInt(raw: string): number | null {
+  const parsed = optionalNumber(raw)
+  return parsed === null ? null : Math.trunc(parsed)
+}
+
+function applyNonImapFields(
+  target: SourceCreate | SourceUpdate,
+  draft: SourceDraft,
+  type: CreatableSourceType,
+  includeNullTimeout: boolean,
+): void {
+  const timeout = optionalNumber(draft.timeout)
+  if (timeout !== null || includeNullTimeout) target.timeout = timeout
+  if (type === 'rss') {
+    target.url = draft.url.trim()
+    target.max_age_days = optionalInt(draft.maxAgeDays)
+  } else if (type === 'web') {
+    target.url = draft.url.trim()
+    target.mode = draft.mode
     if (draft.mode === 'list') {
-      base.selectors = {
+      target.selectors = {
         item: draft.selItem.trim(),
         title: draft.selTitle.trim(),
         link: draft.selLink.trim(),
         ...(draft.selSummary.trim() ? { summary: draft.selSummary.trim() } : {}),
         ...(draft.selDate.trim() ? { date: draft.selDate.trim() } : {}),
       }
-      base.fetch_content = draft.fetchContent
-      base.on_detail_error = draft.onDetailError
-      const concurrency = optionalInt(draft.concurrency)
-      if (concurrency !== null) base.concurrency = concurrency
+      target.fetch_content = draft.fetchContent
+      target.on_detail_error = draft.onDetailError
+      target.concurrency = optionalInt(draft.concurrency)
     } else if (draft.mode === 'page') {
-      base.selector = draft.selector.trim() || null
-      base.emit_baseline = draft.emitBaseline
+      target.selector = draft.selector.trim() || null
+      target.emit_baseline = draft.emitBaseline
     } else if (draft.mode === 'llm') {
-      base.model = draft.model.trim() || null
-      base.fetch_content = draft.fetchContent
-      const maxInput = optionalInt(draft.maxInputChars)
-      if (maxInput !== null) base.max_input_chars = maxInput
+      target.model = draft.model.trim() || null
+      target.fetch_content = draft.fetchContent
+      target.max_input_chars = optionalInt(draft.maxInputChars)
     }
-  } else if (base.type === 'browser') {
-    base.page_url = draft.pageUrl.trim()
-    base.task = draft.task.trim()
-    base.chrome_profile = draft.chromeProfile.trim() || null
-    base.on_detail_error = draft.onDetailError
-    const maxItems = optionalInt(draft.maxItems)
-    if (maxItems !== null) base.max_items = maxItems
+  } else if (type === 'browser') {
+    target.page_url = draft.pageUrl.trim()
+    target.task = draft.task.trim() || null
+    target.chrome_profile = draft.chromeProfile.trim() || null
+    target.on_detail_error = draft.onDetailError
+    target.max_items = optionalInt(draft.maxItems)
   }
+}
+
+function toCreatePayload(draft: SourceDraft): SourceCreate {
+  const type: CreatableSourceType = draft.type === 'imap' ? 'rss' : draft.type
+  const base: SourceCreate = {
+    id: draft.id.trim(),
+    type,
+    name: draft.name.trim() || null,
+    schedule: draft.schedule.trim(),
+    enabled: draft.enabled,
+    update_existing: type === 'web' && draft.mode === 'page' ? false : draft.updateExisting,
+    pipelines: draft.pipelines,
+  }
+  applyNonImapFields(base, draft, type, false)
   return base
 }
 
@@ -163,15 +181,11 @@ function toUpdatePayload(draft: SourceDraft): SourceUpdate {
     enabled: draft.enabled,
     pipelines: draft.pipelines,
   }
-  if (draft.type !== 'imap' && !(draft.type === 'web' && draft.mode === 'page')) {
-    patch.update_existing = draft.updateExisting
-  }
-  const timeout = optionalFloat(draft.timeout)
-  if (timeout !== null) patch.timeout = timeout
-  if (draft.type === 'rss') {
-    patch.url = draft.url.trim()
-    patch.max_age_days = optionalInt(draft.maxAgeDays)
-  } else if (draft.type === 'imap') {
+  if (draft.type !== 'imap') {
+    patch.update_existing = draft.type === 'web' && draft.mode === 'page' ? false : draft.updateExisting
+    applyNonImapFields(patch, draft, draft.type, true)
+  } else {
+    patch.timeout = optionalNumber(draft.timeout)
     patch.host = draft.host.trim()
     patch.port = optionalInt(draft.port)
     patch.ssl = draft.ssl
@@ -181,34 +195,6 @@ function toUpdatePayload(draft: SourceDraft): SourceUpdate {
     patch.max_fetch = optionalInt(draft.maxFetch)
     patch.search = draft.search.trim()
     patch.exclude_senders = parseLines(draft.excludeSenders)
-  } else if (draft.type === 'web') {
-    patch.url = draft.url.trim()
-    patch.mode = draft.mode
-    if (draft.mode === 'list') {
-      patch.selectors = {
-        item: draft.selItem.trim(),
-        title: draft.selTitle.trim(),
-        link: draft.selLink.trim(),
-        ...(draft.selSummary.trim() ? { summary: draft.selSummary.trim() } : {}),
-        ...(draft.selDate.trim() ? { date: draft.selDate.trim() } : {}),
-      }
-      patch.fetch_content = draft.fetchContent
-      patch.on_detail_error = draft.onDetailError
-      patch.concurrency = optionalInt(draft.concurrency)
-    } else if (draft.mode === 'page') {
-      patch.selector = draft.selector.trim() || null
-      patch.emit_baseline = draft.emitBaseline
-    } else if (draft.mode === 'llm') {
-      patch.model = draft.model.trim() || null
-      patch.fetch_content = draft.fetchContent
-      patch.max_input_chars = optionalInt(draft.maxInputChars)
-    }
-  } else if (draft.type === 'browser') {
-    patch.page_url = draft.pageUrl.trim()
-    patch.task = draft.task.trim()
-    patch.chrome_profile = draft.chromeProfile.trim() || null
-    patch.on_detail_error = draft.onDetailError
-    patch.max_items = optionalInt(draft.maxItems)
   }
   return patch
 }
@@ -239,6 +225,7 @@ function SourceForm({
       pipelines: has ? draft.pipelines.filter(id => id !== pid) : [...draft.pipelines, pid],
     })
   }
+  const timeoutPlaceholder = draft.type === 'browser' ? '默认 60' : '默认 30'
 
   return (
     <form className="source-form" onSubmit={event => { event.preventDefault(); onSubmit() }}>
@@ -324,7 +311,7 @@ function SourceForm({
           Feed URL
           <input
             name="rss-url"
-            type="url"
+            type="text"
             value={draft.url}
             disabled={busy}
             onChange={event => setDraft({ ...draft, url: event.target.value })}
@@ -354,6 +341,7 @@ function SourceForm({
               step="any"
               value={draft.timeout}
               disabled={busy}
+              placeholder={timeoutPlaceholder}
               onChange={event => setDraft({ ...draft, timeout: event.target.value })}
             />
           </label>
@@ -384,6 +372,7 @@ function SourceForm({
               step="any"
               value={draft.timeout}
               disabled={busy}
+              placeholder={timeoutPlaceholder}
               onChange={event => setDraft({ ...draft, timeout: event.target.value })}
             />
           </label>
@@ -392,7 +381,7 @@ function SourceForm({
           目标网页 URL
           <input
             name="web-url"
-            type="url"
+            type="text"
             value={draft.url}
             disabled={busy}
             onChange={event => setDraft({ ...draft, url: event.target.value })}
@@ -445,7 +434,7 @@ function SourceForm({
           入口页 URL（page_url）
           <input
             name="browser-url"
-            type="url"
+            type="text"
             value={draft.pageUrl}
             disabled={busy}
             onChange={event => setDraft({ ...draft, pageUrl: event.target.value })}
@@ -473,7 +462,7 @@ function SourceForm({
               <option value="fail_batch">fail_batch</option>
             </select>
           </label>
-          <label>单次重放超时（秒）<input type="number" min={1} step="any" value={draft.timeout} disabled={busy} onChange={e => setDraft({ ...draft, timeout: e.target.value })} /></label>
+          <label>单次重放超时（秒）<input type="number" min={1} step="any" value={draft.timeout} disabled={busy} placeholder={timeoutPlaceholder} onChange={e => setDraft({ ...draft, timeout: e.target.value })} /></label>
         </div>
       </>}
 
@@ -481,7 +470,7 @@ function SourceForm({
         <p className="small muted">邮箱凭据（用户名与密码）仍由 .env 注入，此处仅调整文件夹、查询条件与抓取限额。</p>
         <div className="form-row">
           <label>IMAP 主机<input value={draft.host} disabled={busy} onChange={e => setDraft({ ...draft, host: e.target.value })} required /></label>
-          <label>端口<input type="number" min={1} max={65535} value={draft.port} disabled={busy} onChange={e => setDraft({ ...draft, port: e.target.value })} required /></label>
+          <label>端口（可选）<input type="number" min={1} max={65535} value={draft.port} disabled={busy} placeholder={draft.ssl ? '默认 993' : '默认 143'} onChange={e => setDraft({ ...draft, port: e.target.value })} /></label>
         </div>
         <div className="form-row">
           <label className="checkbox-label"><input type="checkbox" checked={draft.ssl} disabled={busy} onChange={e => setDraft({ ...draft, ssl: e.target.checked })} />启用 SSL</label>
@@ -489,7 +478,7 @@ function SourceForm({
         </div>
         <label>
           监听文件夹（每行一个，多级用 / 分隔）
-          <textarea rows={3} value={draft.folders} disabled={busy} onChange={e => setDraft({ ...draft, folders: e.target.value })} />
+          <textarea rows={3} value={draft.folders} disabled={busy} onChange={e => setDraft({ ...draft, folders: e.target.value })} required />
         </label>
         <div className="form-row">
           <label>首次回溯天数<input type="number" min={1} value={draft.initialDays} disabled={busy} onChange={e => setDraft({ ...draft, initialDays: e.target.value })} /></label>
@@ -497,7 +486,7 @@ function SourceForm({
         </div>
         <div className="form-row">
           <label>IMAP SEARCH 条件<input value={draft.search} disabled={busy} onChange={e => setDraft({ ...draft, search: e.target.value })} /></label>
-          <label>超时（秒）<input type="number" min={1} step="any" value={draft.timeout} disabled={busy} onChange={e => setDraft({ ...draft, timeout: e.target.value })} /></label>
+          <label>超时（秒）<input type="number" min={1} step="any" value={draft.timeout} disabled={busy} placeholder={timeoutPlaceholder} onChange={e => setDraft({ ...draft, timeout: e.target.value })} /></label>
         </div>
         <label>
           排除发件人（每行一个完整邮箱）
@@ -548,10 +537,19 @@ function EditSourceDrawer({
     queryKey: ['source-config', sourceId],
     queryFn: () => api('/api/sources/{source_id}', 'get', { path: { source_id: sourceId } }),
   })
+  // Snapshot once per opened sourceId so window-focus refetches never wipe unsaved edits.
+  const [loadedId, setLoadedId] = useState<string | null>(null)
   const [draft, setDraft] = useState<SourceDraft | null>(null)
   useEffect(() => {
-    if (detail.data) setDraft(draftFromConfig(detail.data))
-  }, [detail.data])
+    if (loadedId !== sourceId) {
+      setDraft(null)
+      setLoadedId(null)
+    }
+    if (detail.data && loadedId !== sourceId) {
+      setDraft(draftFromConfig(detail.data))
+      setLoadedId(sourceId)
+    }
+  }, [detail.data, loadedId, sourceId])
 
   const save = useMutation({
     mutationFn: (next: SourceDraft) => api('/api/sources/{source_id}', 'patch', {
@@ -592,6 +590,7 @@ export default function Sources() {
   const [showCreate, setShowCreate] = useState(false)
   const [createDraft, setCreateDraft] = useState<SourceDraft>(() => emptyDraft())
   const [editingId, setEditingId] = useState<string | null>(null)
+  const [togglingIds, setTogglingIds] = useState<Set<string>>(() => new Set())
   const [notice, setNotice] = useState('')
 
   const query = useQuery({ queryKey: ['sources'], queryFn: () => api('/api/sources', 'get'), refetchInterval: 30000 })
@@ -611,9 +610,19 @@ export default function Sources() {
   const toggle = useMutation({
     mutationFn: ({ id, enabled }: { id: string; enabled: boolean }) =>
       api('/api/sources/{source_id}', 'patch', { path: { source_id: id }, body: { enabled } }),
+    onMutate: ({ id }) => {
+      setTogglingIds(prev => new Set(prev).add(id))
+    },
     onSuccess: async data => {
       setNotice(`已${data.enabled ? '启用' : '停用'}信息源「${data.name || data.id}」。`)
       await invalidateAll()
+    },
+    onSettled: (_data, _error, { id }) => {
+      setTogglingIds(prev => {
+        const next = new Set(prev)
+        next.delete(id)
+        return next
+      })
     },
   })
 
@@ -650,7 +659,7 @@ export default function Sources() {
     </header>
 
     <div className="sources-toolbar">
-      <p className="section-note" style={{ margin: 0 }}>支持在线新增、编辑与一键启停，变更会写回 YAML 并立即生效；手动抓取也可测试已停用的源。</p>
+      <p className="section-note">支持在线新增、编辑与一键启停，变更会写回 YAML 并立即生效；手动抓取也可测试已停用的源。</p>
       <input
         type="search"
         value={filter}
@@ -672,6 +681,10 @@ export default function Sources() {
       <div className="empty"><h2>尚未配置来源</h2><p>点击右上角「+ 新增信息源」添加 RSS、网页或浏览器源。</p></div>
     )}
 
+    {!!query.data?.length && visibleSources.length === 0 && (
+      <div className="empty"><h2>无匹配信息源</h2><p>没有匹配「{filter.trim()}」的信息源。</p></div>
+    )}
+
     {!!visibleSources.length && (
       <div className="table-wrap">
         <table>
@@ -687,7 +700,7 @@ export default function Sources() {
           </thead>
           <tbody>
             {visibleSources.map(source => {
-              const togglingThis = toggle.isPending && toggle.variables?.id === source.id
+              const togglingThis = togglingIds.has(source.id)
               const fetchingThis = fetch.isPending && fetch.variables === source.id
               return (
                 <tr key={source.id}>

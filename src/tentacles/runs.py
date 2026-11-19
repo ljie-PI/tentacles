@@ -126,6 +126,9 @@ class RunLifecycle:
         self._store, self._clock = store, clock
         self._secrets = list(secrets)
 
+    def set_secrets(self, secrets: Iterable[str]) -> None:
+        self._secrets = list(secrets)
+
     async def execute(self, task: Task | tuple[str, str], work: Callable[[RunOperation], Awaitable[None]], *,
                       due_only: bool = False,
                       failure_message: str | Callable[[BaseException], str] = 'run failed',

@@ -15,7 +15,7 @@ _BASE_URLS = {'openai': 'https://api.openai.com/v1',
               'anthropic': 'https://api.anthropic.com/v1',
               'openrouter': 'https://openrouter.ai/api/v1',
               'opencode-go': 'https://opencode.ai/zen/go/v1'}
-_RESERVED_HEADERS = frozenset({'authorization', 'x-api-key', 'host', 'content-length'})
+_RESERVED_HEADERS = frozenset({'authorization', 'x-api-key', 'host', 'content-length', 'content-type'})
 
 
 def _has_controls(value: str) -> bool:

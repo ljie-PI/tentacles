@@ -13,67 +13,6 @@ class SourceFetch(BaseModel):
     ids: list[str] | None = None
 
 
-class SourceCreate(BaseModel):
-    model_config = ConfigDict(extra='forbid')
-    id: str = Field(min_length=1)
-    type: Literal['rss', 'web', 'browser'] = 'rss'
-    name: str | None = None
-    schedule: str = '1h'
-    enabled: bool = True
-    update_existing: bool = False
-    pipelines: list[str] = Field(default_factory=list)
-    url: str | None = None
-    max_age_days: int | None = None
-    timeout: float | None = None
-    mode: Literal['list', 'page', 'llm'] | None = None
-    selectors: dict[str, str] | None = None
-    selector: str | None = None
-    fetch_content: bool | None = None
-    on_detail_error: Literal['fail_batch', 'record_and_skip'] | None = None
-    emit_baseline: bool | None = None
-    max_input_chars: int | None = None
-    model: str | None = None
-    concurrency: int | None = None
-    page_url: str | None = None
-    task: str | None = None
-    chrome_profile: str | None = None
-    max_items: int | None = None
-
-
-class SourceUpdate(BaseModel):
-    model_config = ConfigDict(extra='forbid')
-    name: str | None = None
-    schedule: str | None = None
-    enabled: bool | None = None
-    update_existing: bool | None = None
-    pipelines: list[str] | None = None
-    url: str | None = None
-    max_age_days: int | None = None
-    timeout: float | None = None
-    host: str | None = None
-    port: int | None = None
-    ssl: bool | None = None
-    folders: list[str] | None = None
-    include_subfolders: bool | None = None
-    initial_days: int | None = None
-    max_fetch: int | None = None
-    search: str | None = None
-    exclude_senders: list[str] | None = None
-    mode: Literal['list', 'page', 'llm'] | None = None
-    selectors: dict[str, str] | None = None
-    selector: str | None = None
-    fetch_content: bool | None = None
-    on_detail_error: Literal['fail_batch', 'record_and_skip'] | None = None
-    emit_baseline: bool | None = None
-    max_input_chars: int | None = None
-    model: str | None = None
-    concurrency: int | None = None
-    page_url: str | None = None
-    task: str | None = None
-    chrome_profile: str | None = None
-    max_items: int | None = None
-
-
 class ErrorDetail(BaseModel):
     code: str
     message: str

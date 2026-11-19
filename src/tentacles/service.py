@@ -19,7 +19,11 @@ from tentacles.net import HttpPool
 from tentacles.llm.registry import ModelRegistry
 from tentacles.llm.config import Stage
 from tentacles.llm.json import extract_json
-from tentacles.schemas import ConfigCheck, ErrorEventDetail, ErrorEventView, FetchOutcome, ItemDetail, ItemSearchView, ItemView, Page, RunDetail, RunView, SourceConfigView, SourceView, TaskView, ModelView, Completion, ModelTest, TickOutcome, StorageArchive, StorageReindex, StorageStatus
+from tentacles.schemas import (
+    ConfigCheck, ErrorEventDetail, ErrorEventView, FetchOutcome, ItemDetail, ItemSearchView,
+    ItemView, Page, RunDetail, RunView, SourceConfigView, SourceCreate, SourceUpdate, SourceView,
+    TaskView, ModelView, Completion, ModelTest, TickOutcome, StorageArchive, StorageReindex, StorageStatus,
+)
 from tentacles.store import ItemQuery, RunErrorQuery, Store
 from tentacles.personas.manager import PersonaManager
 from tentacles.personas.models import FeedbackView, PersonaProposal, PersonaView
@@ -28,7 +32,6 @@ from tentacles.scheduler import Scheduler
 from tentacles.timeutil import parse_since, utcnow, to_utc
 from tentacles.sources.config_store import create_source_in_config, get_source_config as read_source_config, update_source_in_config
 from tentacles.sources.imap_client import ImapFactory, connect_imap
-from tentacles.api.models import SourceCreate, SourceUpdate
 
 class TentaclesService:
     def __init__(self, config: AppConfig, store: Store, *,

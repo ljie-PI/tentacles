@@ -54,8 +54,8 @@ It preserves fetch options (including abort signals), token injection and `ApiEr
 Component props and cache snapshots may still use schema aliases; request results must be inferred.
 
 Feed filters and selected detail ID are URL state. Pagination uses the API's offset/limit; query changes
-start a new page sequence. Details render content as text (not raw HTML). Sources supports manual fetch
-and invalidates source/feed/run/scheduler caches after success or failure. Themes are persisted per browser.
+start a new page sequence. Details render content as text (not raw HTML). Sources supports online source creation, editing (preserving `.env` placeholders), inline enable/disable
+toggles and manual fetch, invalidating source/source-config/feed/pipeline/run/scheduler caches. Themes are persisted per browser.
 
 Noto Sans SC Variable is self-hosted with the application so Chinese text does not depend on system
 font availability or an external font CDN. Fonts load by Unicode range; the distributed OFL notice is

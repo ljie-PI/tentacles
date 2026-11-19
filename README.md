@@ -84,13 +84,14 @@ app:
 
 | 字段 | 说明与默认值 |
 | :--- | :--- |
-| `provider` | `openai`（默认，兼容 DeepSeek / Moonshot / Ollama / vLLM）、`anthropic`、`openrouter` |
+| `provider` | `openai`（默认，兼容 DeepSeek / Moonshot / Ollama / vLLM）、`anthropic`、`openrouter`、`opencode-go`（自动附带 `x-opencode-session`） |
 | `kind` | `chat`（默认）或 `decision`（仅限 `provider: openrouter`） |
 | `model` | 服务商侧真实模型 ID（必填） |
 | `base_url` | API 根路径（如本地 Ollama `http://localhost:11434/v1`）；禁止携带凭据、query 或 fragment |
 | `api_key` | 支持为空；仅实际发起调用时检查非空。本地无鉴权服务填任意非空占位值（如 `local`） |
 | `temperature` / `max_tokens` | `temperature` 可选 `0~2`；`max_tokens` 默认 `4096`（OpenAI 接口若在 `extra_body` 设了 `max_completion_tokens` 则省略 `max_tokens`） |
 | `timeout` / `retries` / `concurrency` | 默认超时 `60`s、重试 `2` 次；`decision` 并发 worker 上限默认 `8` |
+| `headers` | 可选自定义 HTTP 请求头字典；禁止覆盖 `authorization / x-api-key / host / content-length / content-type`，敏感头自动脱敏 |
 | `extra_body` | 合并进请求 JSON 的扩展参数；禁止覆盖 `model / messages / system / stream / state / questions` |
 
 - **重试与脱敏**：对 `408 / 409 / 425 / 429`、所有 `5xx`、网络错误和超时自动重试（优先遵守 `Retry-After`，上限 60s，否则指数退避上限 30s），不跟随 HTTP 重定向。所有模型 `api_key` 均全局脱敏为 `[REDACTED]`。
@@ -109,7 +110,7 @@ app:
 - 自动处理条件 GET（`ETag` / `Last-Modified` -> `304`）；执行多级去重（同源 `external_id`、规范化 URL 剥离追踪参数、标题+摘要指纹及 48h 跨源近似标题去重）。
 
 ### 2. IMAP 邮箱（`type: imap`）
-- 字段：`host`、`port`（默认 SSL `993` / 非 SSL `143`）、`ssl`（默认 `true` 严格校验证书；`false` 不升级 STARTTLS 仅限可信本地桥接）、`username`、`password`、`folders`（默认 `[INBOX]`）、`initial_days`（默认 30）、`max_fetch`（默认 100，所有文件夹合计）、`search`（默认 `ALL`）、`exclude_senders`、`max_body_chars`（20000）、`max_summary_chars`（2000）、`timeout`（30）。
+- 字段：`host`、`port`（默认 SSL `993` / 非 SSL `143`）、`ssl`（默认 `true` 严格校验证书；`false` 不升级 STARTTLS 仅限可信本地桥接）、`username`、`password`、`folders`（默认 `[INBOX]`）、`include_subfolders`（默认 `false`，为 `true` 时通过 IMAP `LIST` 递归展开子文件夹）、`initial_days`（默认 30）、`max_fetch`（默认 100，所有文件夹合计）、`search`（默认 `ALL`）、`exclude_senders`、`max_body_chars`（20000）、`max_summary_chars`（2000）、`timeout`（30）。
 - **认证要求**：Gmail 须启用两步验证并使用**应用专用密码**；Outlook.com / Hotmail 已停用 Basic Auth 强制 OAuth2，当前仅支持 `IMAP LOGIN` 暂不适用。
 - **只读语义**：始终以只读模式和 `BODY.PEEK[]` 读取，绝不标记已读、移动或删除；按文件夹独立维护 `UIDVALIDITY + 最后 UID` 游标；优先取 `text/plain`，清理引用块并仅记录附件名；不做指纹/近似标题去重；单封坏信跳过并推进游标。
 

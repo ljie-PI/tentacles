@@ -4,6 +4,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Callable
 
+from tentacles.diagnostics import header_secret_values
 from tentacles.timeutil import utcnow
 from tentacles.errors import ConfigError, NotFound
 from tentacles.llm.client import ChatModel, DecisionModel
@@ -20,9 +21,7 @@ class ModelRegistry:
         self._decisions: dict[str, DecisionModel] = {}
         raw_keys = [s.api_key.get_secret_value() for s in specs.values() if s.api_key.get_secret_value()]
         for spec in specs.values():
-            for header_name, header_val in spec.headers.items():
-                if header_val and any(tok in header_name.lower() for tok in ('key', 'token', 'secret', 'auth', 'session')):
-                    raw_keys.append(header_val)
+            raw_keys.extend(header_secret_values(spec.headers))
         self._keys = sorted(set(raw_keys), key=len, reverse=True)
 
     def redact(self, text: str) -> str:

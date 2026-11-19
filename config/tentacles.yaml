@@ -14,7 +14,7 @@ app:
     archive_dir: ../data/archive  # 年度冷库目录（tentacles-YYYY.db），相对本文件解析
 
 # 命名模型：不填写 key 也可以校验配置、抓取 RSS；实际调用时才报 upstream。
-# provider: openai（包括 DeepSeek/Moonshot/Ollama/vLLM）、anthropic、openrouter。
+# provider: openai（包括 DeepSeek/Moonshot/Ollama/vLLM）、anthropic、openrouter、opencode-go。
 # kind 默认为 chat。base_url 是 API 根路径；模型 ID 请按服务商当前可用型号调整。
 models:
   chat:
@@ -97,7 +97,7 @@ browser:
   webbridge_url: http://127.0.0.1:10086   # 冷启动探索的一次性本地工具桥接端点（仅回环地址）
   auto_launch: true                       # CDP 无人监听时自动拉起有界面 Chrome（绝不传 --headless）
   chrome_executable: null                 # 可选显式 Chrome 可执行文件路径
-  chrome_user_data_dir: ../data/chrome_profile  # 软连接到 ~/.hermes/workspace/chrome_profile
+  chrome_user_data_dir: ../data/chrome_profile  # Chrome User Data 根目录（相对本文件解析，可软连接复用现有目录）
   default_profile: Default                # 默认 Chrome Profile 目录名（如 Default、Profile 1）
   scripts_dir: ../scripts/browser_sources # 固化 Playwright 脚本目录；相对本文件解析
   pi:                                     # 冷启动探索、提炼与重放自愈所用的 Agent 模型
@@ -165,7 +165,7 @@ sources:
   - {id: paperweekly, name: 微信公众号-PaperWeekly, type: rss, url: "https://decemberpei.cyou/rssbox/wechat-paperweekly.xml", schedule: 1h, max_age_days: 1}
   - {id: ai-frontier, name: 微信公众号-AI前线, type: rss, url: "https://decemberpei.cyou/rssbox/wechat-aiqianxian.xml", schedule: 1h, max_age_days: 1}
 
-  # 邮箱默认关闭，避免配置尚未完成时连接真实邮箱；显式 sources fetch inbox 可手动测试。
+  # IMAP 邮箱源：凭据由 .env 注入；开启 include_subfolders 时自动展开子文件夹（未配置凭据时请设为 enabled: false）。
   # 仅支持密码/应用专用密码登录，不支持 Outlook.com 要求的 OAuth2。
   - id: inbox
     type: imap
@@ -400,7 +400,7 @@ pipelines:
       max_reports: 3         # 仅取规模最大的前 3 个达标事件
       instructions: 区分已证实的事实与各方说法，明确列出仍需核实的问题。
 
-  # 邮件简报：源 inbox 和本 pipeline 均默认关闭，确认隐私与模型费用后再启用。
+  # 邮件简报：汇总 inbox 入库邮件并调用 process 模型提炼待办（未启用邮箱时请设为 enabled: false）。
   # 手动 pipelines run mail-summary 仍会调用 process 模型（即使 enabled: false）。
   - id: mail-summary
     name: 邮件简报

@@ -27,9 +27,20 @@ class ModelClient:
 
     def _request_headers(self, key: str, headers: dict[str, str] | None) -> dict[str, str]:
         merged = dict(self.spec.headers)
-        if self.spec.is_opencode_go and not any(k.lower() == 'x-opencode-session' for k in merged):
+        existing_lower = {k.lower(): k for k in merged}
+        if self.spec.is_opencode_go and 'x-opencode-session' not in existing_lower:
             merged['x-opencode-session'] = self._opencode_session
-        merged.update(headers or {'Authorization': f'Bearer {key}'})
+            existing_lower['x-opencode-session'] = 'x-opencode-session'
+        for name, val in (headers or {'Authorization': f'Bearer {key}'}).items():
+            lowered = name.lower()
+            if lowered in {'authorization', 'x-api-key'}:
+                if lowered in existing_lower:
+                    merged.pop(existing_lower[lowered], None)
+                merged[name] = val
+                existing_lower[lowered] = name
+            elif lowered not in existing_lower:
+                merged[name] = val
+                existing_lower[lowered] = name
         return merged
 
     async def _post(self, path: str, body: dict[str, Any], *, headers: dict[str, str] | None = None,

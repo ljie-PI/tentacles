@@ -76,6 +76,11 @@ _SENSITIVE_NAMES = frozenset({
     'api_key', 'apikey', 'access_token', 'refresh_token', 'client_secret', 'auth',
     'session', 'sessionid', 'csrf', 'bearer',
 })
+_SENSITIVE_NAME_TOKENS = frozenset({
+    'auth', 'bearer', 'cookie', 'cookies', 'csrf', 'key', 'passwd', 'password',
+    'secret', 'session', 'sessionid', 'sig', 'signature', 'token',
+})
+_MIN_COMPOSITE_SECRET_LEN = 6
 # Request/response header maps a triage snapshot may carry under these keys.
 _HEADER_KEYS = frozenset({'headers', 'request_headers', 'response_headers'})
 # HTTP statuses worth retrying; every 5xx is retried too.
@@ -227,29 +232,54 @@ def configured_secrets(config: AppConfig) -> list[str]:
         key = spec.api_key.get_secret_value()
         if key:
             secrets.append(key)
-        secrets.extend(_option_secrets(spec.headers))
+        secrets.extend(header_secret_values(spec.headers))
     for source in config.sources:
         secrets.extend(_option_secrets(source.options))
     return list(dict.fromkeys(secrets))
 
 
-def _option_secrets(value: Any, name: str = '', sensitive: bool = False) -> list[str]:
+def header_secret_values(headers: Mapping[str, str]) -> list[str]:
+    """Extract credential substrings from custom HTTP headers without matching tiny flags."""
+    found: list[str] = []
+    for name, value in headers.items():
+        if not value or not _sensitive_name(name):
+            continue
+        exact = name.strip().lower() in _SENSITIVE_NAMES
+        if exact or len(value.strip()) >= _MIN_COMPOSITE_SECRET_LEN:
+            found.append(value)
+        found.extend(
+            part for part in value.split()
+            if part.lower() not in _AUTH_SCHEMES and (exact or len(part) >= _MIN_COMPOSITE_SECRET_LEN)
+        )
+    return found
+
+
+def _option_secrets(value: Any, name: str = '', sensitive: bool = False,
+                    composite_only: bool = False) -> list[str]:
     """Every credential value below `value`; a sensitive key claims its whole subtree."""
     found: list[str] = []
-    sensitive = sensitive or _sensitive_name(name)
+    lowered = name.strip().lower()
+    if not sensitive and _sensitive_name(name):
+        sensitive = True
+        composite_only = lowered not in _SENSITIVE_NAMES
     if isinstance(value, Mapping):
         for key, item in value.items():
-            found.extend(_option_secrets(item, str(key), sensitive))
+            found.extend(_option_secrets(item, str(key), sensitive, composite_only))
         return found
     if isinstance(value, (list, tuple)):
         for item in value:
-            found.extend(_option_secrets(item, name, sensitive))
+            found.extend(_option_secrets(item, name, sensitive, composite_only))
         return found
     if not isinstance(value, str) or not value:
         return found
     if sensitive:
-        found.append(value)
-        found.extend(part for part in value.split() if part.lower() not in _AUTH_SCHEMES)
+        if not composite_only or len(value.strip()) >= _MIN_COMPOSITE_SECRET_LEN:
+            found.append(value)
+        found.extend(
+            part for part in value.split()
+            if part.lower() not in _AUTH_SCHEMES
+            and (not composite_only or len(part) >= _MIN_COMPOSITE_SECRET_LEN)
+        )
     if '://' in value:
         found.extend(_url_secrets(value))
     return found
@@ -285,7 +315,11 @@ def _redact_query(query: str) -> str:
 
 
 def _sensitive_name(name: str) -> bool:
-    return name.strip().lower() in _SENSITIVE_NAMES
+    lowered = name.strip().lower()
+    if lowered in _SENSITIVE_NAMES:
+        return True
+    parts = [part for part in re.split(r'[-_.]', lowered) if part]
+    return any(part in _SENSITIVE_NAME_TOKENS for part in parts)
 
 
 def redact_text(text: str, secrets: Iterable[str] = ()) -> str:

@@ -6,7 +6,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Generic, Literal, TypeVar
 
-from pydantic import BaseModel, Field, computed_field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, computed_field, model_validator
 
 from tentacles.diagnostics import FailedTargetRef
 from tentacles.models import Item, ItemKind
@@ -47,25 +47,10 @@ class SourceView(BaseModel):
     running: bool = False
 
 
-class SourceConfigView(BaseModel):
-    id: str
-    type: Literal['rss', 'imap', 'web', 'browser']
-    name: str | None = None
-    schedule: str
-    enabled: bool
-    update_existing: bool = False
+class _WebAndBrowserSourceFields(BaseModel):
     url: str | None = None
     max_age_days: int | None = None
-    timeout: float | None = None
-    host: str | None = None
-    port: int | None = None
-    ssl: bool | None = None
-    folders: list[str] | None = None
-    include_subfolders: bool | None = None
-    initial_days: int | None = None
-    max_fetch: int | None = None
-    search: str | None = None
-    exclude_senders: list[str] | None = None
+    timeout: float | None = Field(default=None, allow_inf_nan=False)
     mode: Literal['list', 'page', 'llm'] | None = None
     selectors: dict[str, str] | None = None
     selector: str | None = None
@@ -79,6 +64,61 @@ class SourceConfigView(BaseModel):
     task: str | None = None
     chrome_profile: str | None = None
     max_items: int | None = None
+
+
+class _AllSourceOptionFields(_WebAndBrowserSourceFields):
+    host: str | None = None
+    port: int | None = None
+    ssl: bool | None = None
+    folders: list[str] | None = None
+    include_subfolders: bool | None = None
+    initial_days: int | None = None
+    max_fetch: int | None = None
+    search: str | None = None
+    exclude_senders: list[str] | None = None
+
+
+_NON_NULLABLE_SOURCE_PATCH_FIELDS = frozenset({
+    'schedule', 'enabled', 'update_existing', 'pipelines',
+    'url', 'mode', 'page_url', 'host', 'ssl', 'folders',
+    'include_subfolders', 'search', 'exclude_senders',
+})
+
+
+class SourceCreate(_WebAndBrowserSourceFields):
+    model_config = ConfigDict(extra='forbid')
+    id: str = Field(min_length=1, max_length=128)
+    type: Literal['rss', 'web', 'browser'] = 'rss'
+    name: str | None = None
+    schedule: str = '1h'
+    enabled: bool = True
+    update_existing: bool = False
+    pipelines: list[str] = Field(default_factory=list)
+
+
+class SourceUpdate(_AllSourceOptionFields):
+    model_config = ConfigDict(extra='forbid')
+    name: str | None = None
+    schedule: str | None = None
+    enabled: bool | None = None
+    update_existing: bool | None = None
+    pipelines: list[str] | None = None
+
+    @model_validator(mode='after')
+    def _reject_explicit_nulls(self) -> SourceUpdate:
+        for field_name in self.model_fields_set & _NON_NULLABLE_SOURCE_PATCH_FIELDS:
+            if getattr(self, field_name) is None:
+                raise ValueError(f'{field_name} cannot be null')
+        return self
+
+
+class SourceConfigView(_AllSourceOptionFields):
+    id: str
+    type: Literal['rss', 'imap', 'web', 'browser']
+    name: str | None = None
+    schedule: str
+    enabled: bool
+    update_existing: bool = False
     pipelines: list[str] = Field(default_factory=list)
 
 

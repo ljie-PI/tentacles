@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime
+import threading
 from typing import Callable, Literal
 
 import httpx
@@ -36,6 +37,7 @@ class Scheduler:
                  transport: httpx.AsyncBaseTransport | None = None,
                  imap_factory: ImapFactory = connect_imap):
         self._config, self._store, self._models, self._clock = config, store, models, clock
+        self._lock = threading.RLock()
         self._transport, self._imap_factory = transport, imap_factory
         self._runs = RunLifecycle(store, clock, secrets=configured_secrets(config))
         self._tasks = self._build_tasks(config)
@@ -50,23 +52,35 @@ class Scheduler:
                      for kind in ('filter', 'pipeline') for spec in config.pipelines)
         return {(task.kind, task.target): task for task in tasks}
 
+    def _snapshot(self) -> tuple[AppConfig, dict[tuple[str, str], Task]]:
+        with self._lock:
+            return self._config, self._tasks
+
     def reload_config(self, config: AppConfig) -> None:
-        self._config = config
-        self._tasks = self._build_tasks(config)
-        self.pipelines.reload_config(config)
-        self._store.register_tasks(list(self._tasks.values()), to_utc(self._clock()))
+        tasks = self._build_tasks(config)
+        secrets = configured_secrets(config)
+        self._store.register_tasks(list(tasks.values()), to_utc(self._clock()))
+        with self._lock:
+            self._config = config
+            self._tasks = tasks
+            self._runs.set_secrets(secrets)
+            self.pipelines.reload_config(config, secrets=secrets)
 
     def initialize(self) -> None:
-        self._store.register_tasks(list(self._tasks.values()), to_utc(self._clock()))
+        _, tasks = self._snapshot()
+        self._store.register_tasks(list(tasks.values()), to_utc(self._clock()))
 
     def task(self, kind: str, target: str) -> Task:
         """The same identity is used for scheduled and forced/manual execution."""
-        return self._tasks[kind, target]
+        _, tasks = self._snapshot()
+        return tasks[kind, target]
 
-    def _views(self) -> dict[tuple[str, str], TaskView]:
+    def _views(self, tasks: dict[tuple[str, str], Task] | None = None) -> dict[tuple[str, str], TaskView]:
+        if tasks is None:
+            _, tasks = self._snapshot()
         now = to_utc(self._clock())
         views = {}
-        for key, task in self._tasks.items():
+        for key, task in tasks.items():
             state = self._store.get_task_state(task)
             last_status, last_error = state.last_status, state.last_error
             if task.kind == 'fetch' and state.last_run_at is None and last_status is None:
@@ -82,17 +96,19 @@ class Scheduler:
         return views
 
     def status(self) -> list[TaskView]:
-        views = self._views()
+        _, task_map = self._snapshot()
+        views = self._views(task_map)
         pending = self.pipelines.pending_counts(to_utc(self._clock()))
         for view in views.values():
-            if view.kind != 'fetch':
+            if view.kind != 'fetch' and view.target in pending:
                 view.pending = pending[view.target]
         return list(views.values())
 
     def list_sources(self) -> list[SourceView]:
-        tasks = self._views()
+        config, task_map = self._snapshot()
+        tasks = self._views(task_map)
         views = []
-        for spec in self._config.sources:
+        for spec in config.sources:
             state = self._store.get_source_state(spec.id)
             task = tasks['fetch', spec.id]
             views.append(SourceView(
@@ -102,15 +118,16 @@ class Scheduler:
         return views
 
     def list_pipelines(self) -> list[PipelineView]:
-        tasks = self._views()
+        config, task_map = self._snapshot()
+        tasks = self._views(task_map)
         pending = self.pipelines.pending_counts(to_utc(self._clock()))
         views = []
-        for spec in self._config.pipelines:
+        for spec in config.pipelines:
             task, filtered = tasks['pipeline', spec.id], tasks['filter', spec.id]
             views.append(PipelineView(
                 id=spec.id, name=spec.name, persona=spec.persona, sources=spec.sources,
                 schedule=spec.schedule, enabled=spec.enabled, processor=spec.processor.type,
-                pending=pending[spec.id], filter_schedule=spec.filter_schedule,
+                pending=pending.get(spec.id, 0), filter_schedule=spec.filter_schedule,
                 next_run_at=task.next_run_at, filter_next_run_at=filtered.next_run_at,
                 running=task.running, filter_running=filtered.running,
                 last_run_at=task.last_run_at, last_status=task.last_status, last_error=task.last_error))
@@ -123,18 +140,20 @@ class Scheduler:
         `distill` is the explicit `sources distill` refresh: a browser source
         explores again even though its fixed script already exists.
         """
-        specs = ([self._config.source(i) for i in dict.fromkeys(ids)] if ids
-                 else [s for s in self._config.sources if s.enabled])
+        config, _ = self._snapshot()
+        specs = ([config.source(i) for i in dict.fromkeys(ids)] if ids
+                 else [s for s in config.sources if s.enabled])
         return await self._fetch_batch(specs, due_only=False, distill=distill)
 
     async def tick(self) -> list[TickOutcome]:
         """Drain fetches, defer busy dependencies, then drain filters and runs."""
-        fetched = await self._fetch_batch([s for s in self._config.sources if s.enabled], due_only=True)
+        config, task_map = self._snapshot()
+        fetched = await self._fetch_batch([s for s in config.sources if s.enabled], due_only=True)
         outcomes = [TickOutcome.of_fetch(outcome) for outcome in fetched]
         busy_sources = {outcome.source_id for outcome in fetched if outcome.status == 'busy'}
-        deferred = {spec.id for spec in self._config.pipelines if busy_sources.intersection(spec.sources)}
+        deferred = {spec.id for spec in config.pipelines if busy_sources.intersection(spec.sources)}
         for kind in ('filter', 'pipeline'):
-            for task in self._tasks.values():
+            for task in task_map.values():
                 if task.kind != kind or not task.enabled or task.target in deferred:
                     continue
                 # Never advance a dependent schedule against an incomplete fetch.
@@ -147,12 +166,15 @@ class Scheduler:
 
     async def _fetch_task(self, spec: SourceSpec, http: HttpPool, *, due_only: bool,
                           distill: bool = False) -> FetchOutcome | None:
+        config, task_map = self._snapshot()
+        task = task_map.get(('fetch', spec.id)) or Task('fetch', spec.id, spec.schedule, config.app.timezone, spec.enabled)
+
         async def work(op: RunOperation) -> None:
             await fetch_source(spec, op, store=self._store, http=http, imap_factory=self._imap_factory,
-                               timezone=self._config.app.timezone, models=self._models,
-                               config=self._config, distill=distill)
+                               timezone=config.app.timezone, models=self._models,
+                               config=config, distill=distill)
 
-        result = await self._runs.execute(self.task('fetch', spec.id), work, due_only=due_only,
+        result = await self._runs.execute(task, work, due_only=due_only,
             failure_message=lambda exc: exc.message if isinstance(exc, TentaclesError)
             else f'fetch failed ({type(exc).__name__})')
         if result is None:

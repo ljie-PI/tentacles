@@ -96,57 +96,75 @@ def _mailbox_name(folder: str) -> str:
     return '"' + encoded.replace('\\', '\\\\').replace('"', '\\"') + '"'
 
 
+_LIST_ENTRY_RE = re.compile(r'^\(([^)]*)\)\s+(NIL|"(?:[^"\\]|\\.)*")\s+(.+)$')
+
+
+def _unescape_imap_quoted(value: str) -> str:
+    if len(value) >= 2 and value.startswith('"') and value.endswith('"'):
+        return re.sub(r'\\(.)', r'\1', value[1:-1])
+    return value
+
+
 def _decode_mailbox_name(folder: str) -> str:
     def decode(match: re.Match[str]) -> str:
         body = match.group(1)
         if not body:
             return '&'
+        if len(body) % 4 == 1:
+            return match.group(0)
         padded = body.replace(',', '/') + '=' * (-len(body) % 4)
-        return base64.b64decode(padded).decode('utf-16-be')
+        try:
+            raw_bytes = base64.b64decode(padded, validate=True)
+            if len(raw_bytes) % 2 != 0:
+                return match.group(0)
+            return raw_bytes.decode('utf-16-be')
+        except (ValueError, UnicodeDecodeError):
+            return match.group(0)
     return re.sub(r'&([A-Za-z0-9+,]*)-', decode, folder)
 
 
 def _parse_list_entry(item: Any) -> tuple[set[str], str, str] | None:
     if isinstance(item, tuple) and len(item) == 2 and isinstance(item[0], bytes) and isinstance(item[1], bytes):
-        prefix = item[0].decode('ascii', 'replace').strip()
-        match = re.match(r'^\(([^)]*)\)\s+(NIL|"[^"]*")\s+\{\d+\}$', prefix)
+        match = _LIST_ENTRY_RE.match(item[0].decode('utf-8', 'replace').strip())
+        if not match or not re.fullmatch(r'\{\d+\}', match.group(3).strip()):
+            return None
+        raw_name = item[1].decode('utf-8', 'replace')
+    elif isinstance(item, bytes):
+        match = _LIST_ENTRY_RE.match(item.decode('utf-8', 'replace'))
         if not match:
             return None
-        flags = {flag.lower() for flag in match.group(1).split() if flag}
-        delim = '' if match.group(2) == 'NIL' else match.group(2)[1:-1]
-        return flags, delim, _decode_mailbox_name(item[1].decode('ascii', 'replace'))
-    if isinstance(item, bytes):
-        line = item.decode('ascii', 'replace')
-        match = re.match(r'^\(([^)]*)\)\s+(NIL|"[^"]*")\s+(.+)$', line)
-        if not match:
-            return None
-        flags = {flag.lower() for flag in match.group(1).split() if flag}
-        delim = '' if match.group(2) == 'NIL' else match.group(2)[1:-1]
-        raw = match.group(3).strip()
-        if raw.startswith('"') and raw.endswith('"') and len(raw) >= 2:
-            raw = raw[1:-1].replace('\\"', '"').replace('\\\\', '\\')
-        return flags, delim, _decode_mailbox_name(raw)
-    return None
+        raw_name = _unescape_imap_quoted(match.group(3).strip())
+    else:
+        return None
+    flags = {flag.lower() for flag in match.group(1).split() if flag}
+    delim = '' if match.group(2) == 'NIL' else _unescape_imap_quoted(match.group(2))
+    return flags, delim, _decode_mailbox_name(raw_name)
 
 
 def _expand_folders(connection: Any, configured: list[str]) -> list[str]:
     entries = [parsed for item in _ok(connection.list()) if (parsed := _parse_list_entry(item)) is not None]
-    selectable = [(delim, name) for flags, delim, name in entries
-                  if '\\noselect' not in flags and '\\nonexistent' not in flags]
     expanded: list[str] = []
     for target in configured:
         matched: list[str] = []
-        target_cf = target.casefold()
-        for delim, name in selectable:
-            is_inbox = target_cf == 'inbox'
+        saw_nonselectable = False
+        is_inbox = target.casefold() == 'inbox'
+        for flags, delim, name in entries:
             exact = name.casefold() == 'inbox' if is_inbox else name == target
-            if exact:
-                matched.append(name)
-            elif delim:
-                prefix = target + delim
-                if name.startswith(prefix) or (is_inbox and name.casefold().startswith('inbox' + delim)):
-                    matched.append(name)
-        expanded.extend(matched or [target])
+            is_child = bool(delim) and (
+                name.startswith(target + delim)
+                or (is_inbox and name.casefold().startswith('inbox' + delim))
+            )
+            if not exact and not is_child:
+                continue
+            if '\\noselect' in flags or '\\nonexistent' in flags:
+                if exact:
+                    saw_nonselectable = True
+                continue
+            matched.append(name)
+        if matched:
+            expanded.extend(matched)
+        elif not saw_nonselectable:
+            expanded.append(target)
     return list(dict.fromkeys(expanded))
 
 
