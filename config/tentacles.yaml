@@ -14,43 +14,37 @@ app:
     archive_dir: ../data/archive  # 年度冷库目录（tentacles-YYYY.db），相对本文件解析
 
 # 命名模型：不填写 key 也可以校验配置、抓取 RSS；实际调用时才报 upstream。
-# provider: openai（包括 DeepSeek/Moonshot/Ollama/vLLM）、anthropic、openrouter、opencode-go。
-# kind 默认为 chat。base_url 是 API 根路径；模型 ID 请按服务商当前可用型号调整。
+# provider: openai、openai-compatible（须填 base_url）、anthropic、openrouter、opencode-go。
+# kind 默认为 chat。模型 ID 请按服务商当前可用型号调整。
 models:
   chat:
-    provider: openai
-    model: deepseek-flash
-    base_url: https://api.deepseek.com
-    api_key: ${DEEPSEEK_API_KEY:-}
+    provider: opencode-go
+    model: deepseek-v4.1-flash
+    api_key: ${OPENCODE_GO_API_KEY:-}
     max_tokens: 4096
     timeout: 60
     retries: 2
   fast:
-    provider: openai
-    model: deepseek-flash
-    base_url: https://api.deepseek.com
-    api_key: ${DEEPSEEK_API_KEY:-}
+    provider: opencode-go
+    model: deepseek-v4.1-flash
+    api_key: ${OPENCODE_GO_API_KEY:-}
     max_tokens: 4096
     timeout: 60
     retries: 2
   smart:
-    provider: openai
-    model: deepseek-flash
-    base_url: https://api.deepseek.com
-    api_key: ${DEEPSEEK_API_KEY:-}
-    max_tokens: 4096
-    timeout: 60
-    retries: 2
-  max:
-    provider: openai
-    model: deepseek-v4-pro
-    base_url: https://api.deepseek.com
-    api_key: ${DEEPSEEK_API_KEY:-}
+    provider: opencode-go
+    model: glm-5.3
+    api_key: ${OPENCODE_GO_API_KEY:-}
     max_tokens: 8192
     timeout: 120
     retries: 2
-  # 若需切换回 OpenCode Go，可将 provider 设为 opencode-go、api_key 设为 ${OPENCODE_GO_API_KEY:-}，
-  # model 使用 deepseek-v4.1-flash 或 glm-5.3（已内置 x-opencode-session 兼容）。
+  max:
+    provider: opencode-go
+    model: deepseek-v4-pro
+    api_key: ${OPENCODE_GO_API_KEY:-}
+    max_tokens: 8192
+    timeout: 120
+    retries: 2
   decision:
     provider: openrouter
     kind: decision
@@ -82,11 +76,14 @@ persona_update:
 personas:
   default:
     profile: |
-      优先关注人工智能与开源软件的实质进展。
-      其次关注科技产业、机器人、科学和能源。
-      不关注重复营销、广告和缺乏事实依据的炒作。
-    include: [人工智能, AI, 开源]
-    exclude: [广告, 促销]
+      重点关注以下技术与金融领域的实质进展：
+      - AI 模型与 Agent 工程：模型与开放权重发布、评测与验证、多智能体协作、长程任务、记忆机制、Skills/MCP、上下文管理、部署监控与安全边界，侧重真实工程落地而非单纯榜单跑分。
+      - AI 游戏开发与内容生产：辅助编码、游戏引擎与智能 NPC、美术/音频/视频管线、性能与 QA 测试、发行获客，以及版权、克隆检测与 AI 披露规范。
+      - 开源软件与开发工具：终端/TUI、编程 Agent、基础软件、知识管理与开发者效率工具。
+      - AI 产品与产业资本：企业自动化案例、算力与芯片供给、数据中心与电力约束、模型商业化、资本开支、投融资及科技公司财报。
+      - 宏观金融与量化研究：美联储与利率政策、关键经济数据、国债收益率与汇率、美股与科技股财报、市场风险，以及量化研究、风险建模与交易系统工程。
+      排除纯营销软文、无事实依据的炒作、喊单荐股及无关娱乐八卦；混有赞助推广的订阅内容仅提取正文事实，区分客观数据与作者观点。
+    include: [AI, Agent, LLM, 评测, 开源, 游戏开发, 游戏引擎, 量化, 算力, 财报, 美股, 利率]
     hard_exclude: ['限时特惠', '扫码加群']
 
 # 有界面 Chrome 运行时（type: browser）。严格禁止无头模式：复用你已登录的 Chrome Profile，
@@ -165,11 +162,55 @@ sources:
   - {id: paperweekly, name: 微信公众号-PaperWeekly, type: rss, url: "https://decemberpei.cyou/rssbox/wechat-paperweekly.xml", schedule: 1h, max_age_days: 1}
   - {id: ai-frontier, name: 微信公众号-AI前线, type: rss, url: "https://decemberpei.cyou/rssbox/wechat-aiqianxian.xml", schedule: 1h, max_age_days: 1}
 
+  # GitHub Daily Trending（overall + 5 种语言）：静态网页列表抓取，按仓库 URL 全局去重。
+  - id: github-trending-overall
+    type: web
+    mode: list
+    name: GitHub Trending (Overall)
+    schedule: '30 5 * * *'
+    url: https://github.com/trending?since=daily
+    selectors: {item: article.Box-row, title: h2 a, link: h2 a@href, summary: p}
+  - id: github-trending-python
+    type: web
+    mode: list
+    name: GitHub Trending (Python)
+    schedule: '30 5 * * *'
+    url: https://github.com/trending/python?since=daily
+    selectors: {item: article.Box-row, title: h2 a, link: h2 a@href, summary: p}
+  - id: github-trending-typescript
+    type: web
+    mode: list
+    name: GitHub Trending (TypeScript)
+    schedule: '30 5 * * *'
+    url: https://github.com/trending/typescript?since=daily
+    selectors: {item: article.Box-row, title: h2 a, link: h2 a@href, summary: p}
+  - id: github-trending-rust
+    type: web
+    mode: list
+    name: GitHub Trending (Rust)
+    schedule: '30 5 * * *'
+    url: https://github.com/trending/rust?since=daily
+    selectors: {item: article.Box-row, title: h2 a, link: h2 a@href, summary: p}
+  - id: github-trending-cpp
+    type: web
+    mode: list
+    name: GitHub Trending (C++)
+    schedule: '30 5 * * *'
+    url: https://github.com/trending/c%2B%2B?since=daily
+    selectors: {item: article.Box-row, title: h2 a, link: h2 a@href, summary: p}
+  - id: github-trending-c
+    type: web
+    mode: list
+    name: GitHub Trending (C)
+    schedule: '30 5 * * *'
+    url: https://github.com/trending/c?since=daily
+    selectors: {item: article.Box-row, title: h2 a, link: h2 a@href, summary: p}
+
   # IMAP 邮箱源：凭据由 .env 注入；开启 include_subfolders 时自动展开子文件夹（未配置凭据时请设为 enabled: false）。
   # 仅支持密码/应用专用密码登录，不支持 Outlook.com 要求的 OAuth2。
-  - id: inbox
+  - id: mail-tech
     type: imap
-    name: 邮箱
+    name: 科技订阅邮件
     enabled: true
     schedule: 30m
     host: ${IMAP_HOST:-imap.gmail.com}
@@ -177,68 +218,24 @@ sources:
     ssl: true
     username: ${IMAP_USERNAME:-}
     password: ${IMAP_PASSWORD:-}
-    folders: ["Tech News", "Finance"]
+    folders: ["Tech News"]
     include_subfolders: true
     initial_days: 30
-    max_fetch: 100          # 所有文件夹合计；被排除/已删除的 UID 也计入上限
-    search: ALL            # 可用 UNSEEN、FROM "sender@example.com" 等 IMAP 搜索条件
-    exclude_senders: []    # 发件人的完整邮箱地址，不区分大小写
-    max_body_chars: 20000
-    max_summary_chars: 2000
-    timeout: 30
-
-  # 网页示例均默认关闭；URL 和 CSS 需替换为实际站点，完整语义见 README.md。
-  - id: web-list
-    type: web
-    mode: list
-    name: 网页列表
-    enabled: false
-    schedule: 1h
-    url: https://example.com/news
-    selectors:
-      item: article
-      title: h2
-      link: a@href
-      summary: .summary
-      date: time@datetime
-    fetch_content: true
-    # 详情页失败策略：fail_batch（默认，整批回滚不推进游标但是失败详情逐条落账本）
-    # 或 record_and_skip（失败单篇只落账本，其余正常入库，失败 target_url 下一轮自动重试）。
-    # on_detail_error: record_and_skip
-    concurrency: 4
-    headers: {}
-    cookies: {}
-    timeout: 30
-    proxy: ${HTTP_PROXY:-}
-  - id: web-page
-    type: web
-    mode: page
-    name: 页面监控
-    enabled: false
+    max_fetch: 100
+  - id: mail-finance
+    type: imap
+    name: 金融订阅邮件
+    enabled: true
     schedule: 30m
-    url: https://example.com/status
-    selector: main
-    emit_baseline: true
-    headers: {}
-    cookies: {}
-    timeout: 30
-    proxy: ${HTTP_PROXY:-}
-
-  # 杂乱页面的付费抽取示例，默认关闭；使用 defaults.models.extract。
-  - id: web-llm
-    type: web
-    mode: llm
-    name: 网页智能抽取
-    enabled: false
-    schedule: 2h
-    url: https://example.com/updates
-    # model: fast          # 可选显式覆盖；必须是 chat 模型
-    max_input_chars: 20000
-    fetch_content: false
-    headers: {}
-    cookies: {}
-    timeout: 30
-    proxy: ${HTTP_PROXY:-}
+    host: ${IMAP_HOST:-imap.gmail.com}
+    port: 993
+    ssl: true
+    username: ${IMAP_USERNAME:-}
+    password: ${IMAP_PASSWORD:-}
+    folders: ["Finance"]
+    include_subfolders: true
+    initial_days: 30
+    max_fetch: 100
 
   # 有界面浏览器源：附着已登录的 Chrome Profile，重放 scripts/browser_sources/ 下的固化脚本。
   # 默认关闭；需先启动带调试端口的 Chrome（见 README.md）。
@@ -263,7 +260,7 @@ sources:
 # 也可手动执行 pipelines filter/run ID；enabled: false 关闭自动执行。
 pipelines:
   - id: daily-tech
-    name: 每日科技日报
+    name: 科技早报
     persona: default
     sources:
       - solidot
@@ -306,44 +303,37 @@ pipelines:
       - deeptech
       - paperweekly
       - ai-frontier
+      - mail-tech
+      - github-trending-overall
+      - github-trending-python
+      - github-trending-typescript
+      - github-trending-rust
+      - github-trending-cpp
+      - github-trending-c
+    enabled: true
     window: 24h
-    schedule: '@daily'
-    filter_schedule: 30m      # 可省略；此处更频繁地只过滤，到午夜再生成日报
-    max_items: 500
+    schedule: '0 6 * * *'
+    filter_schedule: 30m
+    max_items: 1000
     filters:
-      # guard_ambiguous_exclude（默认 true）：软 exclude 与正向词同时命中时给 0.55 分，
-      # 不淘汰也不满分短路，交给下一关结合完整画像裁决；只命中软 exclude 仍 0 分淘汰。
-      # 纯正向命中：accept_above 要求 1.0 时给 1.0（保留旧短路省钱用法），否则 0.85。
       - type: keyword
         reject_below: 0.5
-        accept_above: 1.0
-        # 阶段级硬排除：命中即淘汰。正则特征需同时打开 regex: true。
-        # hard_exclude: ['sponsored\s+by']
-        # regex: true
-      # 可选：填好对应 API key 后取消下面注释，启用统一语义过滤（会产生费用）。
-      # 默认仍只用 keyword，避免升级后自动产生额外模型调用。
-      # 同一块配置同时适配 chat 与 decision 模型，实际链路取决于模型的 kind；
-      # 旧写法 type: llm / type: decision 仍然合法。
-      # - type: semantic
-      #   model: fast                 # 可省略：semantic/llm 用 defaults.models.filter，decision 用 defaults.models.decision
-      #   batch_size: 20              # 每 20 条一个 batch，也是增量落库检查点（1~100）
-      #   summary_chars: 160          # 每条附带的短摘要上限，0 表示只发标题（0~1000）
-      #   reject_below: 0.5
-      #   accept_above: 0.85
-      #   # 仅当所选模型 kind 为 decision（JEV）时生效：
-      #   relevance_type: noul        # 或 score：四级量表归一化到 0–1
-      #   jev_batch_mode: packed_questions  # 或 windowed_pool：逐条并发请求
+      - type: semantic
+        model: fast
+        batch_size: 20
+        summary_chars: 600
+        reject_below: 0.5
+        instructions: >
+          仅保留 AI/Agent 工程、模型评测、开源与开发工具、AI 游戏开发与内容管线、
+          AI 科研及具有明确技术进展的产业消息；排除纯金融行情、招聘推广与无关娱乐社会新闻。
     processor:
       type: digest
       language: zh-CN
       max_items: 60
-      instructions: 优先按兴趣画像组织事实，避免标题党和重复表述。
+      prompt_file: prompts/tech-daily.md
 
-
-  # 每周重大事件深度报道：默认关闭，启用后会调用 max 模型（可能产生费用）。
-  # 手动 pipelines run weekly-deep 同样会调用模型，即使 enabled: false。
-  - id: weekly-deep
-    name: 每周重大事件
+  - id: weekly-tech
+    name: 科技周报
     persona: default
     sources:
       - solidot
@@ -386,35 +376,62 @@ pipelines:
       - deeptech
       - paperweekly
       - ai-frontier
-    enabled: false
-    window: 7d
-    schedule: '@weekly'
-    filters:
-      - type: keyword
-    processor:
-      type: deep
-      model: max
-      language: zh-CN
-      max_items: 100
-      min_cluster_size: 3    # 同一事件至少 3 个条目（不是独立来源数）
-      max_reports: 3         # 仅取规模最大的前 3 个达标事件
-      instructions: 区分已证实的事实与各方说法，明确列出仍需核实的问题。
-
-  # 邮件简报：汇总 inbox 入库邮件并调用 process 模型提炼待办（未启用邮箱时请设为 enabled: false）。
-  # 手动 pipelines run mail-summary 仍会调用 process 模型（即使 enabled: false）。
-  - id: mail-summary
-    name: 邮件简报
-    persona: default
-    sources: [inbox]
+      - mail-tech
+      - github-trending-overall
+      - github-trending-python
+      - github-trending-typescript
+      - github-trending-rust
+      - github-trending-cpp
+      - github-trending-c
     enabled: true
     window: 7d
-    schedule: '@daily'
-    filters: []             # 可按需求添加 keyword / semantic；此处保留全部邮件
+    schedule: '0 18 * * 5'
+    filter_schedule: 6h
+    max_items: 5000
+    filters:
+      - type: keyword
+        reject_below: 0.5
+      - type: semantic
+        model: fast
+        batch_size: 20
+        summary_chars: 600
+        reject_below: 0.5
+        instructions: >
+          仅保留 AI/Agent 工程、模型评测、开源与开发工具、AI 游戏开发与内容管线、
+          AI 科研及具有明确技术进展的产业消息；排除纯金融行情、招聘推广与无关娱乐社会新闻。
     processor:
-      type: summarize
+      type: digest
+      model: max
       language: zh-CN
-      max_items: 50
-      instructions: 仅提取邮件明确要求的待办，无法确定截止日期时留空。
+      max_items: 150
+      prompt_file: prompts/tech-weekly.md
+
+  - id: weekly-finance
+    name: 金融周报
+    persona: default
+    sources: [mail-finance, 36kr, jiemian, cnbc-top, bbc-zh, nytimes-world]
+    enabled: true
+    window: 7d
+    schedule: '0 18 * * 5'
+    filter_schedule: 6h
+    max_items: 2000
+    filters:
+      - type: keyword
+        reject_below: 0.5
+      - type: semantic
+        model: fast
+        batch_size: 20
+        summary_chars: 600
+        reject_below: 0.5
+        instructions: >
+          仅保留宏观经济、利率汇率、金融市场、企业财报、AI 与科技产业投融资及资本开支、
+          监管政策和量化研究进展；排除无经济与金融关联的纯产品发布、纯招聘信息及课程推广。
+    processor:
+      type: digest
+      model: max
+      language: zh-CN
+      max_items: 120
+      prompt_file: prompts/finance-weekly.md
 
 # REST API / 网页（tentacles serve）。默认只监听本机；对外访问需 token + HTTPS 代理。
 server:
