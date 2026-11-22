@@ -27,6 +27,7 @@ from tentacles.personas.models import PersonaSeed, PersonaUpdate
 from tentacles.pipelines.config import PipelineSpec
 
 DEFAULT_CONFIG = Path("config") / "tentacles.yaml"
+USER_HOME_CONFIG = Path("~/.tentacles/config/tentacles.yaml")
 _ENV_REF = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}")
 
 ReasoningLevel = Literal["off", "minimal", "low", "medium", "high", "xhigh", "max"]
@@ -287,9 +288,17 @@ def interpolate(obj: Any, env: Mapping[str, str], where: str = "", *,
 
 def find_config(path: Path | str | None = None, env: Mapping[str, str] | None = None) -> Path:
     env = os.environ if env is None else env
-    chosen = Path(path) if path else Path(env["TENTACLES_CONFIG"]) if env.get("TENTACLES_CONFIG") \
-        else DEFAULT_CONFIG
-    return chosen.expanduser().resolve()
+    if path:
+        return Path(path).expanduser().resolve()
+    if env.get("TENTACLES_CONFIG"):
+        return Path(env["TENTACLES_CONFIG"]).expanduser().resolve()
+    local = DEFAULT_CONFIG.expanduser().resolve()
+    if local.is_file():
+        return local
+    home = USER_HOME_CONFIG.expanduser().resolve()
+    if home.is_file():
+        return home
+    return local
 
 
 def _load_env(config_path: Path, env: Mapping[str, str] | None) -> dict[str, str]:

@@ -10,7 +10,22 @@
 
 ## 快速开始
 
-### 1. 安装后端并校验配置
+### 方式一：从 GitHub Release 直接安装（无需克隆仓库或安装 Node.js）
+
+要求 Python >= 3.10（推荐使用 `uv` 或 `pipx`）：
+
+```bash
+uv tool install https://github.com/ljie-PI/tentacles/releases/download/v0.2.0/tentacles-0.2.0-py3-none-any.whl
+tentacles init                    # 初始化 ~/.tentacles（配置、提示词、.env、data/、reports/）
+tentacles skills install          # 可选：安装 Agent 技能至 ~/.agents/skills/
+tentacles serve                   # 启动内置 Web 界面（http://127.0.0.1:8000）与后台调度器
+```
+
+按需编辑 `~/.tentacles/.env` 填入模型 API Key 或 IMAP 凭据后即可使用。
+
+### 方式二：源码开发安装
+
+#### 1. 安装后端并校验配置
 
 要求 Python >= 3.10：
 
@@ -29,7 +44,7 @@ tentacles sources fetch solidot   # 单源测试抓取（配置好邮箱后可�
 tentacles items list --since 24h  # 查看最近 24 小时入库的条目
 ```
 
-### 2. 构建前端与启动 Web 服务（可选）
+#### 2. 构建前端与启动 Web 服务（可选）
 
 要求 Node >= 22.12、pnpm 10.33：
 
@@ -40,7 +55,7 @@ tentacles serve                   # 托管前端、REST API 与内置调度器�
 
 访问 `http://127.0.0.1:8000`；前端开发调试可运行 `tentacles serve --no-scheduler` 并在 `frontend/` 下启动 `pnpm dev`。
 
-### 3. 安装 AI Agent 技能（可选）
+#### 3. 安装 AI Agent 技能（可选）
 
 将 `skills/` 下的 3 个技能软链至 `~/.agents/skills/`，并在 `~/.local/bin/tentacles` 生成带默认配置路径的 CLI 入口（支持 `--target`、`--bin-dir`、`--copy`、`--uninstall`）：
 
@@ -52,7 +67,7 @@ tentacles serve                   # 托管前端、REST API 与内置调度器�
 
 ## 全局配置与存储（`config/tentacles.yaml`）
 
-默认配置文件为 `config/tentacles.yaml`，可通过 `--config/-c PATH` 或环境变量 `$TENTACLES_CONFIG` 覆盖：
+默认按 `--config/-c PATH` → `$TENTACLES_CONFIG` → `./config/tentacles.yaml` → `~/.tentacles/config/tentacles.yaml` 顺序解析配置文件：
 
 - **环境变量插值**：配置值支持 `${VAR}` 或 `${VAR:-默认值}`。启动时依次读取项目根目录与配置文件所在目录的 `.env`，**不会覆盖进程已有环境变量**。密钥一律放在 `.env` 中，勿写入 YAML（注意 `TENTACLES_CONFIG` 与 `TENTACLES_JSON=1` 须作为真实环境变量设置，写在 `.env` 内不生效）。
 - **相对路径基准**：`app.data_dir`、`app.reports_dir`、`app.storage.archive_dir`、`personas.*.profile_file`、`processor.prompt_file`、`server.static_dir`、`browser.chrome_user_data_dir`、`browser.scripts_dir` 均相对于该 YAML 所在目录解析。
@@ -247,4 +262,5 @@ launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/local.tentacles.tick.pli
 mypy src/tentacles                        # 后端类型检查
 tentacles config check                    # 配置文件无副作用校验
 cd frontend && pnpm check:api && pnpm build  # 校验前后端 OpenAPI 类型一致性并构建
+./scripts/build-wheel.sh                  # 构建内置前端与配置模板的单文件 Wheel（推送 v* tag 自动发 Release）
 ```
