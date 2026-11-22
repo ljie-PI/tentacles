@@ -105,24 +105,6 @@ app:
 
 - **统一入库规则**：正文 `content` 截断至 **1000 units**（1 个 CJK 字符或 1 个连续非 CJK 词元计 1 unit，`content_truncated` 标记截断），`summary` 不超过 **300 units**；非邮件条目必须保留合法 `http(s)` 的 `url` 或入口 `page_url`；讨论页链接写入 `meta.comments_url`。
 
-### 最小配置与复用
-
-完整字段多数是可选项，不需要每个源都重复填写。静态网页用 `web`；X 等需要登录或 JavaScript 的页面用 `browser`，共享全局 `browser` 连接与 Profile 设置。没有 RSS 不一定需要浏览器，先判断静态 HTTP 能否取得内容。
-
-多个 Reddit subreddit 优先每个一行 RSS，例如：
-
-```yaml
-sources:
-  - {id: reddit-science, type: rss, schedule: 1h, url: 'https://www.reddit.com/r/science/new/.rss'}
-  - {id: reddit-technology, type: rss, schedule: 1h, url: 'https://www.reddit.com/r/technology/new/.rss'}
-```
-
-动态页面的最小浏览器源只需 `id`、`type`、`schedule`、`page_url`，通常再加一句 `task`；不必逐项填写脚本路径、超时、条数和 Profile。相似源可以通过 YAML `&anchor`、`*anchor`、`<<` 复用。
-
-`web-list` / `web-llm` 只是任意的示例 source ID，演示**无 RSS 的静态新闻网站如何变成条目来源**：前者用 CSS 规则拆出各条新闻，后者把 HTML 文本与链接交给模型识别新闻。它们不是信息主题、预置网站订阅或通用搜索器，`example.com` 也只是占位域名。完整 HTML → 条目示例见 [`config/examples/README.md`](config/examples/README.md)。
-
-网页、X 与浏览器 Reddit 的简短配置见 [`config/examples/sources.yaml`](config/examples/sources.yaml)。该文件不会自动加载；把需要的条目复制到主配置 `sources`，替换占位地址并开启，再把 ID 加入目标 `pipeline.sources`。新增来源也可通过 Web **Sources** 页完成。
-
 ### 1. RSS / Atom（`type: rss`）
 - 字段：`url`（必填）、`max_age_days`、`headers`、`proxy`、`timeout`（默认 30s）。
 - 自动处理条件 GET（`ETag` / `Last-Modified` -> `304`）；执行多级去重（同源 `external_id`、规范化 URL 剥离追踪参数、标题+摘要指纹及 48h 跨源近似标题去重）。
@@ -221,17 +203,7 @@ server:
 ```
 
 - **安全边界**：`server.token` 非空时（无空白可打印 ASCII），除 `/api/health` 与静态页面外全部 `/api/*` 须带 `Authorization: Bearer <TOKEN>`；未配置 Token 时服务端严格校验 `Host` 与 `Origin` / `Sec-Fetch-Site` 阻断跨站与 DNS Rebinding；公网或局域网访问**必须设置高强度 Token 并前置 HTTPS 反向代理**。访问日志默认关闭，收到退出信号时等待当前 `tick` 收尾后优雅关闭。
-- **调度规则（`schedule`）**：支持间隔（`30s`、`30m`、`1h`、`2h`、`1d`、`1w`）、`@hourly/@daily/@weekly` 及五段 Cron（按 `app.timezone` 计算）。间隔任务首次启用立即到期，以后从上次实际运行的开始时间加上间隔；Cron 等待下一个自然时钟触发点。`@daily` 是每天 00:00，`@weekly` 是周日 00:00。进度与 1 小时原子租约锁持久化在 SQLite，正常重启不重置基准。每轮 `tick` 严格按 **① 并发抓源（上限 4） → ② 过滤（`filter_schedule`） → ③ Pipeline 成稿** 执行，上游源 `busy` 时下游自动延期。
-
-| 字段／示例 | 含义 |
-| :--- | :--- |
-| `sources[].schedule: 30m` | 邮件或 RSS 每隔 30 分钟抓取 |
-| `pipelines[].filter_schedule: 6h` | 每隔 6 小时增量筛选，不生成报告 |
-| `pipelines[].schedule: '0 6 * * *'` | 每天 06:00 开始生成报告 |
-| `pipelines[].schedule: '0 18 * * 5'` | 周五 18:00 开始生成报告 |
-| `pipelines[].window: 24h`／`7d` | 本次运行向前回溯的取材长度，按抓取／更新时间，不是执行频率 |
-
-`window` 只接受时长，不接受 Cron 或 `@daily`。同样的 `24h` 在 `schedule` 中表示执行间隔，在 `window` 中表示取材范围。**任务是否到期只由 `schedule` 决定，不由 `window` 决定；到期后的筛选与报告生成会使用 `window` 挑选材料**，提前的 `filter_schedule` 和手动运行也会使用它。例如每天 06:00 到期后，`window: 24h` 查询的是本次实际开始时间前 24 小时的入库／更新时间范围，不是等待 24 小时后再执行。到期后须等待轮询及上游抓取；同一轮多个 pipeline 依次执行，因此不保证在指定时刻完成或同时成稿。
+- **调度规则（`schedule`）**：支持间隔（`30s`、`30m`、`2h`、`1d`、`1w`）、`@hourly/@daily/@weekly` 及五段 Cron（按 `app.timezone` 计算）。间隔任务首次立即到期，Cron 等待下一个触发点，进度与 1 小时原子租约锁持久化在 SQLite 中。每轮 `tick` 严格按 **① 并发抓源（上限 4） → ② 过滤（`filter_schedule`） → ③ Pipeline 成稿** 执行，上游源 `busy` 时下游自动延期。
 
 ### macOS `launchd` 无常驻调度示例
 

@@ -109,7 +109,7 @@ async def extract(page: Page, *, page_url: str, max_items: int,
 
 ## 示例
 
-- `reddit-localllama.py`：`config/examples/sources.yaml` 中默认关闭的 `reddit-localllama` 示例，
+- `reddit-localllama.py`：`config/tentacles.yaml` 中默认关闭的 `reddit-localllama` 示例，
   通过 CDP 附着已登录的 Chrome 后抓取 r/LocalLLaMA 的 New 列表。
 - 本地验证：先手动启动带调试端口的 Chrome
   `"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" --remote-debugging-port=9222 --profile-directory="Default"`，
