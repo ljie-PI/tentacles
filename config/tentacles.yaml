@@ -40,7 +40,7 @@ models:
     retries: 2
   max:
     provider: opencode-go
-    model: deepseek-v4-pro
+    model: glm-5.3
     api_key: ${OPENCODE_GO_API_KEY:-}
     max_tokens: 8192
     timeout: 120
@@ -212,7 +212,7 @@ sources:
     type: imap
     name: 科技订阅邮件
     enabled: true
-    schedule: 30m
+    schedule: 4h
     host: ${IMAP_HOST:-imap.gmail.com}
     port: 993
     ssl: true
@@ -220,13 +220,13 @@ sources:
     password: ${IMAP_PASSWORD:-}
     folders: ["Tech News"]
     include_subfolders: true
-    initial_days: 30
+    initial_days: 14
     max_fetch: 100
   - id: mail-finance
     type: imap
     name: 金融订阅邮件
     enabled: true
-    schedule: 30m
+    schedule: 4h
     host: ${IMAP_HOST:-imap.gmail.com}
     port: 993
     ssl: true
@@ -234,7 +234,7 @@ sources:
     password: ${IMAP_PASSWORD:-}
     folders: ["Finance"]
     include_subfolders: true
-    initial_days: 30
+    initial_days: 14
     max_fetch: 100
 
   # 有界面浏览器源：附着已登录的 Chrome Profile，重放 scripts/browser_sources/ 下的固化脚本。
