@@ -5,6 +5,9 @@ from urllib.parse import urlsplit
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
 
 
+DEFAULT_STATIC_DIR = Path('../frontend/dist')
+
+
 class ServerSpec(BaseModel):
     model_config = ConfigDict(extra='forbid')
     host: str = Field(default='127.0.0.1', min_length=1)
@@ -13,7 +16,7 @@ class ServerSpec(BaseModel):
     cors_origins: list[str] = Field(default_factory=list)
     scheduler: bool = True
     poll_interval: float = Field(default=30, gt=0, allow_inf_nan=False)
-    static_dir: Path = Path('../frontend/dist')
+    static_dir: Path = DEFAULT_STATIC_DIR
 
     @field_validator('host')
     @classmethod

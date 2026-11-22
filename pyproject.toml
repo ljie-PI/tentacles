@@ -31,6 +31,9 @@ dev = ["mypy>=1.10", "types-PyYAML"]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
+[tool.hatch.build]
+artifacts = ["src/tentacles/_web/**", "src/tentacles/_bundled/**"]
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/tentacles"]
 

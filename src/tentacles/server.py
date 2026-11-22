@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 from contextlib import asynccontextmanager
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Callable
 
 import httpx
@@ -19,6 +20,7 @@ from tentacles.api.routes import router
 from tentacles.api.management import router as management_router
 from tentacles.api.personas import router as persona_router
 from tentacles.config import AppConfig
+from tentacles.server_config import DEFAULT_STATIC_DIR
 from tentacles.service import TentaclesService
 from tentacles.server_runtime import poll_scheduler
 from tentacles.sources.imap_client import ImapFactory, connect_imap
@@ -71,6 +73,10 @@ def create_app(config: AppConfig, *, transport: httpx.AsyncBaseTransport | None 
                        allow_methods=['GET', 'POST', 'PUT', 'PATCH', 'DELETE'],
                        allow_headers=['Authorization', 'Content-Type'])
     static_root = config.resolve(config.server.static_dir).resolve()
+    bundled_root = (Path(__file__).resolve().parent / '_web').resolve()
+    if config.server.static_dir == DEFAULT_STATIC_DIR and not (static_root / 'index.html').is_file():
+        if (bundled_root / 'index.html').is_file():
+            static_root = bundled_root
 
     @app.get('/{path:path}', include_in_schema=False, response_class=FileResponse)
     def static(path: str):

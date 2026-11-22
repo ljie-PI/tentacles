@@ -87,10 +87,12 @@ pipelines_app = typer.Typer(help="Pipeline 过滤与运行", no_args_is_help=Tru
 reports_app = typer.Typer(help="报告", no_args_is_help=True, cls=_JsonErrorsGroup)
 storage_app = typer.Typer(help="存储与冷归档", no_args_is_help=True, cls=_JsonErrorsGroup)
 errors_app = typer.Typer(help="故障诊断账本", no_args_is_help=True, cls=_JsonErrorsGroup)
+skills_app = typer.Typer(help="安装或卸载 AI Agent 技能", no_args_is_help=True, cls=_JsonErrorsGroup)
 app.add_typer(pipelines_app, name="pipelines")
 app.add_typer(reports_app, name="reports")
 app.add_typer(storage_app, name="storage")
 app.add_typer(errors_app, name="errors")
+app.add_typer(skills_app, name="skills")
 app.add_typer(persona_app, name="persona")
 app.add_typer(models_app, name="models")
 app.add_typer(scheduler_app, name="scheduler")
@@ -111,7 +113,7 @@ class State:
 @app.callback()
 def main(
     ctx: typer.Context,
-    config: Optional[Path] = typer.Option(None, "--config", "-c", help="配置文件路径（默认 $TENTACLES_CONFIG 或 config/tentacles.yaml）"),
+    config: Optional[Path] = typer.Option(None, "--config", "-c", help="配置文件路径（默认 $TENTACLES_CONFIG、config/tentacles.yaml 或 ~/.tentacles/config/tentacles.yaml）"),
     json_mode: bool = typer.Option(False, "--json", envvar="TENTACLES_JSON", help="只向 stdout 输出一个 JSON 值"),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="输出 INFO 日志到 stderr"),
 ) -> None:
@@ -217,6 +219,66 @@ def config_check(ctx: typer.Context) -> None:
         typer.echo(result.model_dump_json())
     else:
         Console(soft_wrap=True).print(f"[green]ok[/green] {escape(result.path)}（{result.sources} 个信息源）")
+
+
+@app.command("init")
+def init_cmd(
+    ctx: typer.Context,
+    directory: Optional[Path] = typer.Option(None, "--dir", "-d", help="初始化目录（默认 ~/.tentacles）"),
+    force: bool = typer.Option(False, "--force", help="覆盖已存在的默认配置与提示词模板（绝不覆盖 .env）"),
+) -> None:
+    """初始化独立工作目录（config/、.env、prompts/、data/、reports/）。"""
+    from tentacles.bootstrap import init_workspace
+
+    state: State = ctx.obj
+    with _command_errors(state):
+        outcome = init_workspace(directory, force=force)
+    if state.json:
+        typer.echo(json.dumps(asdict(outcome), ensure_ascii=False))
+    else:
+        out = Console(soft_wrap=True)
+        out.print(f"[green]initialized[/green] {escape(outcome.directory)}")
+        out.print(f"  config: {escape(outcome.config_path)}")
+        out.print(f"  env:    {escape(outcome.env_path)}")
+
+
+@skills_app.command("install")
+def skills_install(
+    ctx: typer.Context,
+    target: Optional[Path] = typer.Option(None, "--target", help="目标技能目录（默认 ~/.agents/skills）"),
+    symlink: bool = typer.Option(False, "--symlink", help="使用软链接代替复制（适合本地源码开发）"),
+) -> None:
+    """将内置的 Tentacles Agent Skills 安装到本机技能目录。"""
+    from tentacles.bootstrap import install_skills
+
+    state: State = ctx.obj
+    with _command_errors(state):
+        outcome = install_skills(target, symlink=symlink)
+    if state.json:
+        typer.echo(json.dumps(asdict(outcome), ensure_ascii=False))
+    else:
+        Console(soft_wrap=True).print(
+            f"[green]installed[/green] {', '.join(outcome.skills)} -> {escape(outcome.target_dir)} ({outcome.mode})"
+        )
+
+
+@skills_app.command("uninstall")
+def skills_uninstall(
+    ctx: typer.Context,
+    target: Optional[Path] = typer.Option(None, "--target", help="目标技能目录（默认 ~/.agents/skills）"),
+) -> None:
+    """从本机技能目录移除 Tentacles Agent Skills。"""
+    from tentacles.bootstrap import uninstall_skills
+
+    state: State = ctx.obj
+    with _command_errors(state):
+        outcome = uninstall_skills(target)
+    if state.json:
+        typer.echo(json.dumps(asdict(outcome), ensure_ascii=False))
+    else:
+        Console(soft_wrap=True).print(
+            f"[green]removed[/green] {', '.join(outcome.skills) or '(none)'} from {escape(outcome.target_dir)}"
+        )
 
 
 # ---- pipelines and reports --------------------------------------------------

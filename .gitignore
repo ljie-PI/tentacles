@@ -21,6 +21,8 @@ docs/plans/
 *.swp
 .DS_Store
 
-# Frontend
+# Frontend & wheel staging
 node_modules/
 *.tsbuildinfo
+src/tentacles/_bundled/
+src/tentacles/_web/
