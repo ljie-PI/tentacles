@@ -22,7 +22,7 @@ cp .env.example .env              # 按需填入模型 API Key、IMAP 密码或 
 tentacles config check            # 无副作用校验 config/tentacles.yaml
 ```
 
-默认配置开启了中英文科技与新闻 RSS 源及 `inbox` 邮箱源（纯 RSS 抓取与 `keyword` 过滤无需填写任何模型 Key；若尚未配置 `.env` 邮箱凭据，可在 Web **Sources** 页停用 `inbox` 或指定单源抓取）：
+默认配置开启了中英文科技与新闻 RSS、GitHub Trending 网页源及 `mail-tech` / `mail-finance` 邮箱源（未配置模型 Key 或邮箱凭据时，可先指定单个 RSS 源测试抓取）：
 
 ```bash
 tentacles sources fetch solidot   # 单源测试抓取（配置好邮箱后可直接运行 tentacles sources fetch）
