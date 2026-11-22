@@ -40,6 +40,14 @@ tentacles serve                   # 托管前端、REST API 与内置调度器�
 
 访问 `http://127.0.0.1:8000`；前端开发调试可运行 `tentacles serve --no-scheduler` 并在 `frontend/` 下启动 `pnpm dev`。
 
+### 3. 安装 AI Agent 技能（可选）
+
+将 `skills/` 下的 3 个技能软链至 `~/.agents/skills/`，并在 `~/.local/bin/tentacles` 生成带默认配置路径的 CLI 入口（支持 `--target`、`--bin-dir`、`--copy`、`--uninstall`）：
+
+```bash
+./scripts/install-skills.sh
+```
+
 ---
 
 ## 全局配置与存储（`config/tentacles.yaml`）
