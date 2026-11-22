@@ -9,10 +9,9 @@ from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator, m
 
 Stage = Literal['extract', 'filter', 'decision', 'persona', 'process']
 ModelKind = Literal['chat', 'decision']
-Provider = Literal['openai', 'openai-compatible', 'deepseek', 'anthropic', 'openrouter', 'opencode-go']
+Provider = Literal['openai', 'openai-compatible', 'anthropic', 'openrouter', 'opencode-go']
 STAGES: tuple[Stage, ...] = ('extract', 'filter', 'decision', 'persona', 'process')
 _BASE_URLS = {'openai': 'https://api.openai.com/v1',
-              'deepseek': 'https://api.deepseek.com',
               'anthropic': 'https://api.anthropic.com/v1',
               'openrouter': 'https://openrouter.ai/api/v1',
               'opencode-go': 'https://opencode.ai/inference/go/openai/v1'}
