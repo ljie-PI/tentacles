@@ -9,12 +9,13 @@ from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator, m
 
 Stage = Literal['extract', 'filter', 'decision', 'persona', 'process']
 ModelKind = Literal['chat', 'decision']
-Provider = Literal['openai', 'anthropic', 'openrouter', 'opencode-go']
+Provider = Literal['openai', 'openai-compatible', 'deepseek', 'anthropic', 'openrouter', 'opencode-go']
 STAGES: tuple[Stage, ...] = ('extract', 'filter', 'decision', 'persona', 'process')
 _BASE_URLS = {'openai': 'https://api.openai.com/v1',
+              'deepseek': 'https://api.deepseek.com',
               'anthropic': 'https://api.anthropic.com/v1',
               'openrouter': 'https://openrouter.ai/api/v1',
-              'opencode-go': 'https://opencode.ai/zen/go/v1'}
+              'opencode-go': 'https://opencode.ai/inference/go/openai/v1'}
 _RESERVED_HEADERS = frozenset({'authorization', 'x-api-key', 'host', 'content-length', 'content-type'})
 
 
@@ -97,7 +98,9 @@ class ModelSpec(BaseModel):
         return value
 
     @model_validator(mode='after')
-    def _decision_provider(self):
+    def _provider_requirements(self):
+        if self.provider == 'openai-compatible' and self.base_url is None:
+            raise ValueError('openai-compatible models require an explicit base_url')
         if self.kind == 'decision':
             if self.provider != 'openrouter':
                 raise ValueError('decision models require the openrouter provider')

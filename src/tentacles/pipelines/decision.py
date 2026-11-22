@@ -225,6 +225,8 @@ async def score_decisions(items: list[Item], persona: PersonaView, stage: StageS
                           index: int, models: ModelRegistry, name: str, progress: StageBatch) -> StageBatch:
     assert isinstance(stage, SemanticSpec)
     rendered = render_persona(persona)
+    if stage.instructions:
+        rendered += '\n\n本流水线筛选约束（必须与画像同时满足）：\n' + stage.instructions
     labels = _labels(persona)
     model = models.decision(name)
     gate = RequestGate()

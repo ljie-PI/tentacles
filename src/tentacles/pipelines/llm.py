@@ -120,6 +120,9 @@ async def score_llm(items: list[Item], persona: PersonaView, stage: StageSpec, i
         progress.scores = [StageScore(index=index, type=stage.type, error='empty_persona_interests',
                                       details={'executor': 'chat'}) for _ in items]
         return progress
+    rendered = render_persona(persona)
+    if stage.instructions:
+        rendered += '\n\n本流水线筛选约束（必须与画像同时满足）：\n' + stage.instructions
     numbered = [(i + 1, item) for i, item in enumerate(items)]
 
     def failed(chunk: list[tuple[int, Item]], exc: Exception) -> list[StageScore]:
@@ -127,7 +130,7 @@ async def score_llm(items: list[Item], persona: PersonaView, stage: StageSpec, i
                            details={'executor': 'chat'}) for _ in chunk]
 
     async def ask(chunk: list[tuple[int, Item]]) -> list[StageScore]:
-        payload = {'persona': render_persona(persona), 'tags': labels,
+        payload = {'persona': rendered, 'tags': labels,
                    'items': [{'id': number, 'source': item.source_id, 'title': item.title,
                               'summary': item.summary[:stage.summary_chars]}
                              for number, item in chunk]}
