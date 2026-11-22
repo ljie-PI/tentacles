@@ -76,14 +76,51 @@ persona_update:
 personas:
   default:
     profile: |
-      重点关注以下技术与金融领域的实质进展：
-      - AI 模型与 Agent 工程：模型与开放权重发布、评测与验证、多智能体协作、长程任务、记忆机制、Skills/MCP、上下文管理、部署监控与安全边界，侧重真实工程落地而非单纯榜单跑分。
-      - AI 游戏开发与内容生产：辅助编码、游戏引擎与智能 NPC、美术/音频/视频管线、性能与 QA 测试、发行获客，以及版权、克隆检测与 AI 披露规范。
-      - 开源软件与开发工具：终端/TUI、编程 Agent、基础软件、知识管理与开发者效率工具。
-      - AI 产品与产业资本：企业自动化案例、算力与芯片供给、数据中心与电力约束、模型商业化、资本开支、投融资及科技公司财报。
-      - 宏观金融与量化研究：美联储与利率政策、关键经济数据、国债收益率与汇率、美股与科技股财报、市场风险，以及量化研究、风险建模与交易系统工程。
-      排除纯营销软文、无事实依据的炒作、喊单荐股及无关娱乐八卦；混有赞助推广的订阅内容仅提取正文事实，区分客观数据与作者观点。
-    include: [AI, Agent, LLM, 评测, 开源, 游戏开发, 游戏引擎, 量化, 算力, 财报, 美股, 利率]
+      优先关注人工智能、LLM、开源软件与量化金融的实质技术进展，重视能够解释原理、验证效果或复用到实际系统中的研究与工程内容。
+
+      AI/LLM 技术重点：新的模型架构及其设计取舍，包括 Transformer 改进、MoE、状态空间模型与混合架构；模型训练与评测；推理优化，包括量化、蒸馏、KV cache、注意力优化、推测解码、推理引擎，以及性能、成本和效果的实测对比；Agent 架构与应用场景，包括规划、记忆、工具调用、多智能体协作、RAG、工作流、可靠性评测，以及实际部署和应用案例；有实质技术价值的开源模型、框架、工具和项目，关注代码、架构、可复现性与实际用途，而不只看热度或发布消息。
+
+      显著提高对 AI/LLM 技术博客、技术解读、原理解析、论文解读、工程实践和技术复盘的关注度。即使不是新产品发布或突发新闻，只要有扎实的技术解释、可复现的实验、代码、实验数据或实用工程经验，也应优先保留。兼顾中英文个人技术博客、研究团队与工程团队博客。
+
+      金融技术重点：显著提高对量化交易、量化研究、金融模型与交易系统工程的关注度。优先关注因子与 Alpha 研究、统计套利、时间序列与金融机器学习、组合优化、资产定价、风险建模、衍生品定价、市场微观结构、算法交易与执行、回测和数据工程，以及 AI/LLM 在金融研究与交易中的技术应用。重视模型假设、数据质量、样本外验证、过拟合与数据泄漏、交易成本、风险控制，以及可复现的研究和开源量化工具。相比单纯行情播报、涨跌预测、荐股和投资营销，更优先保留有方法、模型、代码或实验依据的技术流内容。
+
+      其次关注科技产业、机器人、科学和能源。
+      不关注重复营销、广告和缺乏事实依据的炒作；不因文章使用 AI、量化或金融相关词汇就提高其优先级，不把未经验证的回测收益或投资承诺当作可靠结论。
+    include:
+      - 人工智能
+      - AI
+      - 开源
+      - AI 技术博客
+      - AI技术博客
+      - 技术解读
+      - 原理解析
+      - 论文解读
+      - 技术复盘
+      - engineering blog
+      - technical deep dive
+      - LLM
+      - 模型架构
+      - 推理优化
+      - Agent
+      - 智能体
+      - 开源项目
+      - 量化交易
+      - 量化研究
+      - 金融模型
+      - 因子模型
+      - 风险建模
+      - 组合优化
+      - 统计套利
+      - 回测
+      - 算法交易
+      - 金融机器学习
+      - quantitative trading
+      - quantitative research
+      - financial modeling
+      - inference optimization
+      - model architecture
+      - agent architecture
+    exclude: [广告, 促销]
     hard_exclude: ['限时特惠', '扫码加群']
 
 # 有界面 Chrome 运行时（type: browser）。严格禁止无头模式：复用你已登录的 Chrome Profile，
@@ -120,23 +157,13 @@ browser:
 sources:
   # 中文
   - {id: solidot, type: rss, url: "https://www.solidot.org/index.rss", schedule: 1h}
-  - {id: 36kr, type: rss, url: "https://36kr.com/feed", schedule: 1h}
-  - {id: sspai, name: 少数派, type: rss, url: "https://sspai.com/feed", schedule: 2h}
-  - {id: bbc-zh, name: BBC中文, type: rss, url: "https://feeds.bbci.co.uk/zhongwen/simp/rss.xml", schedule: 1h}
-  - {id: jiemian, name: 界面新闻, type: rss, url: "https://www.jiemian.com/rss/all.xml", schedule: 1h}
   # 英文
   - {id: hacker-news, type: rss, url: "https://hnrss.org/frontpage", schedule: 30m, max_age_days: 2}
   - {id: techcrunch, type: rss, url: "https://techcrunch.com/feed/", schedule: 1h}
   - {id: the-verge, type: rss, url: "https://www.theverge.com/rss/index.xml", schedule: 1h}
-  - {id: ars-technica, type: rss, url: "https://feeds.arstechnica.com/arstechnica/index", schedule: 2h}
-  - {id: nytimes-world, type: rss, url: "https://rss.nytimes.com/services/xml/rss/nyt/World.xml", schedule: 1h}
-  - {id: cnbc-top, type: rss, url: "https://search.cnbc.com/rs/search/combinedcms/view.xml?partnerId=wrss01", schedule: 1h}
-  # 从 TrendRadar 迁移的 RSS 订阅（已去重 hacker-news、techcrunch、the-verge；reddit-localllama-rss 避开 browser 示例重名）
   - {id: product-hunt, name: Product Hunt, type: rss, url: "http://www.producthunt.com/feed", schedule: 1h, max_age_days: 1}
-  - {id: fast-company, name: Fast Company, type: rss, url: "http://www.fastcodesign.com/rss.xml", schedule: 1h, max_age_days: 1}
   - {id: engadget, name: Engadget, type: rss, url: "http://www.engadget.com/rss-full.xml", schedule: 1h, max_age_days: 1}
   - {id: facebook-engineering, name: Facebook Engineering, type: rss, url: "https://code.facebook.com/posts/rss", schedule: 1h, max_age_days: 1}
-  - {id: twitter-engineering, name: Twitter Engineering, type: rss, url: "https://blog.twitter.com/engineering/en_us/blog.rss", schedule: 1h, max_age_days: 1}
   - {id: shopify-engineering, name: Shopify Engineering, type: rss, url: "https://shopifyengineering.myshopify.com/blogs/engineering.atom", schedule: 1h, max_age_days: 1}
   - {id: nvidia-developer, name: Nvidia Developer, type: rss, url: "https://developer.nvidia.com/blog/feed", schedule: 1h, max_age_days: 1}
   - {id: cmu-machine-learning, name: Machine Learning Blog @CMU, type: rss, url: "https://blog.ml.cmu.edu/feed/", schedule: 1h, max_age_days: 1}
@@ -144,17 +171,8 @@ sources:
   - {id: mit-news-ai, name: MIT News - Artificial intelligence, type: rss, url: "http://news.mit.edu/rss/topic/artificial-intelligence2", schedule: 1h, max_age_days: 1}
   - {id: berkeley-ai-research, name: The Berkeley AI Research Blog, type: rss, url: "http://bair.berkeley.edu/blog/feed.xml", schedule: 1h, max_age_days: 1}
   - {id: openai-engineering, name: OpenAI Engineering, type: rss, url: "https://openai.com/news/engineering/rss.xml", schedule: 1h, max_age_days: 1}
-  - {id: nlp-news, name: NLP News, type: rss, url: "http://newsletter.ruder.io/?format=rss", schedule: 1h, max_age_days: 1}
   - {id: google-ai, name: Google AI Blog, type: rss, url: "http://googleresearch.blogspot.com/atom.xml", schedule: 1h, max_age_days: 1}
   - {id: towards-data-science, name: Towards Data Science, type: rss, url: "https://towardsdatascience.com/feed", schedule: 1h, max_age_days: 1}
-  - {id: reddit-computervision, name: r/computervision, type: rss, url: "https://www.reddit.com/r/computervision/.rss", schedule: 1h, max_age_days: 1}
-  - {id: reddit-languagetechnology, name: r/LanguageTechnology, type: rss, url: "https://www.reddit.com/r/LanguageTechnology/.rss", schedule: 1h, max_age_days: 1}
-  - {id: reddit-machinelearning, name: r/MachineLearning, type: rss, url: "https://www.reddit.com/r/MachineLearning/.rss", schedule: 1h, max_age_days: 1}
-  - {id: reddit-llm, name: r/LLM, type: rss, url: "https://www.reddit.com/r/LLM/.rss", schedule: 1h, max_age_days: 1}
-  - {id: reddit-localllama-rss, name: r/LocalLLaMA (RSS), type: rss, url: "https://www.reddit.com/r/LocalLLaMA/.rss", schedule: 1h, max_age_days: 1}
-  - {id: reddit-localllm, name: r/LocalLLM, type: rss, url: "https://www.reddit.com/r/LocalLLM/.rss", schedule: 1h, max_age_days: 1}
-  - {id: reddit-unsloth, name: r/unsloth, type: rss, url: "https://www.reddit.com/r/unsloth/.rss", schedule: 1h, max_age_days: 1}
-  - {id: reddit-vibecoding, name: r/vibecoding, type: rss, url: "https://www.reddit.com/r/vibecoding/.rss", schedule: 1h, max_age_days: 1}
   - {id: jiqizhixin, name: 微信公众号-机器之心, type: rss, url: "https://decemberpei.cyou/rssbox/wechat-jiqizhixin.xml", schedule: 1h, max_age_days: 1}
   - {id: liangziwei, name: 微信公众号-量子位, type: rss, url: "https://decemberpei.cyou/rssbox/wechat-liangziwei.xml", schedule: 1h, max_age_days: 1}
   - {id: xinzhiyuan, name: 微信公众号-新智元, type: rss, url: "https://decemberpei.cyou/rssbox/wechat-xinzhiyuan.xml", schedule: 1h, max_age_days: 1}
@@ -264,21 +282,12 @@ pipelines:
     persona: default
     sources:
       - solidot
-      - 36kr
-      - sspai
-      - bbc-zh
-      - jiemian
       - hacker-news
       - techcrunch
       - the-verge
-      - ars-technica
-      - nytimes-world
-      - cnbc-top
       - product-hunt
-      - fast-company
       - engadget
       - facebook-engineering
-      - twitter-engineering
       - shopify-engineering
       - nvidia-developer
       - cmu-machine-learning
@@ -286,17 +295,8 @@ pipelines:
       - mit-news-ai
       - berkeley-ai-research
       - openai-engineering
-      - nlp-news
       - google-ai
       - towards-data-science
-      - reddit-computervision
-      - reddit-languagetechnology
-      - reddit-machinelearning
-      - reddit-llm
-      - reddit-localllama-rss
-      - reddit-localllm
-      - reddit-unsloth
-      - reddit-vibecoding
       - jiqizhixin
       - liangziwei
       - xinzhiyuan
@@ -337,21 +337,12 @@ pipelines:
     persona: default
     sources:
       - solidot
-      - 36kr
-      - sspai
-      - bbc-zh
-      - jiemian
       - hacker-news
       - techcrunch
       - the-verge
-      - ars-technica
-      - nytimes-world
-      - cnbc-top
       - product-hunt
-      - fast-company
       - engadget
       - facebook-engineering
-      - twitter-engineering
       - shopify-engineering
       - nvidia-developer
       - cmu-machine-learning
@@ -359,17 +350,8 @@ pipelines:
       - mit-news-ai
       - berkeley-ai-research
       - openai-engineering
-      - nlp-news
       - google-ai
       - towards-data-science
-      - reddit-computervision
-      - reddit-languagetechnology
-      - reddit-machinelearning
-      - reddit-llm
-      - reddit-localllama-rss
-      - reddit-localllm
-      - reddit-unsloth
-      - reddit-vibecoding
       - jiqizhixin
       - liangziwei
       - xinzhiyuan
@@ -409,7 +391,7 @@ pipelines:
   - id: weekly-finance
     name: 金融周报
     persona: default
-    sources: [mail-finance, 36kr, jiemian, cnbc-top, bbc-zh, nytimes-world]
+    sources: [mail-finance]
     enabled: true
     window: 7d
     schedule: '0 18 * * 5'
