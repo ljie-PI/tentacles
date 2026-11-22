@@ -127,7 +127,8 @@ def _raw_str_list(raw: Mapping[str, Any], key: str, fallback: Any) -> list[str] 
 def _raw_selectors(raw: Mapping[str, Any], fallback: Any) -> dict[str, str] | None:
     candidate = raw['selectors'] if 'selectors' in raw else fallback
     if isinstance(candidate, dict):
-        return {str(k): str(v) for k, v in candidate.items() if v is not None}
+        return {str(k): str(v) for k, v in candidate.items()
+                if v is not None and not isinstance(v, (dict, list, tuple))} or None
     return None
 
 
@@ -157,6 +158,9 @@ def _view_of(config: AppConfig, spec: SourceSpec, raw_entry: Mapping[str, Any] |
     opts = _coerced_options(config, spec)
     source_type = cast(Any, spec.type)
     raw_map = dict(raw_entry) if raw_entry is not None else {}
+    view_mode = opts.get('mode')
+    if spec.type == 'browser' and view_mode == 'script':
+        view_mode = None
     return SourceConfigView(
         id=spec.id,
         type=source_type,
@@ -176,7 +180,7 @@ def _view_of(config: AppConfig, spec: SourceSpec, raw_entry: Mapping[str, Any] |
         max_fetch=opts.get('max_fetch'),
         search=_raw_str(raw_map, 'search', opts.get('search')),
         exclude_senders=_raw_str_list(raw_map, 'exclude_senders', opts.get('exclude_senders')),
-        mode=opts.get('mode'),
+        mode=view_mode,
         selectors=_raw_selectors(raw_map, opts.get('selectors')),
         selector=_raw_str(raw_map, 'selector', opts.get('selector')),
         fetch_content=opts.get('fetch_content'),

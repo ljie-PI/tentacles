@@ -184,11 +184,27 @@ def _browser_scripts_dir(browser: Mapping[str, Any], config_path: Path) -> Path:
 
 
 def _browser_errors(options: Mapping[str, Any], where: str, browser: Mapping[str, Any],
-                    config_path: Path) -> list[ConfigIssue]:
-    """Script path containment for `type: browser` (headless is rejected by its schema)."""
+                    config_path: Path | None) -> list[ConfigIssue]:
+    """Mode cross-field rules and script path containment for `type: browser`."""
     errors: list[ConfigIssue] = []
+    mode = options.get("mode", "script")
+    if mode == "list":
+        if options.get("selectors") is None:
+            errors.append(ConfigIssue(f"{where}.selectors", "list mode requires selectors"))
+        if options.get("script_path") is not None:
+            errors.append(ConfigIssue(f"{where}.script_path", "script_path is only supported in script mode"))
+        if options.get("task"):
+            errors.append(ConfigIssue(f"{where}.task", "task is only supported in script mode"))
+        if options.get("pi") is not None:
+            errors.append(ConfigIssue(f"{where}.pi", "pi is only supported in script mode"))
+        return errors
+    if mode == "script":
+        if options.get("selectors") is not None:
+            errors.append(ConfigIssue(f"{where}.selectors", "selectors are only supported in list mode"))
+        if options.get("prefilter") is not None:
+            errors.append(ConfigIssue(f"{where}.prefilter", "prefilter is only supported in list mode"))
     raw = options.get("script_path")
-    if raw is None:
+    if raw is None or config_path is None:
         return errors
     script = _path(raw, config_path) if isinstance(raw, str) and raw.strip() else None
     if script is None:
@@ -243,7 +259,7 @@ def _source_options(data: Mapping[str, Any], where: str, *, config_path: Path | 
             errors.append(ConfigIssue(f'{where}.selectors', 'list mode requires selectors'))
         if mode in ('list', 'page') and options.get('model') is not None:
             errors.append(ConfigIssue(f'{where}.model', 'model override is only supported in llm mode'))
-    if source_type == 'browser' and config_path is not None:
+    if source_type == 'browser':
         errors.extend(_browser_errors(options, where, browser or {}, config_path))
     try:
         return cls.Options.model_validate(options), errors

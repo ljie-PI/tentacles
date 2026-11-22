@@ -252,6 +252,9 @@ class TentaclesService:
         if spec.type != 'browser':
             raise ConfigError(
                 f'sources distill needs a `type: browser` source ({source_id!r} is {spec.type!r})')
+        if spec.options.get('mode', 'script') != 'script':
+            raise ConfigError(
+                f'sources distill requires a browser source in script mode ({source_id!r} is mode={spec.options.get("mode")!r})')
         return (await self.scheduler.fetch_sources([source_id], distill=True))[0]
 
     async def tick(self) -> list[TickOutcome]:

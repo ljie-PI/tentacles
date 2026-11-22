@@ -39,6 +39,9 @@ from tentacles.sources.browser_contract import (
     BrowserExtractOutput, ExtractScript, RawBrowserItem, ScriptGateError,
 )
 from tentacles.sources.browser_heal import HealFailed, HealRequest, heal
+from tentacles.sources.browser_list import (
+    BrowserListSelectors, BrowserPrefilterOptions, BrowserScrollOptions, run_browser_list,
+)
 from tentacles.sources.browser_script import load_script
 from tentacles.sources.browser_session import page_snapshot, work_tab
 from tentacles.sources.distiller import DistillFailed, DistillRequest, distill
@@ -65,12 +68,16 @@ class BrowserOptions(BaseModel):
     model_config = ConfigDict(extra='forbid')
 
     page_url: str
+    mode: Literal['script', 'list'] = 'script'
     task: str = Field(default='', max_length=4000)
     chrome_profile: str | None = None
     on_detail_error: Literal['fail_batch', 'record_and_skip'] = 'record_and_skip'
     script_path: str | None = None
-    max_items: int = Field(default=25, ge=1, le=200)
+    max_items: int = Field(default=25, ge=1, le=500)
     timeout: float = Field(default=60, gt=0, allow_inf_nan=False)
+    scroll: BrowserScrollOptions = Field(default_factory=BrowserScrollOptions)
+    selectors: BrowserListSelectors | None = None
+    prefilter: BrowserPrefilterOptions | None = None
     # Declared only so `headless: true` fails with a clear message, never silently.
     headless: bool = False
     pi: BrowserPiOptions | None = None
@@ -108,6 +115,8 @@ class BrowserSource(Source):
         config = ctx.config
         if config is None:
             raise ConfigError('browser sources need the loaded application config (the `browser` block)')
+        if opts.mode == 'list':
+            return await self._fetch_list(opts, config, ctx)
         script = _script_path(config, self.spec.id, opts)
         if ctx.distill or not script.exists():
             return await self._distill(script, opts, ctx, cursor)
@@ -207,6 +216,53 @@ class BrowserSource(Source):
             stats['refresh_links'] = sum(1 for item in kept if links.get(item.url) == 'refresh')
         observations = [_observation(item) for item in kept] if self.spec.update_existing else []
         return FetchResult(kept, _cursor(opts, script, len(kept)), stats, observations)
+
+    async def _fetch_list(self, opts: BrowserOptions, config: AppConfig, ctx: FetchContext) -> FetchResult:
+        """Scroll and extract items via CSS selectors + engagement prefilter without pi."""
+        if ctx.distill:
+            raise ConfigError('sources distill requires a browser source in script mode')
+        if opts.selectors is None:
+            raise ConfigError('browser list mode requires selectors')
+        try:
+            scan = await run_browser_list(
+                config,
+                source_id=self.spec.id,
+                page_url=opts.page_url,
+                chrome_profile=opts.chrome_profile,
+                selectors=opts.selectors,
+                scroll=opts.scroll,
+                prefilter=opts.prefilter,
+                max_items=opts.max_items,
+                timeout=opts.timeout,
+                ctx=ctx,
+            )
+        except (DiagnosedError, ConfigError):
+            raise
+        except Exception as exc:
+            self._record(
+                ctx,
+                opts,
+                phase='browser_replay',
+                error_code='unexpected_exception',
+                message=f'browser list failed ({type(exc).__name__})',
+                exc=exc,
+                snapshot={'browser_mode': 'list'},
+                target_url=opts.page_url,
+            )
+            raise DiagnosedError(f'browser list failed ({type(exc).__name__})') from None
+
+        kept, links = await self._classify(scan.items, ctx)
+        stats: dict[str, Any] = {
+            **scan.stats,
+            'entries': len(scan.items),
+            'duplicates': 0,
+            'skipped_known': len(scan.items) - len(kept),
+        }
+        if self.spec.update_existing:
+            stats['refresh_links'] = sum(1 for item in kept if links.get(item.url) == 'refresh')
+        observations = [_observation(item) for item in kept] if self.spec.update_existing else []
+        next_cursor = {'page_url': opts.page_url, 'mode': 'list', 'items': len(kept)}
+        return FetchResult(kept, next_cursor, stats, observations)
 
     async def _classify(self, items: list[Item], ctx: FetchContext) -> tuple[list[Item], dict[str, LinkDisposition]]:
         """Skip entries this source already holds unless an in-place update is allowed."""

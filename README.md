@@ -144,7 +144,7 @@ app:
 - **`mode: llm`**：使用 `defaults.models.extract`（可用 `model:` 覆盖）和 `max_input_chars`（1–200000）；丢弃页面内不存在的幻觉链接并记账；页面有效文本、链接集合及抽取模型配置未变时命中持久游标缓存（零模型调用）。
 
 ### 4. 有界面浏览器源（`type: browser`）
-适用于需登录态或动态渲染站点。在真实可见 Chrome 中开隔离工作 Tab 重放 `scripts/browser_sources/<id>.py`；**严格禁止无头模式**（`headless: true` 直接报错）。
+适用于需登录态或动态渲染站点。在真实可见 Chrome 中开隔离工作 Tab 执行采集，支持 `mode: script`（默认，重放固化脚本 `scripts/browser_sources/<id>.py`）与 `mode: list`（无脚本，基于 CSS 选择器自动下翻滚动与互动量预筛）；**严格禁止无头模式**（`headless: true` 直接报错）。
 
 ```yaml
 browser:
@@ -167,8 +167,13 @@ browser:
     labels: [ready-for-human]
 ```
 
-- **源级字段**：`page_url`、`task`（冷启动探索提示）、`chrome_profile`、`script_path`、`max_items`（1–200，默认 25）、`timeout`（默认 60s）、`on_detail_error`（仅控制冷启动失败：`record_and_skip` \| `fail_batch`）、`pi`（源级覆盖）。
-- **运行时隔离与生命周期**：按 `(cdp_url, profile)` 串行获取焦点；通过 `chrome://version` 核验真实 Profile 且禁用该 Tab 的 HTTP 缓存；退出时仅关闭工作 Tab。缺少脚本时走受控 `pi --mode rpc` 探索与提炼（轨迹写入 gitignored 的 `data/trajectories/`），重放异常/0 条时触发一次 `pi` 自愈（最多 2 候选）；脚本须通过 AST 静态门禁与真实试跑门禁才落盘，并按 `browser.pr` 在系统临时目录的隔离 `git worktree` 中单文件提交并开/更新评审 PR（软降级不阻断采集；命中凭据扫描则中止推送）。
+- **通用源级字段**：`page_url`、`mode`（`script` \| `list`，默认 `script`）、`chrome_profile`、`max_items`（1–500，默认 25）、`timeout`（默认 60s）。
+- **`mode: script`（默认）**：可选 `task`（冷启动探索提示）、`script_path`、`on_detail_error`（仅控制冷启动失败：`record_and_skip` \| `fail_batch`）、`pi`（源级覆盖）。缺少脚本时走受控 `pi --mode rpc` 探索与提炼（轨迹写入 gitignored 的 `data/trajectories/`），重放异常/0 条时触发一次 `pi` 自愈（最多 2 候选）；脚本须通过 AST 静态门禁与真实试跑门禁才落盘，并按 `browser.pr` 在隔离 `git worktree` 中单文件提交并开/更新评审 PR（软降级不阻断采集；命中凭据扫描则中止推送）。
+- **`mode: list`（滚动列表与互动量预筛）**：零 LLM/脚本开销，适用于 X / Reddit 等虚拟列表无限滚动流（与 `script_path` / `task` / `pi` / `sources distill` 互斥）：
+  - `selectors`（必填）：`item`（卡片节点 CSS）、`link`（必填，支持 `css@attr` 或 `@attr`），以及 `title`、`content`、`summary`（三者至少配其一；省略 `title` 时自动从正文首行派生）、`author`、`date`、`comments_url`、`external_url`（存入 `meta.external_url`）、`skip_if`（命中即跳过的广告/置顶 CSS 列表）、`require`（卡片须匹配的 CSS 列表，如 `["time"]`）、`metrics`（`votes` / `likes` / `comments` / `reposts` / `views` 选择器，自动解析 `K/M/B`、`万/亿` 与 `aria-label` 数字写入 `meta.metrics`）。
+  - `scroll`：`max_scrolls`（0–200，默认 `20`）、`wait_min_ms`（默认 `1200`）、`wait_max_ms`（默认 `3000`）、`idle_rounds`（连续无新卡片轮数即停，默认 `2`）；跨轮按规范化 URL 累积去重，避免虚拟 DOM 回收漏抓。
+  - `prefilter`：`match`（`any` \| `all`，默认 `any`）、`min_votes` / `min_likes` / `min_comments` / `min_reposts` / `min_views`、`min_text_chars`（默认 `0`，始终独立生效）；页面有卡片但全部被 `prefilter` 或已读去重过滤时正常返回空批，不报错且不触发 `pi`。
+- **运行时隔离**：按 `(cdp_url, profile)` 串行获取焦点；通过 `chrome://version` 核验真实 Profile 且禁用该 Tab 的 HTTP 缓存；退出时仅关闭工作 Tab。
 
 ### 5. 原位更新（`update_existing: true`）
 支持 **RSS / Atom**、**Web `list` / `llm`** 与 **`type: browser`**（IMAP 与 Web `page` 设为 `true` 报错）：
