@@ -84,7 +84,7 @@ app:
 
 | 字段 | 说明与默认值 |
 | :--- | :--- |
-| `provider` | `openai`（默认）、`anthropic`、`openrouter`、`opencode-go`，或兼容协议 `openai-compatible`（兼容 DeepSeek / Moonshot / Ollama / vLLM 等，必须显式填写 `base_url`） |
+| `provider` | `openai`（默认）、`openai-compatible`（兼容 DeepSeek / Moonshot / Ollama / vLLM 等，须填 `base_url`）、`anthropic`、`openrouter`、`opencode-go`（自动附带 `x-opencode-session`） |
 | `kind` | `chat`（默认）或 `decision`（仅限 `provider: openrouter`） |
 | `model` | 服务商侧真实模型 ID（必填） |
 | `base_url` | API 根路径（如本地 Ollama `http://localhost:11434/v1`）；禁止携带凭据、query 或 fragment |
@@ -96,7 +96,6 @@ app:
 
 - **重试与脱敏**：对 `408 / 409 / 425 / 429`、所有 `5xx`、网络错误和超时自动重试（优先遵守 `Retry-After`，上限 60s，否则指数退避上限 30s），不跟随 HTTP 重定向。所有模型 `api_key` 均全局脱敏为 `[REDACTED]`。
 - **探测**：`tentacles models list` 仅查看密钥是否配置；`tentacles models test <NAME>` 发起真实轻量请求（可能产生微量费用）。
-- **Provider 端点与协议**：不填 `base_url` 时决定默认 API 根地址（`opencode-go` 默认 `https://opencode.ai/inference/go/openai/v1` 并自动附带 `x-opencode-session`）；`openai-compatible` 必须显式填写 `base_url`（例如 DeepSeek 填 `https://api.deepseek.com`）。`anthropic` 使用 `/messages` 与 `x-api-key`，其他 chat 适配器使用 `/chat/completions` 与 Bearer 认证。
 
 ---
 
@@ -178,7 +177,7 @@ personas:
 Pipeline 按 `window`（`COALESCE(updated_at, fetched_at)`）与 `max_items`（1–5000）拉取候选：
 1. 得分 `< reject_below`（默认 `0.5`）立即淘汰；`>= accept_above` 立即通过；介于两者之间转交下一阶段；最后阶段未淘汰即通过（`filters: []` 全部按 `1.0` 通过）；末阶段出错暂不落库并写入故障账本等待重试。
 2. **`keyword`**：合并 Persona 与阶段词表，不区分大小写匹配标题+摘要（`regex: true` 时单条限时 50ms）。命中 `hard_exclude` 得 `0.0`；只命中软 `exclude` 得 `0.0`；软 `exclude` 与正向词同时命中且 `guard_ambiguous_exclude: true`（默认）得 `0.55` 转交下一关；仅命中正向词在 `accept_above: 1.0` 时给 `1.0` 短路，否则 `0.85`；均未命中给 `0.5`。
-3. **`semantic`**（推荐写法；兼容旧 `llm` / `decision`）：根据所选模型自身的 `kind` 自动分派 **Chat 批量链路**（`batch_size` 1–100 默认 20，`summary_chars` 0–1000 默认 160，脏 JSON 自动恢复/折半重试）或 **JEV 链路**（`relevance_type`: `noul` \| `score`，`jev_batch_mode`: `packed_questions` \| `windowed_pool`，`400/413` 自动折半并回退逐条并发，默认 `provider.data_collection = "deny"`）。每完成一个 `batch_size` 分块即在租约保护下增量落库。可选 `instructions`（最多 4000 字符）附加流水线级筛选约束，在 Chat 与 JEV 两条链路中均与 Persona 一并传入，使多条流水线可共享同一 Persona 而不混杂报告主题。
+3. **`semantic`**（推荐写法；兼容旧 `llm` / `decision`）：根据所选模型自身的 `kind` 自动分派 **Chat 批量链路**（`batch_size` 1–100 默认 20，`summary_chars` 0–1000 默认 160，脏 JSON 自动恢复/折半重试）或 **JEV 链路**（`relevance_type`: `noul` \| `score`，`jev_batch_mode`: `packed_questions` \| `windowed_pool`，`400/413` 自动折半并回退逐条并发，默认 `provider.data_collection = "deny"`）。每完成一个 `batch_size` 分块即在租约保护下增量落库。可选 `instructions`（不超过 4000 字符）附加流水线级筛选约束，与 Persona 一并参与判断。
 
 ### 报告处理器（`pipelines[].processor`）
 按分数倒序选出窗口内已通过且未被本 Pipeline 消费的前 `max_items` 条，**同一条目在同一 Pipeline 中终身只消费一次**：

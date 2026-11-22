@@ -63,7 +63,6 @@ class SemanticSpec(ThresholdSpec):
 
     type: Literal['semantic', 'llm', 'decision'] = 'semantic'
     model: str | None = None
-    # Additional pipeline scope: a shared Persona need not mix report topics.
     instructions: str = Field(default='', max_length=4000)
     # Finished batches are the checkpoint unit, so this is also the paid request size.
     batch_size: int = Field(default=20, ge=1, le=100)
