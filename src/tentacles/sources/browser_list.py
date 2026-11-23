@@ -385,7 +385,9 @@ def derive_title(
         base_title = truncate(re.sub(r'\s+', ' ', explicit_title).strip(), 1000)
     else:
         for text in (content, summary):
-            for line in text.splitlines():
+            normalized = re.sub(r'[ \t\xa0]*\n[ \t\xa0]*([@#][\w]+)[ \t\xa0]*\n[ \t\xa0]*', r' \1 ', text)
+            normalized = re.sub(r'[ \t\xa0]*\n[ \t\xa0]*(?=[@#])', ' ', normalized)
+            for line in normalized.splitlines():
                 cleaned = re.sub(r'\s+', ' ', line).strip()
                 if cleaned:
                     base_title = truncate(cleaned, _DERIVED_TITLE_LIMIT)
