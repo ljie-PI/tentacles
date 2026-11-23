@@ -274,6 +274,27 @@ sources:
     timeout: 60                           # 单次重放整体超时秒数
     # headless: true                      # 不允许：有界面运行时直接报配置错误
 
+  # 有界面浏览器无限滚动流（mode: list）：默认下翻 max_scrolls: 20、随机等待 2–10s，无新结果或达到上限停止，零 LLM 成本。
+  - id: x-home
+    type: browser
+    mode: list
+    preset: x-following
+    name: X 正在关注时间流
+    schedule: 4h
+    page_url: https://x.com/home
+    max_items: 100
+    timeout: 420
+    scroll: {max_scrolls: 30}
+    prefilter: {min_likes: 20, min_reposts: 5, min_comments: 5, min_text_chars: 15, min_media_text_chars: 4}
+  - {id: reddit-agents-top, type: browser, mode: list, preset: reddit, name: "Reddit Agents (Top Today)", schedule: 4h, page_url: "https://www.reddit.com/user/ljie-pi/m/agents/top/", max_items: 50, timeout: 300, prefilter: {min_votes: 10, min_comments: 5}}
+  - {id: reddit-ai-top, type: browser, mode: list, preset: reddit, name: "Reddit AI (Top Today)", schedule: 4h, page_url: "https://www.reddit.com/user/ljie-pi/m/ai/top/", max_items: 50, timeout: 300, prefilter: {min_votes: 10, min_comments: 5}}
+  - {id: reddit-model-inference-top, type: browser, mode: list, preset: reddit, name: "Reddit Model Inference (Top Today)", schedule: 4h, page_url: "https://www.reddit.com/user/ljie-pi/m/model_inference/top/", max_items: 50, timeout: 300, prefilter: {min_votes: 10, min_comments: 5}}
+  - {id: reddit-llm-top, type: browser, mode: list, preset: reddit, name: "Reddit LLM (Top Today)", schedule: 4h, page_url: "https://www.reddit.com/user/ljie-pi/m/llm/top/", max_items: 50, timeout: 300, prefilter: {min_votes: 10, min_comments: 5}}
+  - {id: reddit-agents-week, type: browser, mode: list, preset: reddit, name: "Reddit Agents (Top Week)", schedule: '0 6 * * 0', page_url: "https://www.reddit.com/user/ljie-pi/m/agents/top/?t=week", max_items: 80, timeout: 300, prefilter: {min_votes: 50, min_comments: 15}}
+  - {id: reddit-ai-week, type: browser, mode: list, preset: reddit, name: "Reddit AI (Top Week)", schedule: '0 6 * * 0', page_url: "https://www.reddit.com/user/ljie-pi/m/ai/top/?t=week", max_items: 80, timeout: 300, prefilter: {min_votes: 50, min_comments: 15}}
+  - {id: reddit-model-inference-week, type: browser, mode: list, preset: reddit, name: "Reddit Model Inference (Top Week)", schedule: '0 6 * * 0', page_url: "https://www.reddit.com/user/ljie-pi/m/model_inference/top/?t=week", max_items: 80, timeout: 300, prefilter: {min_votes: 50, min_comments: 15}}
+  - {id: reddit-llm-week, type: browser, mode: list, preset: reddit, name: "Reddit LLM (Top Week)", schedule: '0 6 * * 0', page_url: "https://www.reddit.com/user/ljie-pi/m/llm/top/?t=week", max_items: 80, timeout: 300, prefilter: {min_votes: 50, min_comments: 15}}
+
 # tick 会先抓取、再只过滤、最后运行到期的 pipeline；模型调用可能产生费用。
 # 也可手动执行 pipelines filter/run ID；enabled: false 关闭自动执行。
 pipelines:
@@ -310,6 +331,11 @@ pipelines:
       - github-trending-rust
       - github-trending-cpp
       - github-trending-c
+      - x-home
+      - reddit-agents-top
+      - reddit-ai-top
+      - reddit-model-inference-top
+      - reddit-llm-top
     enabled: true
     window: 24h
     schedule: '0 6 * * *'
@@ -365,9 +391,17 @@ pipelines:
       - github-trending-rust
       - github-trending-cpp
       - github-trending-c
+      - reddit-agents-top
+      - reddit-ai-top
+      - reddit-model-inference-top
+      - reddit-llm-top
+      - reddit-agents-week
+      - reddit-ai-week
+      - reddit-model-inference-week
+      - reddit-llm-week
     enabled: true
     window: 7d
-    schedule: '0 18 * * 5'
+    schedule: '0 9 * * 0'
     filter_schedule: 6h
     max_items: 5000
     filters:
