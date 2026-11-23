@@ -1,6 +1,6 @@
 [project]
 name = "tentacles"
-version = "0.2.0"
+version = "0.3.0"
 description = "Personal information and news manager: multi-source fetching, persona-based filtering and LLM processing."
 requires-python = ">=3.10"
 license = { text = "Apache-2.0" }
