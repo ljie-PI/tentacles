@@ -15,7 +15,7 @@
 要求 Python >= 3.10（推荐使用 `uv` 或 `pipx`）：
 
 ```bash
-uv tool install https://github.com/ljie-PI/tentacles/releases/download/v0.2.0/tentacles-0.2.0-py3-none-any.whl
+uv tool install https://github.com/ljie-PI/tentacles/releases/download/v0.3.0/tentacles-0.3.0-py3-none-any.whl
 tentacles init                    # 初始化 ~/.tentacles（配置、提示词、.env、data/、reports/）
 tentacles skills install          # 可选：安装 Agent 技能至 ~/.agents/skills/
 tentacles serve                   # 启动内置 Web 界面（http://127.0.0.1:8000）与后台调度器

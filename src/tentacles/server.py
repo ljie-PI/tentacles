@@ -50,7 +50,7 @@ def create_app(config: AppConfig, *, transport: httpx.AsyncBaseTransport | None 
             finally:
                 await svc.aclose()
 
-    app = LogSafeAPI(title='Tentacles', version='0.2.0', lifespan=lifespan,
+    app = LogSafeAPI(title='Tentacles', version='0.3.0', lifespan=lifespan,
                   openapi_url=None, docs_url=None, redoc_url=None, responses=ERROR_RESPONSES)
     install_error_handlers(app, config)
     authorize = authorization(config)
