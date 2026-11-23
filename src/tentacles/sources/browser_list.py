@@ -49,18 +49,37 @@ _METRIC_MULTIPLIERS: dict[str, int] = {
 
 _JS_EXTRACT_CARDS = """
 (spec) => {
-  const queryValue = (root, sel) => {
+  const cleanText = (node) => {
+    const raw = (typeof node.innerText === 'string' && node.innerText) ? node.innerText : (node.textContent || '');
+    return raw.replace(/\\r\\n?/g, '\\n').trim();
+  };
+
+  const queryValue = (root, sel, joinAll = false) => {
     if (!sel) return null;
-    const node = sel.css === ':scope' ? root : root.querySelector(sel.css);
-    if (!node) return null;
+    if (sel.css === ':scope') {
+      const attr = sel.attribute || sel.default_attribute;
+      if (attr) {
+        if (!root.hasAttribute(attr)) return null;
+        const val = root.getAttribute(attr);
+        return val === null ? null : String(val).trim();
+      }
+      return cleanText(root);
+    }
     const attr = sel.attribute || sel.default_attribute;
+    if (joinAll && !attr) {
+      const nodes = Array.from(root.querySelectorAll(sel.css));
+      if (!nodes.length) return null;
+      const texts = nodes.map(cleanText).filter(Boolean);
+      return texts.length ? texts.join('\\n\\n> ') : '';
+    }
+    const node = root.querySelector(sel.css);
+    if (!node) return null;
     if (attr) {
       if (!node.hasAttribute(attr)) return null;
       const val = node.getAttribute(attr);
       return val === null ? null : String(val).trim();
     }
-    const raw = (typeof node.innerText === 'string' && node.innerText) ? node.innerText : (node.textContent || '');
-    return raw.replace(/\\r\\n?/g, '\\n').trim();
+    return cleanText(node);
   };
 
   const matchesRule = (root, css) => {
@@ -99,16 +118,24 @@ _JS_EXTRACT_CARDS = """
     for (const [key, sel] of Object.entries(spec.metrics)) {
       metrics[key] = queryValue(el, sel);
     }
+    let hasMedia = false;
+    for (const mediaCss of spec.media) {
+      if (matchesRule(el, mediaCss)) {
+        hasMedia = true;
+        break;
+      }
+    }
     cards.push({
       skipped_ad: false,
       link: queryValue(el, spec.link),
       title: queryValue(el, spec.title),
-      content: queryValue(el, spec.content),
-      summary: queryValue(el, spec.summary),
+      content: queryValue(el, spec.content, true),
+      summary: queryValue(el, spec.summary, true),
       author: queryValue(el, spec.author),
       date: queryValue(el, spec.date),
       comments_url: queryValue(el, spec.comments_url),
       external_url: queryValue(el, spec.external_url),
+      has_media: hasMedia,
       metrics,
     });
   }
@@ -234,8 +261,8 @@ class BrowserScrollOptions(BaseModel):
     model_config = ConfigDict(extra='forbid')
 
     max_scrolls: int = Field(default=20, ge=0, le=200)
-    wait_min_ms: int = Field(default=1200, ge=100, le=30000)
-    wait_max_ms: int = Field(default=3000, ge=100, le=60000)
+    wait_min_ms: int = Field(default=2000, ge=100, le=30000)
+    wait_max_ms: int = Field(default=10000, ge=100, le=60000)
     idle_rounds: int = Field(default=2, ge=1, le=20)
 
     @model_validator(mode='after')
@@ -272,7 +299,9 @@ class BrowserListSelectors(BaseModel):
     date: str | None = None
     comments_url: str | None = None
     external_url: str | None = None
+    media: list[str] = Field(default_factory=list)
     prefix_author_in_title: bool = False
+    prefix_metrics_in_title: bool = False
     prepend_metadata_in_content: bool = False
     before_scan_clicks: list[BrowserClickStep] = Field(default_factory=list)
     skip_if: list[str] = Field(default_factory=list)
@@ -289,7 +318,7 @@ class BrowserListSelectors(BaseModel):
     def _field_selectors(cls, value: str | None) -> str | None:
         return _validate_selector(value)
 
-    @field_validator('skip_if', 'require')
+    @field_validator('skip_if', 'require', 'media')
     @classmethod
     def _filter_selectors(cls, values: list[str]) -> list[str]:
         return [_validate_node_selector(value) for value in values]
@@ -311,9 +340,15 @@ class BrowserPrefilterOptions(BaseModel):
     min_reposts: int | None = Field(default=None, ge=0)
     min_views: int | None = Field(default=None, ge=0)
     min_text_chars: int = Field(default=0, ge=0, le=10000)
+    min_media_text_chars: int | None = Field(default=None, ge=0, le=10000)
 
-    def passes(self, metrics: dict[str, int], *, text_chars: int) -> bool:
-        if self.min_text_chars > 0 and text_chars < self.min_text_chars:
+    def passes(self, metrics: dict[str, int], *, text_chars: int, has_media: bool = False) -> bool:
+        min_chars = (
+            self.min_media_text_chars
+            if has_media and self.min_media_text_chars is not None
+            else self.min_text_chars
+        )
+        if min_chars > 0 and text_chars < min_chars:
             return False
         thresholds: list[tuple[str, int]] = []
         for key in _METRIC_KEYS:
@@ -377,9 +412,15 @@ def derive_title(
     *,
     author: str,
     url: str,
+    metrics: Mapping[str, int] | None = None,
     prefix_author: bool = False,
+    prefix_metrics: bool = False,
 ) -> str:
-    """Use explicit title when present, otherwise derive from content/summary or author + URL."""
+    """Use explicit title when present, otherwise derive from content/summary or author + URL.
+
+    When `prefix_author` and/or `prefix_metrics` are enabled, prefixes are joined
+    with `" | "`, e.g. `Author | likes=100 reposts=12 comments=8 | Actual Title`.
+    """
     base_title = ''
     if explicit_title and explicit_title.strip():
         base_title = truncate(re.sub(r'\s+', ' ', explicit_title).strip(), 1000)
@@ -395,12 +436,17 @@ def derive_title(
             if base_title:
                 break
     if not base_title:
-        if author:
-            return truncate(f'{author}: {url}', _DERIVED_TITLE_LIMIT)
-        return truncate(url, _DERIVED_TITLE_LIMIT)
-    if prefix_author and author and not base_title.startswith(f'{author}:'):
-        return truncate(f'{author}: {base_title}', 1000)
-    return base_title
+        base_title = truncate(url, _DERIVED_TITLE_LIMIT)
+
+    segments: list[str] = []
+    if prefix_author and author:
+        segments.append(author)
+    if prefix_metrics and metrics:
+        metric_str = ' '.join(f'{key}={metrics[key]}' for key in _METRIC_KEYS if key in metrics)
+        if metric_str:
+            segments.append(metric_str)
+    segments.append(base_title)
+    return truncate(' | '.join(segments), 1000)
 
 
 def format_metadata_header(
@@ -480,6 +526,7 @@ def build_extractor_payload(selectors: BrowserListSelectors) -> dict[str, Any]:
         'date': optional(selectors.date),
         'comments_url': optional(selectors.comments_url, default_attribute='href'),
         'external_url': optional(selectors.external_url, default_attribute='href'),
+        'media': list(selectors.media),
         'skip_if': list(selectors.skip_if),
         'require': list(selectors.require),
         'metrics': metrics_payload,
@@ -547,8 +594,14 @@ def accumulate_round_cards(
             for key in configured_metric_keys:
                 parsed_metrics[key] = parse_metric_count(_as_optional_str(raw_metrics.get(key)))
 
-        body_for_length = raw_content or raw_summary or (explicit_title or '').strip()
-        if prefilter is not None and not prefilter.passes(parsed_metrics, text_chars=len(body_for_length)):
+        has_media = bool(card.get('has_media'))
+        combined_texts = [t for t in (raw_content, raw_summary, (explicit_title or '').strip()) if t]
+        body_for_length = '\n'.join(combined_texts)
+        if prefilter is not None and not prefilter.passes(
+            parsed_metrics,
+            text_chars=len(body_for_length),
+            has_media=has_media,
+        ):
             counters['filtered_out'] += 1
             continue
 
@@ -562,11 +615,17 @@ def accumulate_round_cards(
             raw_summary,
             author=author,
             url=url,
+            metrics=parsed_metrics,
             prefix_author=selectors.prefix_author_in_title,
+            prefix_metrics=selectors.prefix_metrics_in_title,
         )
         published = parse_published(_as_optional_str(card.get('date')), ctx)
-        content = raw_content or truncate(raw_summary, 2000) or title
-        summary = truncate(raw_summary or raw_content or title, 2000)
+        if raw_content and raw_summary and raw_summary not in raw_content:
+            merged_body = f'{raw_content}\n\n[Card] {raw_summary}'
+        else:
+            merged_body = raw_content or truncate(raw_summary, 2000) or title
+        content = merged_body
+        summary = truncate(merged_body, 2000)
         if selectors.prepend_metadata_in_content:
             header = format_metadata_header(author=author, published=published, metrics=parsed_metrics)
             if header:
@@ -578,6 +637,8 @@ def accumulate_round_cards(
             'browser_entry_url': page_url,
             'metrics': dict(parsed_metrics),
         }
+        if has_media:
+            meta['has_media'] = True
         comments_url = resolve_http_url(base_url, _as_optional_str(card.get('comments_url')))
         if comments_url:
             meta['comments_url'] = comments_url
