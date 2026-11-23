@@ -200,6 +200,36 @@ def _validate_node_selector(value: str) -> str:
     return parsed.css
 
 
+class BrowserClickStep(BaseModel):
+    """One pre-scan click step (e.g. switching from X 'For you' to 'Following')."""
+
+    model_config = ConfigDict(extra='forbid')
+
+    selector: str
+    has_text: str | list[str] | None = None
+    wait_ms: int = Field(default=1500, ge=0, le=30000)
+
+    @field_validator('selector')
+    @classmethod
+    def _selector(cls, value: str) -> str:
+        return _validate_node_selector(value)
+
+    @field_validator('has_text')
+    @classmethod
+    def _has_text(cls, value: str | list[str] | None) -> str | list[str] | None:
+        if value is None:
+            return None
+        if isinstance(value, str):
+            cleaned = value.strip()
+            if not cleaned:
+                raise ValueError('has_text must not be empty')
+            return cleaned
+        cleaned_list = [v.strip() for v in value if isinstance(v, str) and v.strip()]
+        if not cleaned_list:
+            raise ValueError('has_text list must contain at least one non-empty string')
+        return cleaned_list
+
+
 class BrowserScrollOptions(BaseModel):
     model_config = ConfigDict(extra='forbid')
 
@@ -242,6 +272,9 @@ class BrowserListSelectors(BaseModel):
     date: str | None = None
     comments_url: str | None = None
     external_url: str | None = None
+    prefix_author_in_title: bool = False
+    prepend_metadata_in_content: bool = False
+    before_scan_clicks: list[BrowserClickStep] = Field(default_factory=list)
     skip_if: list[str] = Field(default_factory=list)
     require: list[str] = Field(default_factory=list)
     metrics: BrowserMetricsSelectors = Field(default_factory=BrowserMetricsSelectors)
@@ -337,18 +370,53 @@ def clean_author(raw: str | None) -> str:
     return ' '.join(cleaned_lines).strip()
 
 
-def derive_title(explicit_title: str | None, content: str, summary: str, *, author: str, url: str) -> str:
+def derive_title(
+    explicit_title: str | None,
+    content: str,
+    summary: str,
+    *,
+    author: str,
+    url: str,
+    prefix_author: bool = False,
+) -> str:
     """Use explicit title when present, otherwise derive from content/summary or author + URL."""
+    base_title = ''
     if explicit_title and explicit_title.strip():
-        return truncate(re.sub(r'\s+', ' ', explicit_title).strip(), 1000)
-    for text in (content, summary):
-        for line in text.splitlines():
-            cleaned = re.sub(r'\s+', ' ', line).strip()
-            if cleaned:
-                return truncate(cleaned, _DERIVED_TITLE_LIMIT)
+        base_title = truncate(re.sub(r'\s+', ' ', explicit_title).strip(), 1000)
+    else:
+        for text in (content, summary):
+            for line in text.splitlines():
+                cleaned = re.sub(r'\s+', ' ', line).strip()
+                if cleaned:
+                    base_title = truncate(cleaned, _DERIVED_TITLE_LIMIT)
+                    break
+            if base_title:
+                break
+    if not base_title:
+        if author:
+            return truncate(f'{author}: {url}', _DERIVED_TITLE_LIMIT)
+        return truncate(url, _DERIVED_TITLE_LIMIT)
+    if prefix_author and author and not base_title.startswith(f'{author}:'):
+        return truncate(f'{author}: {base_title}', 1000)
+    return base_title
+
+
+def format_metadata_header(
+    *,
+    author: str,
+    published: datetime | None,
+    metrics: Mapping[str, int],
+) -> str:
+    """Compact factual header so downstream LLM stages see author, UTC timestamp and metrics."""
+    parts: list[str] = []
     if author:
-        return truncate(f'{author}: {url}', _DERIVED_TITLE_LIMIT)
-    return truncate(url, _DERIVED_TITLE_LIMIT)
+        parts.append(f'Author: {author}')
+    if published is not None:
+        parts.append(f'Published: {published.strftime("%Y-%m-%d %H:%M UTC")}')
+    metric_parts = [f'{key}={metrics[key]}' for key in _METRIC_KEYS if key in metrics]
+    if metric_parts:
+        parts.append('Metrics: ' + ', '.join(metric_parts))
+    return '[' + ' | '.join(parts) + ']' if parts else ''
 
 
 def resolve_http_url(base_url: str, value: str | None) -> str:
@@ -486,10 +554,22 @@ def accumulate_round_cards(
         if len(accepted_items) >= max_items:
             continue
 
-        title = derive_title(explicit_title, raw_content, raw_summary, author=author, url=url)
+        title = derive_title(
+            explicit_title,
+            raw_content,
+            raw_summary,
+            author=author,
+            url=url,
+            prefix_author=selectors.prefix_author_in_title,
+        )
+        published = parse_published(_as_optional_str(card.get('date')), ctx)
         content = raw_content or truncate(raw_summary, 2000) or title
         summary = truncate(raw_summary or raw_content or title, 2000)
-        published = parse_published(_as_optional_str(card.get('date')), ctx)
+        if selectors.prepend_metadata_in_content:
+            header = format_metadata_header(author=author, published=published, metrics=parsed_metrics)
+            if header:
+                content = f'{header}\n{content}' if content else header
+                summary = truncate(f'{header} {summary}' if summary else header, 2000)
 
         meta: dict[str, Any] = {
             'browser_mode': 'list',
@@ -547,6 +627,32 @@ async def scan_browser_list_page(
     await page.bring_to_front()
     try:
         await page.goto(page_url, wait_until='domcontentloaded', timeout=step_timeout_ms())
+        for click_step in selectors.before_scan_clicks:
+            await page.wait_for_selector(click_step.selector, timeout=step_timeout_ms())
+            locator = page.locator(click_step.selector)
+            if click_step.has_text is not None:
+                candidates = (
+                    [click_step.has_text]
+                    if isinstance(click_step.has_text, str)
+                    else click_step.has_text
+                )
+                matched_locator = None
+                for text_option in candidates:
+                    candidate = locator.filter(has_text=text_option)
+                    if await candidate.count() > 0:
+                        matched_locator = candidate.first
+                        break
+                if matched_locator is None:
+                    raise PlaywrightTimeoutError(
+                        f'before_scan_clicks selector {click_step.selector!r} did not match text {candidates!r}'
+                    )
+                target = matched_locator
+            else:
+                target = locator.first
+            if (await target.get_attribute('aria-selected')) != 'true':
+                await target.click(timeout=step_timeout_ms())
+                if click_step.wait_ms > 0:
+                    await page.wait_for_timeout(min(click_step.wait_ms, step_timeout_ms()))
         await page.wait_for_selector(selectors.item, timeout=step_timeout_ms())
     except (PlaywrightTimeoutError, TimeoutError) as exc:
         snap = await page_snapshot(page)
