@@ -16,6 +16,7 @@ import logging
 import os
 import re
 import shutil
+import socket
 import subprocess
 import time
 from contextlib import asynccontextmanager
@@ -121,8 +122,31 @@ def _attach_hint(config: AppConfig, spec: BrowserSpec, profile: str) -> str:
             f"{command} or set browser.auto_launch: true")
 
 
+def _clean_stale_singleton_lock(user_data_dir: Path) -> None:
+    """Remove Chrome Singleton* symlinks left behind by a dead local process."""
+    lock = user_data_dir / "SingletonLock"
+    if not lock.is_symlink():
+        return
+    with contextlib.suppress(OSError):
+        target = os.readlink(lock)
+        host, sep, pid_text = target.rpartition("-")
+        if not sep or not pid_text.isdigit():
+            return
+        local_names = {socket.gethostname().lower(), socket.getfqdn().lower()}
+        if host.lower() not in local_names:
+            return
+        try:
+            os.kill(int(pid_text), 0)
+        except ProcessLookupError:
+            log.warning("browser: removing stale SingletonLock for dead PID %s in %s", pid_text, user_data_dir)
+            for name in ("SingletonLock", "SingletonSocket", "SingletonCookie"):
+                (user_data_dir / name).unlink(missing_ok=True)
+
+
 def _launch(config: AppConfig, spec: BrowserSpec, profile: str) -> subprocess.Popen[bytes]:
     """Start a real windowed Chrome for this profile. `--headless` is never passed."""
+    if spec.chrome_user_data_dir is not None:
+        _clean_stale_singleton_lock(config.resolve(spec.chrome_user_data_dir))
     argv = _launch_argv(config, spec, profile)
     log.info("browser: launching headed Chrome (%s) for profile %s", argv[0], profile)
     return subprocess.Popen(argv, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
@@ -236,10 +260,11 @@ async def _detach(browser: Browser, launched: subprocess.Popen[bytes] | None) ->
     """Disconnect from the user's Chrome; only a Chrome we launched is shut down."""
     if launched is None:
         return  # Stopping Playwright disconnects; closing would kill the user's window.
-    # Signal the process before any await so cancellation cannot leak our Chrome.
-    _terminate(launched)
-    with contextlib.suppress(Exception):
-        await browser.close()
+    try:
+        with contextlib.suppress(Exception):
+            await asyncio.wait_for(browser.close(), timeout=3.0)
+    finally:
+        _terminate(launched)
 
 
 def _terminate(process: subprocess.Popen[bytes]) -> None:
