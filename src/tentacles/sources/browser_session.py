@@ -106,14 +106,17 @@ async def _attach(playwright: Playwright, config: AppConfig, spec: BrowserSpec, 
     process = _launch(config, spec, profile)
     deadline = time.monotonic() + LAUNCH_TIMEOUT_S
     while True:
+        await asyncio.sleep(0.25)
         try:
             return await playwright.chromium.connect_over_cdp(spec.cdp_url, timeout=5000), process
         except Exception as exc:
+            if process.poll() is not None and spec.chrome_user_data_dir is not None and time.monotonic() <= deadline:
+                # If a dead SingletonLock raced startup, clean it once and retry launching.
+                _clean_stale_singleton_lock(config.resolve(spec.chrome_user_data_dir))
             if process.poll() is not None or time.monotonic() > deadline:
                 _terminate(process)
                 raise UpstreamError(
                     f"headed Chrome for profile {profile!r} did not expose CDP at {spec.cdp_url}") from exc
-            await asyncio.sleep(0.25)
 
 
 def _attach_hint(config: AppConfig, spec: BrowserSpec, profile: str) -> str:
@@ -146,7 +149,9 @@ def _clean_stale_singleton_lock(user_data_dir: Path) -> None:
 def _launch(config: AppConfig, spec: BrowserSpec, profile: str) -> subprocess.Popen[bytes]:
     """Start a real windowed Chrome for this profile. `--headless` is never passed."""
     if spec.chrome_user_data_dir is not None:
-        _clean_stale_singleton_lock(config.resolve(spec.chrome_user_data_dir))
+        user_data_dir = config.resolve(spec.chrome_user_data_dir)
+        user_data_dir.mkdir(parents=True, exist_ok=True)
+        _clean_stale_singleton_lock(user_data_dir)
     argv = _launch_argv(config, spec, profile)
     log.info("browser: launching headed Chrome (%s) for profile %s", argv[0], profile)
     return subprocess.Popen(argv, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
@@ -260,11 +265,10 @@ async def _detach(browser: Browser, launched: subprocess.Popen[bytes] | None) ->
     """Disconnect from the user's Chrome; only a Chrome we launched is shut down."""
     if launched is None:
         return  # Stopping Playwright disconnects; closing would kill the user's window.
-    try:
-        with contextlib.suppress(Exception):
-            await asyncio.wait_for(browser.close(), timeout=3.0)
-    finally:
-        _terminate(launched)
+    _terminate(launched)
+    with contextlib.suppress(Exception):
+        await asyncio.wait_for(browser.close(), timeout=2.0)
+    await asyncio.sleep(0.35)
 
 
 def _terminate(process: subprocess.Popen[bytes]) -> None:
