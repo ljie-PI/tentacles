@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -25,7 +26,7 @@ from urllib.parse import urljoin
 
 import httpx
 from playwright.async_api import TimeoutError as PlaywrightTimeoutError
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from tentacles.asyncutil import run_store_call
 from tentacles.config import (
@@ -40,7 +41,8 @@ from tentacles.sources.browser_contract import (
 )
 from tentacles.sources.browser_heal import HealFailed, HealRequest, heal
 from tentacles.sources.browser_list import (
-    BrowserListSelectors, BrowserPrefilterOptions, BrowserScrollOptions, run_browser_list,
+    BrowserClickStep, BrowserItemFormat, BrowserListPresetName, BrowserListSelectors,
+    BrowserPrefilterOptions, BrowserScrollOptions, resolve_list_preset, run_browser_list,
 )
 from tentacles.sources.browser_script import load_script
 from tentacles.sources.browser_session import page_snapshot, work_tab
@@ -69,20 +71,39 @@ class BrowserOptions(BaseModel):
 
     page_url: str
     mode: Literal['script', 'list'] = 'script'
+    preset: BrowserListPresetName | None = None
     task: str = Field(default='', max_length=4000)
     chrome_profile: str | None = None
     on_detail_error: Literal['fail_batch', 'record_and_skip'] = 'record_and_skip'
     script_path: str | None = None
     max_items: int = Field(default=25, ge=1, le=500)
     timeout: float = Field(default=60, gt=0, allow_inf_nan=False)
-    scroll: BrowserScrollOptions = Field(default_factory=BrowserScrollOptions)
+    actions: list[BrowserClickStep] | None = None
+    scroll: BrowserScrollOptions | None = None
     selectors: BrowserListSelectors | None = None
     prefilter: BrowserPrefilterOptions | None = None
+    format: BrowserItemFormat | None = None
     # Declared only so `headless: true` fails with a clear message, never silently.
     headless: bool = False
     pi: BrowserPiOptions | None = None
 
     _headed_only = field_validator('headless')(reject_headless)
+
+    @model_validator(mode='before')
+    @classmethod
+    def _apply_preset_selectors(cls, data: Any) -> Any:
+        if not isinstance(data, Mapping):
+            return data
+        preset = data.get('preset')
+        raw_selectors = data.get('selectors')
+        if isinstance(preset, str) and preset in ('reddit', 'x-following') and isinstance(raw_selectors, Mapping):
+            from tentacles.sources.browser_list import BROWSER_LIST_PRESETS
+            base = dict(BROWSER_LIST_PRESETS[cast(BrowserListPresetName, preset)].selectors)
+            override = dict(raw_selectors)
+            if isinstance(override.get('metrics'), Mapping) and isinstance(base.get('metrics'), Mapping):
+                override['metrics'] = {**base['metrics'], **override['metrics']}
+            return {**data, 'selectors': {**base, **override}}
+        return data
 
     @field_validator('page_url')
     @classmethod
@@ -221,15 +242,23 @@ class BrowserSource(Source):
         """Scroll and extract items via CSS selectors + engagement prefilter without pi."""
         if ctx.distill:
             raise ConfigError('sources distill requires a browser source in script mode')
-        if opts.selectors is None:
-            raise ConfigError('browser list mode requires selectors')
+        selectors, actions, item_format = resolve_list_preset(
+            opts.preset,
+            selectors=opts.selectors,
+            actions=opts.actions,
+            item_format=opts.format,
+        )
+        if selectors is None:
+            raise ConfigError('browser list mode requires selectors or preset')
         try:
             scan = await run_browser_list(
                 config,
                 source_id=self.spec.id,
                 page_url=opts.page_url,
                 chrome_profile=opts.chrome_profile,
-                selectors=opts.selectors,
+                selectors=selectors,
+                actions=actions,
+                item_format=item_format,
                 scroll=opts.scroll,
                 prefilter=opts.prefilter,
                 max_items=opts.max_items,

@@ -51,8 +51,9 @@ class _CreatableSourceFields(BaseModel):
     url: str | None = None
     max_age_days: int | None = None
     timeout: float | None = Field(default=None, gt=0, allow_inf_nan=False)
-    mode: Literal['list', 'page', 'llm'] | None = None
-    selectors: dict[str, str] | None = None
+    mode: Literal['script', 'list', 'page', 'llm'] | None = None
+    preset: Literal['reddit', 'x-following'] | None = None
+    selectors: dict[str, Any] | None = None
     selector: str | None = None
     fetch_content: bool | None = None
     on_detail_error: Literal['fail_batch', 'record_and_skip'] | None = None
@@ -64,6 +65,10 @@ class _CreatableSourceFields(BaseModel):
     task: str | None = None
     chrome_profile: str | None = None
     max_items: int | None = None
+    scroll: dict[str, Any] | None = None
+    prefilter: dict[str, Any] | None = None
+    actions: list[dict[str, Any]] | None = None
+    format: dict[str, Any] | None = None
 
 
 class _EditableImapSourceFields(_CreatableSourceFields):

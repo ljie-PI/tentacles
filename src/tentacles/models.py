@@ -51,9 +51,39 @@ def has_original_url(url: str, page_url: str) -> bool:
     return is_http_url(url) or is_http_url(page_url)
 
 
+# Browser `mode: list` display prefixes/headers that carry volatile engagement
+# counts; stripped when computing semantic content fingerprints, title similarity
+# and in-place content revision diffs so metric ticks do not cause false non-dups
+# or paid LLM re-evaluations.
+_METRIC_SEGMENT_RE = re.compile(
+    r'^(?:(?:votes|likes|comments|reposts|views)=\d+\s*)+$',
+    re.IGNORECASE,
+)
+_METADATA_HEADER_RE = re.compile(
+    r'^\[(?:Author:[^\]]*?|Published:[^\]]*?|Metrics:[^\]]*?)(?:\s*\|\s*(?:Author|Published|Metrics):[^\]]*?)*\]\s*',
+)
+
+
+def strip_display_prefix(title: str) -> str:
+    """Return the underlying semantic title without `Author | metrics | ` prefixes."""
+    parts = [part.strip() for part in title.split(' | ')]
+    if len(parts) >= 3 and _METRIC_SEGMENT_RE.fullmatch(parts[1]):
+        return ' | '.join(parts[2:]).strip() or title.strip()
+    if len(parts) >= 2 and _METRIC_SEGMENT_RE.fullmatch(parts[0]):
+        return ' | '.join(parts[1:]).strip() or title.strip()
+    return title.strip()
+
+
+def strip_metadata_header(text: str) -> str:
+    """Return `summary` or `content` without a leading `[Author: ... | Metrics: ...]` header."""
+    return _METADATA_HEADER_RE.sub('', text, count=1).strip()
+
+
 def content_fingerprint(title: str, summary: str = "") -> str:
     """标题 + 摘要的规范化指纹，近似内容的哈希去重。"""
-    text = re.sub(r"\s+", " ", f"{title} {summary}".casefold()).strip()
+    clean_title = strip_display_prefix(title)
+    clean_summary = strip_metadata_header(summary)
+    text = re.sub(r"\s+", " ", f"{clean_title} {clean_summary}".casefold()).strip()
     return hashlib.sha1(text.encode("utf-8")).hexdigest()
 
 

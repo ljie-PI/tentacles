@@ -1434,6 +1434,10 @@ export interface components {
         };
         /** SourceConfigView */
         SourceConfigView: {
+            /** Actions */
+            actions?: {
+                [key: string]: unknown;
+            }[] | null;
             /** Chrome Profile */
             chrome_profile?: string | null;
             /** Concurrency */
@@ -1448,6 +1452,10 @@ export interface components {
             fetch_content?: boolean | null;
             /** Folders */
             folders?: string[] | null;
+            /** Format */
+            format?: {
+                [key: string]: unknown;
+            } | null;
             /** Host */
             host?: string | null;
             /** Id */
@@ -1465,7 +1473,7 @@ export interface components {
             /** Max Items */
             max_items?: number | null;
             /** Mode */
-            mode?: ("list" | "page" | "llm") | null;
+            mode?: ("script" | "list" | "page" | "llm") | null;
             /** Model */
             model?: string | null;
             /** Name */
@@ -1478,15 +1486,25 @@ export interface components {
             pipelines?: string[];
             /** Port */
             port?: number | null;
+            /** Prefilter */
+            prefilter?: {
+                [key: string]: unknown;
+            } | null;
+            /** Preset */
+            preset?: ("reddit" | "x-following") | null;
             /** Schedule */
             schedule: string;
+            /** Scroll */
+            scroll?: {
+                [key: string]: unknown;
+            } | null;
             /** Search */
             search?: string | null;
             /** Selector */
             selector?: string | null;
             /** Selectors */
             selectors?: {
-                [key: string]: string;
+                [key: string]: unknown;
             } | null;
             /** Ssl */
             ssl?: boolean | null;
@@ -1509,6 +1527,10 @@ export interface components {
         };
         /** SourceCreate */
         SourceCreate: {
+            /** Actions */
+            actions?: {
+                [key: string]: unknown;
+            }[] | null;
             /** Chrome Profile */
             chrome_profile?: string | null;
             /** Concurrency */
@@ -1522,6 +1544,10 @@ export interface components {
             enabled: boolean;
             /** Fetch Content */
             fetch_content?: boolean | null;
+            /** Format */
+            format?: {
+                [key: string]: unknown;
+            } | null;
             /** Id */
             id: string;
             /** Max Age Days */
@@ -1531,7 +1557,7 @@ export interface components {
             /** Max Items */
             max_items?: number | null;
             /** Mode */
-            mode?: ("list" | "page" | "llm") | null;
+            mode?: ("script" | "list" | "page" | "llm") | null;
             /** Model */
             model?: string | null;
             /** Name */
@@ -1542,16 +1568,26 @@ export interface components {
             page_url?: string | null;
             /** Pipelines */
             pipelines?: string[];
+            /** Prefilter */
+            prefilter?: {
+                [key: string]: unknown;
+            } | null;
+            /** Preset */
+            preset?: ("reddit" | "x-following") | null;
             /**
              * Schedule
              * @default 1h
              */
             schedule: string;
+            /** Scroll */
+            scroll?: {
+                [key: string]: unknown;
+            } | null;
             /** Selector */
             selector?: string | null;
             /** Selectors */
             selectors?: {
-                [key: string]: string;
+                [key: string]: unknown;
             } | null;
             /** Task */
             task?: string | null;
@@ -1578,6 +1614,10 @@ export interface components {
         };
         /** SourceUpdate */
         SourceUpdate: {
+            /** Actions */
+            actions?: {
+                [key: string]: unknown;
+            }[] | null;
             /** Chrome Profile */
             chrome_profile?: string | null;
             /** Concurrency */
@@ -1592,6 +1632,10 @@ export interface components {
             fetch_content?: boolean | null;
             /** Folders */
             folders?: string[] | null;
+            /** Format */
+            format?: {
+                [key: string]: unknown;
+            } | null;
             /** Include Subfolders */
             include_subfolders?: boolean | null;
             /** Initial Days */
@@ -1605,7 +1649,7 @@ export interface components {
             /** Max Items */
             max_items?: number | null;
             /** Mode */
-            mode?: ("list" | "page" | "llm") | null;
+            mode?: ("script" | "list" | "page" | "llm") | null;
             /** Model */
             model?: string | null;
             /** Name */
@@ -1616,15 +1660,25 @@ export interface components {
             page_url?: string | null;
             /** Pipelines */
             pipelines?: string[] | null;
+            /** Prefilter */
+            prefilter?: {
+                [key: string]: unknown;
+            } | null;
+            /** Preset */
+            preset?: ("reddit" | "x-following") | null;
             /** Schedule */
             schedule?: string | null;
+            /** Scroll */
+            scroll?: {
+                [key: string]: unknown;
+            } | null;
             /** Search */
             search?: string | null;
             /** Selector */
             selector?: string | null;
             /** Selectors */
             selectors?: {
-                [key: string]: string;
+                [key: string]: unknown;
             } | null;
             /** Task */
             task?: string | null;

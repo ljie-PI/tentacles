@@ -189,20 +189,18 @@ def _browser_errors(options: Mapping[str, Any], where: str, browser: Mapping[str
     errors: list[ConfigIssue] = []
     mode = options.get("mode", "script")
     if mode == "list":
-        if options.get("selectors") is None:
-            errors.append(ConfigIssue(f"{where}.selectors", "list mode requires selectors"))
-        if options.get("script_path") is not None:
-            errors.append(ConfigIssue(f"{where}.script_path", "script_path is only supported in script mode"))
+        if options.get("selectors") is None and options.get("preset") is None:
+            errors.append(ConfigIssue(f"{where}.selectors", "list mode requires selectors or preset"))
+        for script_only in ("script_path", "pi", "on_detail_error"):
+            if options.get(script_only) is not None:
+                errors.append(ConfigIssue(f"{where}.{script_only}", f"{script_only} is only supported in script mode"))
         if options.get("task"):
             errors.append(ConfigIssue(f"{where}.task", "task is only supported in script mode"))
-        if options.get("pi") is not None:
-            errors.append(ConfigIssue(f"{where}.pi", "pi is only supported in script mode"))
         return errors
     if mode == "script":
-        if options.get("selectors") is not None:
-            errors.append(ConfigIssue(f"{where}.selectors", "selectors are only supported in list mode"))
-        if options.get("prefilter") is not None:
-            errors.append(ConfigIssue(f"{where}.prefilter", "prefilter is only supported in list mode"))
+        for list_only in ("preset", "selectors", "scroll", "prefilter", "actions", "format"):
+            if options.get(list_only) is not None:
+                errors.append(ConfigIssue(f"{where}.{list_only}", f"{list_only} is only supported in list mode"))
     raw = options.get("script_path")
     if raw is None or config_path is None:
         return errors

@@ -23,10 +23,11 @@ _TYPE_FIELDS: dict[str, tuple[str, ...]] = {
     'imap': ('folders', 'include_subfolders', 'initial_days', 'max_fetch', 'search', 'exclude_senders', 'timeout'),
     'web': ('url', 'mode', 'selectors', 'selector', 'fetch_content', 'on_detail_error',
             'emit_baseline', 'max_input_chars', 'model', 'concurrency', 'timeout'),
-    'browser': ('page_url', 'task', 'chrome_profile', 'max_items', 'on_detail_error', 'timeout'),
+    'browser': ('page_url', 'mode', 'preset', 'task', 'chrome_profile', 'max_items', 'on_detail_error',
+                'selectors', 'scroll', 'prefilter', 'actions', 'format', 'timeout'),
 }
 
-_NULL_IF_BLANK = frozenset({'name', 'selector', 'model', 'chrome_profile', 'task'})
+_NULL_IF_BLANK = frozenset({'name', 'selector', 'model', 'chrome_profile', 'task', 'preset'})
 _ENV_REF_FORBIDDEN_MSG = 'environment variable references (${...}) must be edited in tentacles.yaml directly'
 
 
@@ -124,11 +125,17 @@ def _raw_str_list(raw: Mapping[str, Any], key: str, fallback: Any) -> list[str] 
     return None
 
 
-def _raw_selectors(raw: Mapping[str, Any], fallback: Any) -> dict[str, str] | None:
-    candidate = raw['selectors'] if 'selectors' in raw else fallback
+def _raw_dict(raw: Mapping[str, Any], key: str, fallback: Any) -> dict[str, Any] | None:
+    candidate = raw[key] if key in raw else fallback
     if isinstance(candidate, dict):
-        return {str(k): str(v) for k, v in candidate.items()
-                if v is not None and not isinstance(v, (dict, list, tuple))} or None
+        return deepcopy(candidate) or None
+    return None
+
+
+def _raw_dict_list(raw: Mapping[str, Any], key: str, fallback: Any) -> list[dict[str, Any]] | None:
+    candidate = raw[key] if key in raw else fallback
+    if isinstance(candidate, list):
+        return [deepcopy(v) for v in candidate if isinstance(v, dict)] or None
     return None
 
 
@@ -158,9 +165,6 @@ def _view_of(config: AppConfig, spec: SourceSpec, raw_entry: Mapping[str, Any] |
     opts = _coerced_options(config, spec)
     source_type = cast(Any, spec.type)
     raw_map = dict(raw_entry) if raw_entry is not None else {}
-    view_mode = opts.get('mode')
-    if spec.type == 'browser' and view_mode == 'script':
-        view_mode = None
     return SourceConfigView(
         id=spec.id,
         type=source_type,
@@ -180,19 +184,24 @@ def _view_of(config: AppConfig, spec: SourceSpec, raw_entry: Mapping[str, Any] |
         max_fetch=opts.get('max_fetch'),
         search=_raw_str(raw_map, 'search', opts.get('search')),
         exclude_senders=_raw_str_list(raw_map, 'exclude_senders', opts.get('exclude_senders')),
-        mode=view_mode,
-        selectors=_raw_selectors(raw_map, opts.get('selectors')),
+        mode=opts.get('mode'),
+        preset=cast(Any, opts.get('preset')),
+        selectors=_raw_dict(raw_map, 'selectors', opts.get('selectors')),
         selector=_raw_str(raw_map, 'selector', opts.get('selector')),
         fetch_content=opts.get('fetch_content'),
-        on_detail_error=opts.get('on_detail_error'),
+        on_detail_error=opts.get('on_detail_error') if not (spec.type == 'browser' and opts.get('mode') == 'list') else None,
         emit_baseline=opts.get('emit_baseline'),
         max_input_chars=opts.get('max_input_chars'),
         model=_raw_str(raw_map, 'model', opts.get('model')),
         concurrency=opts.get('concurrency'),
         page_url=_safe_view_url(raw_map, 'page_url', opts.get('page_url')),
-        task=_raw_str(raw_map, 'task', opts.get('task')),
+        task=_raw_str(raw_map, 'task', opts.get('task')) if not (spec.type == 'browser' and opts.get('mode') == 'list') else None,
         chrome_profile=_raw_str(raw_map, 'chrome_profile', opts.get('chrome_profile')),
         max_items=opts.get('max_items'),
+        scroll=_raw_dict(raw_map, 'scroll', opts.get('scroll')),
+        prefilter=_raw_dict(raw_map, 'prefilter', opts.get('prefilter')),
+        actions=_raw_dict_list(raw_map, 'actions', opts.get('actions')),
+        format=_raw_dict(raw_map, 'format', opts.get('format')),
         pipelines=[p.id for p in config.pipelines if spec.id in p.sources],
     )
 
@@ -202,8 +211,18 @@ def _clean_value(key: str, value: Any) -> Any:
         stripped = value.strip()
         return stripped or None
     if key == 'selectors' and isinstance(value, dict):
-        cleaned = {k: v.strip() for k, v in value.items() if isinstance(v, str) and v.strip()}
+        cleaned: dict[str, Any] = {}
+        for k, v in value.items():
+            if isinstance(v, str):
+                if v.strip():
+                    cleaned[k] = v.strip()
+            elif v is not None:
+                cleaned[k] = v
         return cleaned or None
+    if key in ('scroll', 'prefilter', 'format') and isinstance(value, dict):
+        return {k: v for k, v in value.items() if v is not None} or None
+    if key == 'actions' and isinstance(value, list):
+        return [v for v in value if isinstance(v, dict)] or None
     return value
 
 
@@ -270,6 +289,14 @@ def _apply_fields(entry: dict[str, Any], source_type: str, values: dict[str, Any
                 entry.pop('update_existing', None)
         elif mode == 'llm':
             for stale in ('selectors', 'selector', 'emit_baseline'):
+                entry.pop(stale, None)
+    elif source_type == 'browser':
+        bmode = entry.get('mode', 'script')
+        if bmode == 'list':
+            for stale in ('script_path', 'task', 'pi', 'on_detail_error'):
+                entry.pop(stale, None)
+        elif bmode == 'script':
+            for stale in ('preset', 'selectors', 'scroll', 'prefilter', 'actions', 'format'):
                 entry.pop(stale, None)
 
 

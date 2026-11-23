@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
@@ -32,6 +33,8 @@ _TIMEOUT_SAFETY_S = 3.0
 _DERIVED_TITLE_LIMIT = 140
 _METRIC_KEYS: tuple[str, ...] = ('votes', 'likes', 'comments', 'reposts', 'views')
 
+BrowserListPresetName = Literal['reddit', 'x-following']
+
 _METRIC_NUMBER_RE = re.compile(
     r'(?<![\w@#/])'
     r'(?:[+-]\s*)?'
@@ -56,8 +59,8 @@ _JS_EXTRACT_CARDS = """
 
   const queryValue = (root, sel, joinAll = false) => {
     if (!sel) return null;
+    const attr = sel.attribute || sel.default_attribute;
     if (sel.css === ':scope') {
-      const attr = sel.attribute || sel.default_attribute;
       if (attr) {
         if (!root.hasAttribute(attr)) return null;
         const val = root.getAttribute(attr);
@@ -65,21 +68,22 @@ _JS_EXTRACT_CARDS = """
       }
       return cleanText(root);
     }
-    const attr = sel.attribute || sel.default_attribute;
-    if (joinAll && !attr) {
-      const nodes = Array.from(root.querySelectorAll(sel.css));
-      if (!nodes.length) return null;
+    const nodes = Array.from(root.querySelectorAll(sel.css));
+    if (!nodes.length) return null;
+    if (attr) {
+      for (const node of nodes) {
+        if (node.hasAttribute(attr)) {
+          const val = node.getAttribute(attr);
+          return val === null ? null : String(val).trim();
+        }
+      }
+      return null;
+    }
+    if (joinAll) {
       const texts = nodes.map(cleanText).filter(Boolean);
       return texts.length ? texts.join('\\n\\n> ') : '';
     }
-    const node = root.querySelector(sel.css);
-    if (!node) return null;
-    if (attr) {
-      if (!node.hasAttribute(attr)) return null;
-      const val = node.getAttribute(attr);
-      return val === null ? null : String(val).trim();
-    }
-    return cleanText(node);
+    return cleanText(nodes[0]);
   };
 
   const matchesRule = (root, css) => {
@@ -234,6 +238,7 @@ class BrowserClickStep(BaseModel):
 
     selector: str
     has_text: str | list[str] | None = None
+    nth: int | None = Field(default=None, ge=0, le=50)
     wait_ms: int = Field(default=1500, ge=0, le=30000)
 
     @field_validator('selector')
@@ -272,6 +277,16 @@ class BrowserScrollOptions(BaseModel):
         return self
 
 
+class BrowserItemFormat(BaseModel):
+    """Presentation options for synthesized `Item.title` / `Item.content`."""
+
+    model_config = ConfigDict(extra='forbid')
+
+    prefix_author_in_title: bool = False
+    prefix_metrics_in_title: bool = False
+    prepend_metadata_in_content: bool = False
+
+
 class BrowserMetricsSelectors(BaseModel):
     model_config = ConfigDict(extra='forbid')
 
@@ -288,6 +303,8 @@ class BrowserMetricsSelectors(BaseModel):
 
 
 class BrowserListSelectors(BaseModel):
+    """Pure DOM/attribute selectors for `type: browser` + `mode: list`."""
+
     model_config = ConfigDict(extra='forbid')
 
     item: str
@@ -300,10 +317,6 @@ class BrowserListSelectors(BaseModel):
     comments_url: str | None = None
     external_url: str | None = None
     media: list[str] = Field(default_factory=list)
-    prefix_author_in_title: bool = False
-    prefix_metrics_in_title: bool = False
-    prepend_metadata_in_content: bool = False
-    before_scan_clicks: list[BrowserClickStep] = Field(default_factory=list)
     skip_if: list[str] = Field(default_factory=list)
     require: list[str] = Field(default_factory=list)
     metrics: BrowserMetricsSelectors = Field(default_factory=BrowserMetricsSelectors)
@@ -361,6 +374,105 @@ class BrowserPrefilterOptions(BaseModel):
         return any(checks) if self.match == 'any' else all(checks)
 
 
+@dataclass(frozen=True)
+class BrowserListPreset:
+    selectors: dict[str, Any]
+    actions: list[dict[str, Any]]
+    format: dict[str, Any]
+
+
+BROWSER_LIST_PRESETS: dict[BrowserListPresetName, BrowserListPreset] = {
+    'reddit': BrowserListPreset(
+        selectors={
+            'item': 'shreddit-post',
+            'skip_if': ['[promoted]'],
+            'link': '@permalink',
+            'title': '@post-title',
+            'content': '[slot="text-body"]',
+            'author': '@author',
+            'date': '@created-timestamp',
+            'comments_url': '@permalink',
+            'external_url': '@content-href',
+            'metrics': {
+                'votes': '@score',
+                'comments': '@comment-count',
+            },
+        },
+        actions=[],
+        format={
+            'prefix_author_in_title': True,
+            'prefix_metrics_in_title': True,
+            'prepend_metadata_in_content': True,
+        },
+    ),
+    'x-following': BrowserListPreset(
+        selectors={
+            'item': 'article[data-testid="tweet"]',
+            'skip_if': ['[data-testid="placementTracking"]'],
+            'require': ['time'],
+            'link': 'a[href*="/status/"]:has(time)@href',
+            'content': '[data-testid="tweetText"]',
+            'summary': '[data-testid="card.wrapper"]',
+            'media': [
+                '[data-testid="tweetPhoto"]',
+                '[data-testid="videoPlayer"]',
+                '[data-testid="card.wrapper"]',
+            ],
+            'author': '[data-testid="User-Name"]',
+            'date': 'time@datetime',
+            'metrics': {
+                'comments': '[data-testid="reply"]@aria-label',
+                'reposts': '[data-testid="retweet"], [data-testid="unretweet"]@aria-label',
+                'likes': '[data-testid="like"], [data-testid="unlike"]@aria-label',
+                'views': 'a[href*="/analytics"]@aria-label',
+            },
+        },
+        actions=[
+            {
+                'selector': '[role="tablist"] [role="tab"]',
+                'has_text': ['正在关注', 'Following', '跟隨中', 'フォロー中'],
+                'nth': 1,
+                'wait_ms': 1800,
+            },
+        ],
+        format={
+            'prefix_author_in_title': True,
+            'prefix_metrics_in_title': True,
+            'prepend_metadata_in_content': True,
+        },
+    ),
+}
+
+
+def resolve_list_preset(
+    preset_name: BrowserListPresetName | None,
+    *,
+    selectors: BrowserListSelectors | None,
+    actions: list[BrowserClickStep] | None,
+    item_format: BrowserItemFormat | None,
+) -> tuple[BrowserListSelectors | None, list[BrowserClickStep], BrowserItemFormat]:
+    """Merge explicit source fields over a named preset when `preset` is configured."""
+    if preset_name is None:
+        return selectors, list(actions or []), item_format or BrowserItemFormat()
+    preset = BROWSER_LIST_PRESETS[preset_name]
+    merged_selectors_dict: dict[str, Any] = dict(preset.selectors)
+    if selectors is not None:
+        override = selectors.model_dump(exclude_unset=True)
+        if 'metrics' in override and isinstance(merged_selectors_dict.get('metrics'), dict):
+            override['metrics'] = {**merged_selectors_dict['metrics'], **override['metrics']}
+        merged_selectors_dict.update(override)
+    resolved_selectors = BrowserListSelectors.model_validate(merged_selectors_dict)
+    resolved_actions = (
+        list(actions)
+        if actions is not None
+        else [BrowserClickStep.model_validate(step) for step in preset.actions]
+    )
+    merged_format = dict(preset.format)
+    if item_format is not None:
+        merged_format.update(item_format.model_dump(exclude_unset=True))
+    return resolved_selectors, resolved_actions, BrowserItemFormat.model_validate(merged_format)
+
+
 def parse_metric_count(raw: str | None) -> int:
     """Parse localized or compact engagement counts into a non-negative integer."""
     if not raw:
@@ -416,10 +528,10 @@ def derive_title(
     prefix_author: bool = False,
     prefix_metrics: bool = False,
 ) -> str:
-    """Use explicit title when present, otherwise derive from content/summary or author + URL.
+    """Use explicit title when present, otherwise derive from content/summary or URL.
 
     When `prefix_author` and/or `prefix_metrics` are enabled, prefixes are joined
-    with `" | "`, e.g. `Author | likes=100 reposts=12 comments=8 | Actual Title`.
+    with `" | "`, e.g. `Author | likes=100 comments=8 reposts=12 | Actual Title`.
     """
     base_title = ''
     if explicit_title and explicit_title.strip():
@@ -546,6 +658,7 @@ def accumulate_round_cards(
     source_id: str,
     page_url: str,
     selectors: BrowserListSelectors,
+    item_format: BrowserItemFormat,
     prefilter: BrowserPrefilterOptions | None,
     max_items: int,
     ctx: FetchContext,
@@ -616,8 +729,8 @@ def accumulate_round_cards(
             author=author,
             url=url,
             metrics=parsed_metrics,
-            prefix_author=selectors.prefix_author_in_title,
-            prefix_metrics=selectors.prefix_metrics_in_title,
+            prefix_author=item_format.prefix_author_in_title,
+            prefix_metrics=item_format.prefix_metrics_in_title,
         )
         published = parse_published(_as_optional_str(card.get('date')), ctx)
         if raw_content and raw_summary and raw_summary not in raw_content:
@@ -626,7 +739,7 @@ def accumulate_round_cards(
             merged_body = raw_content or truncate(raw_summary, 2000) or title
         content = merged_body
         summary = truncate(merged_body, 2000)
-        if selectors.prepend_metadata_in_content:
+        if item_format.prepend_metadata_in_content:
             header = format_metadata_header(author=author, published=published, metrics=parsed_metrics)
             if header:
                 content = f'{header}\n{content}' if content else header
@@ -666,58 +779,85 @@ def _as_optional_str(value: Any) -> str | None:
     return value if isinstance(value, str) else None
 
 
+async def _run_pre_scan_actions(
+    page: Page,
+    actions: list[BrowserClickStep],
+    *,
+    deadline: float,
+) -> None:
+    for click_step in actions:
+        remaining_ms = int((deadline - monotonic()) * 1000)
+        if remaining_ms <= 0:
+            raise PlaywrightTimeoutError('timeout budget exhausted before pre-scan click step')
+        await page.wait_for_selector(click_step.selector, timeout=remaining_ms)
+        locator = page.locator(click_step.selector)
+        target = None
+        if click_step.has_text is not None:
+            candidates = (
+                [click_step.has_text]
+                if isinstance(click_step.has_text, str)
+                else click_step.has_text
+            )
+            for text_option in candidates:
+                candidate = locator.filter(has_text=text_option)
+                if await candidate.count() > 0:
+                    target = candidate.first
+                    break
+        if target is None and click_step.nth is not None:
+            if await locator.count() > click_step.nth:
+                target = locator.nth(click_step.nth)
+        if target is None and click_step.has_text is None and click_step.nth is None:
+            target = locator.first
+        if target is None:
+            raise PlaywrightTimeoutError(
+                f'actions selector {click_step.selector!r} did not match any target'
+            )
+        selected = await target.get_attribute('aria-selected')
+        pressed = await target.get_attribute('aria-pressed')
+        if selected != 'true' and pressed != 'true':
+            remaining_ms = max(200, int((deadline - monotonic()) * 1000))
+            await target.click(timeout=remaining_ms)
+            if click_step.wait_ms > 0:
+                rem = int((deadline - monotonic()) * 1000)
+                if rem > 0:
+                    await page.wait_for_timeout(min(click_step.wait_ms, rem))
+
+
 async def scan_browser_list_page(
     page: Page,
     *,
     source_id: str,
     page_url: str,
     selectors: BrowserListSelectors,
-    scroll: BrowserScrollOptions,
-    prefilter: BrowserPrefilterOptions | None,
+    actions: list[BrowserClickStep] | None = None,
+    item_format: BrowserItemFormat | None = None,
+    scroll: BrowserScrollOptions | None = None,
+    prefilter: BrowserPrefilterOptions | None = None,
     max_items: int,
     timeout: float,
     ctx: FetchContext,
     initial_settle_ms: int = _INITIAL_SETTLE_MS,
 ) -> BrowserListScanResult:
-    """Drive `page` through navigation, initial selector wait, and virtual-DOM scroll rounds."""
+    """Drive `page` through navigation, pre-scan actions, selector wait, and scroll rounds."""
+    resolved_scroll = scroll or BrowserScrollOptions()
+    resolved_format = item_format or BrowserItemFormat()
+    resolved_actions = actions or []
     started = monotonic()
     deadline = started + timeout
 
-    def step_timeout_ms() -> int:
-        remaining = deadline - monotonic()
-        return max(1000, int(min(timeout, max(1.0, remaining)) * 1000))
+    def remaining_timeout_ms() -> int:
+        rem = int((deadline - monotonic()) * 1000)
+        if rem <= 0:
+            raise PlaywrightTimeoutError('browser list timeout budget exhausted')
+        return rem
 
     await page.bring_to_front()
     try:
-        await page.goto(page_url, wait_until='domcontentloaded', timeout=step_timeout_ms())
-        for click_step in selectors.before_scan_clicks:
-            await page.wait_for_selector(click_step.selector, timeout=step_timeout_ms())
-            locator = page.locator(click_step.selector)
-            if click_step.has_text is not None:
-                candidates = (
-                    [click_step.has_text]
-                    if isinstance(click_step.has_text, str)
-                    else click_step.has_text
-                )
-                matched_locator = None
-                for text_option in candidates:
-                    candidate = locator.filter(has_text=text_option)
-                    if await candidate.count() > 0:
-                        matched_locator = candidate.first
-                        break
-                if matched_locator is None:
-                    raise PlaywrightTimeoutError(
-                        f'before_scan_clicks selector {click_step.selector!r} did not match text {candidates!r}'
-                    )
-                target = matched_locator
-            else:
-                target = locator.first
-            if (await target.get_attribute('aria-selected')) != 'true':
-                await target.click(timeout=step_timeout_ms())
-                if click_step.wait_ms > 0:
-                    await page.wait_for_timeout(min(click_step.wait_ms, step_timeout_ms()))
-        await page.wait_for_selector(selectors.item, timeout=step_timeout_ms())
-    except (PlaywrightTimeoutError, TimeoutError) as exc:
+        await page.goto(page_url, wait_until='domcontentloaded', timeout=remaining_timeout_ms())
+        if resolved_actions:
+            await _run_pre_scan_actions(page, resolved_actions, deadline=deadline)
+        await page.wait_for_selector(selectors.item, timeout=remaining_timeout_ms())
+    except (PlaywrightTimeoutError, TimeoutError, asyncio.TimeoutError) as exc:
         snap = await page_snapshot(page)
         _record_list_error(
             ctx,
@@ -754,13 +894,14 @@ async def scan_browser_list_page(
     prev_scroll_y = -1
     stop_reason: Literal['max_scrolls', 'no_new_items', 'max_items', 'timeout_budget'] = 'max_scrolls'
 
-    for round_idx in range(scroll.max_scrolls + 1):
+    for round_idx in range(resolved_scroll.max_scrolls + 1):
         raw_batch = await page.evaluate(_JS_EXTRACT_CARDS, payload)
         new_on_page = accumulate_round_cards(
             raw_batch,
             source_id=source_id,
             page_url=page_url,
             selectors=selectors,
+            item_format=resolved_format,
             prefilter=prefilter,
             max_items=max_items,
             ctx=ctx,
@@ -786,11 +927,10 @@ async def scan_browser_list_page(
             elif at_bottom or cur_y <= prev_scroll_y:
                 idle_streak += 1
             else:
-                # Still scrolling down through already-SSR'd cards toward the lazy-load trigger.
                 stalled_bottom_streak += 1
                 if stalled_bottom_streak >= 12:
                     idle_streak += 1
-            if idle_streak >= scroll.idle_rounds:
+            if idle_streak >= resolved_scroll.idle_rounds:
                 stop_reason = 'no_new_items'
                 break
         prev_scroll_y = cur_y
@@ -799,11 +939,11 @@ async def scan_browser_list_page(
             stop_reason = 'max_items'
             break
 
-        if round_idx >= scroll.max_scrolls:
+        if round_idx >= resolved_scroll.max_scrolls:
             stop_reason = 'max_scrolls'
             break
 
-        wait_ms = random.randint(scroll.wait_min_ms, scroll.wait_max_ms)
+        wait_ms = random.randint(resolved_scroll.wait_min_ms, resolved_scroll.wait_max_ms)
         if deadline - monotonic() <= _TIMEOUT_SAFETY_S + (wait_ms / 1000.0):
             stop_reason = 'timeout_budget'
             break
@@ -849,25 +989,46 @@ async def run_browser_list(
     page_url: str,
     chrome_profile: str | None,
     selectors: BrowserListSelectors,
-    scroll: BrowserScrollOptions,
-    prefilter: BrowserPrefilterOptions | None,
+    actions: list[BrowserClickStep] | None = None,
+    item_format: BrowserItemFormat | None = None,
+    scroll: BrowserScrollOptions | None = None,
+    prefilter: BrowserPrefilterOptions | None = None,
     max_items: int,
     timeout: float,
     ctx: FetchContext,
 ) -> BrowserListScanResult:
-    """Open one isolated work tab in headed Chrome and run `scan_browser_list_page`."""
+    """Open one isolated work tab in headed Chrome and run `scan_browser_list_page` under `timeout`."""
     async with work_tab(config, chrome_profile=chrome_profile) as page:
-        return await scan_browser_list_page(
-            page,
-            source_id=source_id,
-            page_url=page_url,
-            selectors=selectors,
-            scroll=scroll,
-            prefilter=prefilter,
-            max_items=max_items,
-            timeout=timeout,
-            ctx=ctx,
-        )
+        try:
+            return await asyncio.wait_for(
+                scan_browser_list_page(
+                    page,
+                    source_id=source_id,
+                    page_url=page_url,
+                    selectors=selectors,
+                    actions=actions,
+                    item_format=item_format,
+                    scroll=scroll,
+                    prefilter=prefilter,
+                    max_items=max_items,
+                    timeout=timeout,
+                    ctx=ctx,
+                ),
+                timeout=timeout + _TIMEOUT_SAFETY_S,
+            )
+        except asyncio.TimeoutError as exc:
+            snap = await page_snapshot(page)
+            _record_list_error(
+                ctx,
+                source_id=source_id,
+                page_url=page_url,
+                phase='browser_replay',
+                error_code='playwright_selector_timeout',
+                message=f'browser list exceeded overall timeout {timeout}s',
+                snapshot=snap,
+                exc=exc,
+            )
+            raise DiagnosedError(f'browser list exceeded overall timeout {timeout}s') from None
 
 
 def _record_list_error(

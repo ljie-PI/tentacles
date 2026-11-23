@@ -6,7 +6,7 @@ from __future__ import annotations
 import re
 from difflib import SequenceMatcher
 
-from tentacles.models import Item
+from tentacles.models import Item, strip_display_prefix
 
 _PUNCT = re.compile(r"[\s\W]+", re.UNICODE)
 
@@ -46,7 +46,8 @@ def _similarity(a: str, ta: set[str], b: str, tb: set[str]) -> float:
 
 
 def title_similarity(a: str, b: str) -> float:
-    return _similarity(a, _tokenize(a), b, _tokenize(b))
+    ca, cb = strip_display_prefix(a), strip_display_prefix(b)
+    return _similarity(ca, _tokenize(ca), cb, _tokenize(cb))
 
 
 def dedup_articles(articles: list[Item], threshold: float = 0.72) -> list[Item]:
@@ -66,13 +67,14 @@ def split_similar(items: list[Item], titles: list[str],
     """Split items into (kept, similar): `similar` nearly match one of `titles`
     (stories already seen from other outlets) or an earlier kept item in this
     batch. Titles are tokenized once."""
-    seen = [(s, _tokenize(s)) for s in titles]
+    seen = [(strip_display_prefix(s), _tokenize(strip_display_prefix(s))) for s in titles]
     kept, similar = [], []
     for it in items:
-        tokens = _tokenize(it.title)
-        if any(_similarity(it.title, tokens, s, ts) >= threshold for s, ts in seen):
+        clean = strip_display_prefix(it.title)
+        tokens = _tokenize(clean)
+        if any(_similarity(clean, tokens, s, ts) >= threshold for s, ts in seen):
             similar.append(it)
         else:
             kept.append(it)
-            seen.append((it.title, tokens))
+            seen.append((clean, tokens))
     return kept, similar
