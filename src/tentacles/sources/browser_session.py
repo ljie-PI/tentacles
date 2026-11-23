@@ -12,12 +12,15 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import logging
 import os
 import re
 import shutil
+import socket
 import subprocess
 import time
+import urllib.request
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, AsyncIterator
@@ -92,6 +95,27 @@ async def work_tab(config: AppConfig, *, chrome_profile: str | None = None,
                 await _detach(browser, launched)
 
 
+def _prune_restored_tabs_sync(cdp_url: str) -> None:
+    """On a freshly auto-launched Chrome, close excess restored tabs so Playwright's
+    `Target.setAutoAttach` handshake cannot stall on dozens of restoring heavy pages."""
+    base = cdp_url.rstrip("/")
+    with contextlib.suppress(Exception):
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        with opener.open(f"{base}/json/list", timeout=2.0) as resp:
+            targets = json.loads(resp.read().decode("utf-8", "ignore"))
+        if not isinstance(targets, list):
+            return
+        pages = [t for t in targets if isinstance(t, dict) and t.get("type") == "page"]
+        if len(pages) <= 3:
+            return
+        for extra in pages[1:]:
+            tid = extra.get("id")
+            if isinstance(tid, str) and tid:
+                with contextlib.suppress(Exception):
+                    with opener.open(f"{base}/json/close/{tid}", timeout=1.5) as _:
+                        pass
+
+
 async def _attach(playwright: Playwright, config: AppConfig, spec: BrowserSpec, profile: str,
                   timeout_ms: int) -> tuple[Browser, subprocess.Popen[bytes] | None]:
     """Reuse the running headed Chrome, or launch one when `auto_launch` allows it."""
@@ -104,15 +128,22 @@ async def _attach(playwright: Playwright, config: AppConfig, spec: BrowserSpec, 
                  spec.cdp_url, type(exc).__name__, profile)
     process = _launch(config, spec, profile)
     deadline = time.monotonic() + LAUNCH_TIMEOUT_S
+    pruned = False
     while True:
+        await asyncio.sleep(0.25)
+        if not pruned:
+            await asyncio.to_thread(_prune_restored_tabs_sync, spec.cdp_url)
+            pruned = True
         try:
-            return await playwright.chromium.connect_over_cdp(spec.cdp_url, timeout=5000), process
+            return await playwright.chromium.connect_over_cdp(spec.cdp_url, timeout=10000), process
         except Exception as exc:
+            pruned = False
+            if process.poll() is not None and spec.chrome_user_data_dir is not None and time.monotonic() <= deadline:
+                _clean_stale_singleton_lock(config.resolve(spec.chrome_user_data_dir))
             if process.poll() is not None or time.monotonic() > deadline:
                 _terminate(process)
                 raise UpstreamError(
                     f"headed Chrome for profile {profile!r} did not expose CDP at {spec.cdp_url}") from exc
-            await asyncio.sleep(0.25)
 
 
 def _attach_hint(config: AppConfig, spec: BrowserSpec, profile: str) -> str:
@@ -121,8 +152,33 @@ def _attach_hint(config: AppConfig, spec: BrowserSpec, profile: str) -> str:
             f"{command} or set browser.auto_launch: true")
 
 
+def _clean_stale_singleton_lock(user_data_dir: Path) -> None:
+    """Remove Chrome Singleton* symlinks left behind by a dead local process."""
+    lock = user_data_dir / "SingletonLock"
+    if not lock.is_symlink():
+        return
+    with contextlib.suppress(OSError):
+        target = os.readlink(lock)
+        host, sep, pid_text = target.rpartition("-")
+        if not sep or not pid_text.isdigit():
+            return
+        local_names = {socket.gethostname().lower(), socket.getfqdn().lower()}
+        if host.lower() not in local_names:
+            return
+        try:
+            os.kill(int(pid_text), 0)
+        except ProcessLookupError:
+            log.warning("browser: removing stale SingletonLock for dead PID %s in %s", pid_text, user_data_dir)
+            for name in ("SingletonLock", "SingletonSocket", "SingletonCookie"):
+                (user_data_dir / name).unlink(missing_ok=True)
+
+
 def _launch(config: AppConfig, spec: BrowserSpec, profile: str) -> subprocess.Popen[bytes]:
     """Start a real windowed Chrome for this profile. `--headless` is never passed."""
+    if spec.chrome_user_data_dir is not None:
+        user_data_dir = config.resolve(spec.chrome_user_data_dir)
+        user_data_dir.mkdir(parents=True, exist_ok=True)
+        _clean_stale_singleton_lock(user_data_dir)
     argv = _launch_argv(config, spec, profile)
     log.info("browser: launching headed Chrome (%s) for profile %s", argv[0], profile)
     return subprocess.Popen(argv, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
@@ -133,6 +189,7 @@ def _launch_argv(config: AppConfig, spec: BrowserSpec, profile: str) -> list[str
             f"--profile-directory={profile}", "--no-first-run", "--no-default-browser-check"]
     if spec.chrome_user_data_dir is not None:
         argv.append(f"--user-data-dir={config.resolve(spec.chrome_user_data_dir)}")
+    argv.append("about:blank")
     return argv
 
 
@@ -236,10 +293,10 @@ async def _detach(browser: Browser, launched: subprocess.Popen[bytes] | None) ->
     """Disconnect from the user's Chrome; only a Chrome we launched is shut down."""
     if launched is None:
         return  # Stopping Playwright disconnects; closing would kill the user's window.
-    # Signal the process before any await so cancellation cannot leak our Chrome.
     _terminate(launched)
     with contextlib.suppress(Exception):
-        await browser.close()
+        await asyncio.wait_for(browser.close(), timeout=2.0)
+    await asyncio.sleep(0.35)
 
 
 def _terminate(process: subprocess.Popen[bytes]) -> None:

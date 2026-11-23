@@ -1,6 +1,6 @@
 # 固化 Playwright 脚本（`scripts/browser_sources/`）
 
-`type: browser` 信息源不调用模型，只**确定性重放**这里的脚本。脚本由仓库托管、随代码评审，
+`type: browser` 默认的 `mode: script` 不在常规重放时调用模型，而是**确定性重放**这里的脚本（另支持无需脚本的声明式无限滚动 `mode: list`，见根 `README.md`）。脚本由仓库托管、随代码评审，
 默认路径为 `<browser.scripts_dir>/<source_id>.py`（也可用源级 `script_path` 显式指定，
 但必须落在 `browser.scripts_dir` 目录内并返回配置错误之外的结果）。
 

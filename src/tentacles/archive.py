@@ -130,9 +130,12 @@ class ArchiveManager:
                 if item is None:
                     continue
                 latest = database.latest_evaluation(item_id)
-                return ItemDetail.model_validate({
-                    **item.model_dump(), **(latest.model_dump() if latest else {}),
-                    'evaluations': database.item_evaluations(item_id), 'archive_year': year})
+                return ItemDetail.from_item(
+                    item,
+                    latest,
+                    evaluations=database.item_evaluations(item_id),
+                    archive_year=year,
+                )
         raise NotFound(f"unknown item {item_id!r}")
 
     # ---- storage status / reindex ------------------------------------------

@@ -26,6 +26,7 @@ from tentacles.pipelines.adapters import ModelRequirement
 from tentacles.pipelines.config import StageSpec
 from tentacles.pipelines.registry import PROCESSORS, STAGES as FILTER_STAGES
 from tentacles.prompts import load_prompt
+from tentacles.sources.browser_list_models import BROWSER_LIST_ONLY_FIELDS, BROWSER_SCRIPT_ONLY_FIELDS
 
 _STAGE_DECLARATION: TypeAdapter[StageSpec] = TypeAdapter(StageSpec)
 
@@ -184,11 +185,24 @@ def _browser_scripts_dir(browser: Mapping[str, Any], config_path: Path) -> Path:
 
 
 def _browser_errors(options: Mapping[str, Any], where: str, browser: Mapping[str, Any],
-                    config_path: Path) -> list[ConfigIssue]:
-    """Script path containment for `type: browser` (headless is rejected by its schema)."""
+                    config_path: Path | None) -> list[ConfigIssue]:
+    """Mode cross-field rules and script path containment for `type: browser`."""
     errors: list[ConfigIssue] = []
+    mode = options.get("mode", "script")
+    if mode == "list":
+        if options.get("selectors") is None and options.get("preset") is None:
+            errors.append(ConfigIssue(f"{where}.selectors", "list mode requires selectors or preset"))
+        for script_only in BROWSER_SCRIPT_ONLY_FIELDS:
+            val = options.get(script_only)
+            if val is not None and val != "":
+                errors.append(ConfigIssue(f"{where}.{script_only}", f"{script_only} is only supported in script mode"))
+        return errors
+    if mode == "script":
+        for list_only in BROWSER_LIST_ONLY_FIELDS:
+            if options.get(list_only) is not None:
+                errors.append(ConfigIssue(f"{where}.{list_only}", f"{list_only} is only supported in list mode"))
     raw = options.get("script_path")
-    if raw is None:
+    if raw is None or config_path is None:
         return errors
     script = _path(raw, config_path) if isinstance(raw, str) and raw.strip() else None
     if script is None:
@@ -243,7 +257,7 @@ def _source_options(data: Mapping[str, Any], where: str, *, config_path: Path | 
             errors.append(ConfigIssue(f'{where}.selectors', 'list mode requires selectors'))
         if mode in ('list', 'page') and options.get('model') is not None:
             errors.append(ConfigIssue(f'{where}.model', 'model override is only supported in llm mode'))
-    if source_type == 'browser' and config_path is not None:
+    if source_type == 'browser':
         errors.extend(_browser_errors(options, where, browser or {}, config_path))
     try:
         return cls.Options.model_validate(options), errors

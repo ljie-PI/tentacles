@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+from datetime import datetime
 import hashlib
 import re
-from datetime import datetime
 from typing import Any, Literal
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
@@ -51,10 +52,62 @@ def has_original_url(url: str, page_url: str) -> bool:
     return is_http_url(url) or is_http_url(page_url)
 
 
+_DISPLAY_METRIC_KEYS: tuple[str, ...] = ("votes", "likes", "comments", "reposts", "views")
+
+
 def content_fingerprint(title: str, summary: str = "") -> str:
     """标题 + 摘要的规范化指纹，近似内容的哈希去重。"""
     text = re.sub(r"\s+", " ", f"{title} {summary}".casefold()).strip()
     return hashlib.sha1(text.encode("utf-8")).hexdigest()
+
+
+def format_item_title(item: "Item") -> str:
+    """Render outward title, prepending `author` / `meta.metrics` when `meta.display_format` opts in."""
+    fmt = item.meta.get("display_format")
+    if not isinstance(fmt, Mapping):
+        return item.title
+    segments: list[str] = []
+    if fmt.get("prefix_author_in_title") and item.author:
+        segments.append(item.author)
+    metrics = item.meta.get("metrics")
+    if fmt.get("prefix_metrics_in_title") and isinstance(metrics, Mapping):
+        metric_str = " ".join(f"{key}={metrics[key]}" for key in _DISPLAY_METRIC_KEYS if key in metrics)
+        if metric_str:
+            segments.append(metric_str)
+    segments.append(item.title)
+    return " | ".join(segments)
+
+
+def format_item_metadata_header(item: "Item") -> str:
+    """Render `[Author: ... | Published: ... | Metrics: ...]` when `meta.display_format` opts in."""
+    fmt = item.meta.get("display_format")
+    if not isinstance(fmt, Mapping) or not fmt.get("prepend_metadata_in_content"):
+        return ""
+    parts: list[str] = []
+    if item.author:
+        parts.append(f"Author: {item.author}")
+    if item.published is not None:
+        parts.append(f'Published: {item.published.strftime("%Y-%m-%d %H:%M UTC")}')
+    metrics = item.meta.get("metrics")
+    if isinstance(metrics, Mapping):
+        metric_parts = [f"{key}={metrics[key]}" for key in _DISPLAY_METRIC_KEYS if key in metrics]
+        if metric_parts:
+            parts.append("Metrics: " + ", ".join(metric_parts))
+    return "[" + " | ".join(parts) + "]" if parts else ""
+
+
+def format_item_summary(item: "Item") -> str:
+    header = format_item_metadata_header(item)
+    if not header:
+        return item.summary
+    return f"{header} {item.summary}" if item.summary else header
+
+
+def format_item_content(item: "Item") -> str:
+    header = format_item_metadata_header(item)
+    if not header:
+        return item.content
+    return f"{header}\n{item.content}" if item.content else header
 
 
 def item_id(source_id: str, external_id: str) -> str:

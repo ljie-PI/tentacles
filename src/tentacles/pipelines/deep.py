@@ -10,7 +10,7 @@ from tentacles.cluster import cluster_articles
 from tentacles.config import AppConfig
 from tentacles.diagnostics import DiagnosticEvent
 from tentacles.llm.registry import ModelRegistry
-from tentacles.models import Item
+from tentacles.models import Item, format_item_summary, format_item_title
 from tentacles.personas.models import PersonaView
 from tentacles.personas.render import render_persona
 from tentacles.pipelines.adapters import ModelRequirement
@@ -43,8 +43,8 @@ async def make_deep(config: AppConfig, spec: PipelineSpec, persona: PersonaView,
     reports = []
     for event in events:
         now = to_utc(clock())
-        items = [{'number': i + 1, 'id': item.id, 'source': item.source_id, 'title': item.title,
-                  'summary': item.summary[:1200] or '（无摘要）', 'url': item.url,
+        items = [{'number': i + 1, 'id': item.id, 'source': item.source_id, 'title': format_item_title(item),
+                  'summary': format_item_summary(item)[:1200] or '（无摘要）', 'url': item.url,
                   'score': evaluations[item.id].score, 'tags': evaluations[item.id].tags}
                  for i, item in enumerate(event.members)]
         user = f'事件标题：{event.title()}\n\n相关文章（编号-来源-标题-摘要）：\n' + '\n'.join(

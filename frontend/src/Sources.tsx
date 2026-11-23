@@ -7,6 +7,8 @@ import { useDisplayTime } from './display-time'
 type SourceType = 'rss' | 'web' | 'browser' | 'imap'
 type CreatableSourceType = Exclude<SourceType, 'imap'>
 type WebMode = 'list' | 'page' | 'llm'
+type BrowserMode = 'script' | 'list'
+type BrowserPreset = '' | 'reddit' | 'x-following'
 type DetailErrorMode = 'fail_batch' | 'record_and_skip'
 
 type SourceDraft = {
@@ -20,6 +22,9 @@ type SourceDraft = {
   maxAgeDays: string
   timeout: string
   mode: WebMode
+  browserMode: BrowserMode
+  browserPreset: BrowserPreset
+  browserMaxScrolls: string
   selItem: string
   selTitle: string
   selLink: string
@@ -52,7 +57,8 @@ function emptyDraft(): SourceDraft {
   return {
     id: '', type: 'rss', name: '', schedule: '1h', enabled: true, updateExisting: false,
     url: '', maxAgeDays: '', timeout: '',
-    mode: 'list', selItem: 'article', selTitle: 'h2', selLink: 'a@href', selSummary: '', selDate: '',
+    mode: 'list', browserMode: 'script', browserPreset: 'reddit', browserMaxScrolls: '20',
+    selItem: 'article', selTitle: 'h2', selLink: 'a@href', selSummary: '', selDate: '',
     selector: 'main', fetchContent: false, onDetailError: 'fail_batch', emitBaseline: true,
     maxInputChars: '20000', model: '', concurrency: '4',
     pageUrl: '', task: '', chromeProfile: '', maxItems: '25',
@@ -62,7 +68,17 @@ function emptyDraft(): SourceDraft {
   }
 }
 
+const selectorStr = (selectors: SourceConfig['selectors'], key: 'item' | 'title' | 'link' | 'summary' | 'date'): string => {
+  const val = selectors?.[key]
+  return typeof val === 'string' ? val : ''
+}
+
 function draftFromConfig(cfg: SourceConfig): SourceDraft {
+  const webMode: WebMode = cfg.mode === 'page' || cfg.mode === 'llm' ? cfg.mode : 'list'
+  const browserMode: BrowserMode = cfg.mode === 'list' ? 'list' : 'script'
+  const rawMaxScrolls = cfg.scroll && typeof cfg.scroll.max_scrolls === 'number'
+    ? String(cfg.scroll.max_scrolls)
+    : ''
   return {
     id: cfg.id,
     type: cfg.type,
@@ -73,12 +89,15 @@ function draftFromConfig(cfg: SourceConfig): SourceDraft {
     url: cfg.url || '',
     maxAgeDays: cfg.max_age_days != null ? String(cfg.max_age_days) : '',
     timeout: cfg.timeout != null ? String(cfg.timeout) : '',
-    mode: cfg.mode || 'list',
-    selItem: cfg.selectors?.item || '',
-    selTitle: cfg.selectors?.title || '',
-    selLink: cfg.selectors?.link || '',
-    selSummary: cfg.selectors?.summary || '',
-    selDate: cfg.selectors?.date || '',
+    mode: webMode,
+    browserMode,
+    browserPreset: cfg.preset || '',
+    browserMaxScrolls: rawMaxScrolls,
+    selItem: selectorStr(cfg.selectors, 'item'),
+    selTitle: selectorStr(cfg.selectors, 'title'),
+    selLink: selectorStr(cfg.selectors, 'link'),
+    selSummary: selectorStr(cfg.selectors, 'summary'),
+    selDate: selectorStr(cfg.selectors, 'date'),
     selector: cfg.selector || '',
     fetchContent: cfg.fetch_content ?? false,
     onDetailError: cfg.on_detail_error || (cfg.type === 'browser' ? 'record_and_skip' : 'fail_batch'),
@@ -121,10 +140,12 @@ function applyNonImapFields(
   target: SourceCreate | SourceUpdate,
   draft: SourceDraft,
   type: CreatableSourceType,
-  includeNullTimeout: boolean,
+  mode: 'create' | 'update',
+  existingConfig?: SourceConfig,
 ): void {
+  const isUpdate = mode === 'update'
   const timeout = optionalNumber(draft.timeout)
-  if (timeout !== null || includeNullTimeout) target.timeout = timeout
+  if (timeout !== null || isUpdate) target.timeout = timeout
   if (type === 'rss') {
     target.url = draft.url.trim()
     target.max_age_days = optionalInt(draft.maxAgeDays)
@@ -154,10 +175,34 @@ function applyNonImapFields(
     }
   } else if (type === 'browser') {
     target.page_url = draft.pageUrl.trim()
-    target.task = draft.task.trim() || null
     target.chrome_profile = draft.chromeProfile.trim() || null
-    target.on_detail_error = draft.onDetailError
     target.max_items = optionalInt(draft.maxItems)
+    if (draft.browserMode === 'list') {
+      target.mode = 'list'
+      if (draft.browserPreset) {
+        target.preset = draft.browserPreset
+      } else if (isUpdate) {
+        target.preset = null
+      }
+      const maxScrolls = optionalInt(draft.browserMaxScrolls)
+      if (isUpdate) {
+        if (maxScrolls !== null) {
+          target.scroll = { ...(existingConfig?.scroll || {}), max_scrolls: maxScrolls }
+        } else if (existingConfig?.scroll) {
+          const rest = { ...existingConfig.scroll, max_scrolls: null }
+          const hasAny = Object.values(rest).some(val => val !== null && val !== undefined)
+          target.scroll = hasAny ? rest : null
+        } else {
+          target.scroll = null
+        }
+      } else if (maxScrolls !== null) {
+        target.scroll = { max_scrolls: maxScrolls }
+      }
+    } else {
+      target.mode = 'script'
+      target.task = draft.task.trim() || null
+      target.on_detail_error = draft.onDetailError
+    }
   }
 }
 
@@ -172,11 +217,11 @@ function toCreatePayload(draft: SourceDraft): SourceCreate {
     update_existing: type === 'web' && draft.mode === 'page' ? false : draft.updateExisting,
     pipelines: draft.pipelines,
   }
-  applyNonImapFields(base, draft, type, false)
+  applyNonImapFields(base, draft, type, 'create')
   return base
 }
 
-function toUpdatePayload(draft: SourceDraft): SourceUpdate {
+function toUpdatePayload(draft: SourceDraft, existingConfig?: SourceConfig): SourceUpdate {
   const patch: SourceUpdate = {
     name: draft.name.trim() || null,
     schedule: draft.schedule.trim(),
@@ -185,7 +230,7 @@ function toUpdatePayload(draft: SourceDraft): SourceUpdate {
   }
   if (draft.type !== 'imap') {
     patch.update_existing = draft.type === 'web' && draft.mode === 'page' ? false : draft.updateExisting
-    applyNonImapFields(patch, draft, draft.type, true)
+    applyNonImapFields(patch, draft, draft.type, 'update', existingConfig)
   } else {
     patch.timeout = optionalNumber(draft.timeout)
     patch.folders = parseLines(draft.folders)
@@ -224,7 +269,9 @@ function SourceForm({
       pipelines: has ? draft.pipelines.filter(id => id !== pid) : [...draft.pipelines, pid],
     })
   }
-  const timeoutPlaceholder = draft.type === 'browser' ? '默认 60' : '默认 30'
+  const timeoutPlaceholder = draft.type === 'browser'
+    ? (draft.browserMode === 'list' ? '默认 180' : '默认 60')
+    : '默认 30'
 
   return (
     <form className="source-form" onSubmit={event => { event.preventDefault(); onSubmit() }}>
@@ -448,6 +495,21 @@ function SourceForm({
       </>}
 
       {draft.type === 'browser' && <>
+        <div className="form-row">
+          <label>
+            浏览器抓取模式
+            <select
+              name="browser-mode"
+              value={draft.browserMode}
+              disabled={busy}
+              onChange={e => setDraft({ ...draft, browserMode: e.target.value as BrowserMode })}
+            >
+              <option value="script">script（重放固化 Playwright 脚本）</option>
+              <option value="list">list（无限滚动选择器与互动量预筛）</option>
+            </select>
+          </label>
+          <label>单次超时（秒）<input type="number" min={1} step="any" value={draft.timeout} disabled={busy} placeholder={timeoutPlaceholder} onChange={e => setDraft({ ...draft, timeout: e.target.value })} /></label>
+        </div>
         <label>
           入口页 URL（page_url）
           <input
@@ -460,28 +522,54 @@ function SourceForm({
             required
           />
         </label>
-        <label>
-          采集任务说明（task，冷启动时供 Agent 探索）
-          <textarea
-            rows={3}
-            value={draft.task}
-            disabled={busy}
-            onChange={event => setDraft({ ...draft, task: event.target.value })}
-          />
-        </label>
         <div className="form-row">
           <label>Chrome Profile（可选）<input value={draft.chromeProfile} disabled={busy} onChange={e => setDraft({ ...draft, chromeProfile: e.target.value })} placeholder="留空使用默认 Profile" /></label>
-          <label>单轮最多条数（1–200）<input type="number" min={1} max={200} value={draft.maxItems} disabled={busy} onChange={e => setDraft({ ...draft, maxItems: e.target.value })} /></label>
+          <label>单轮最多条数（1–500）<input type="number" min={1} max={500} value={draft.maxItems} disabled={busy} onChange={e => setDraft({ ...draft, maxItems: e.target.value })} /></label>
         </div>
-        <div className="form-row">
+        {draft.browserMode === 'script' ? <>
+          <label>
+            采集任务说明（task，冷启动时供 Agent 探索）
+            <textarea
+              rows={3}
+              value={draft.task}
+              disabled={busy}
+              onChange={event => setDraft({ ...draft, task: event.target.value })}
+            />
+          </label>
           <label>冷启动失败策略
             <select value={draft.onDetailError} disabled={busy} onChange={e => setDraft({ ...draft, onDetailError: e.target.value as DetailErrorMode })}>
               <option value="record_and_skip">record_and_skip</option>
               <option value="fail_batch">fail_batch</option>
             </select>
           </label>
-          <label>单次重放超时（秒）<input type="number" min={1} step="any" value={draft.timeout} disabled={busy} placeholder={timeoutPlaceholder} onChange={e => setDraft({ ...draft, timeout: e.target.value })} /></label>
-        </div>
+        </> : <>
+          <div className="form-row">
+            <label>内置站点预设（preset）
+              <select
+                value={draft.browserPreset}
+                disabled={busy}
+                onChange={e => setDraft({ ...draft, browserPreset: e.target.value as BrowserPreset })}
+                required={isCreate}
+              >
+                {!isCreate && <option value="">自定义 YAML 选择器（保持不变）</option>}
+                <option value="reddit">reddit（Reddit 自定义流 / Subreddit）</option>
+                <option value="x-following">x-following（X 正在关注时间流）</option>
+              </select>
+            </label>
+            <label>最大下翻次数（max_scrolls）
+              <input
+                type="number"
+                min={0}
+                max={200}
+                value={draft.browserMaxScrolls}
+                disabled={busy}
+                placeholder="默认 20"
+                onChange={e => setDraft({ ...draft, browserMaxScrolls: e.target.value })}
+              />
+            </label>
+          </div>
+          <p className="small muted">细粒度选择器（selectors）、互动阈值（prefilter）与等待时间将原样保留在 tentacles.yaml 中。</p>
+        </>}
       </>}
 
       {draft.type === 'imap' && <>
@@ -574,7 +662,7 @@ function EditSourceDrawer({
   const save = useMutation({
     mutationFn: (next: SourceDraft) => api('/api/sources/{source_id}', 'patch', {
       path: { source_id: sourceId },
-      body: toUpdatePayload(next),
+      body: toUpdatePayload(next, detail.data),
     }),
     onSuccess: async data => {
       client.setQueryData(['source-config', data.id], data)

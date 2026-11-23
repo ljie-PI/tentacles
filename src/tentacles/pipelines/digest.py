@@ -10,7 +10,7 @@ from zoneinfo import ZoneInfo
 from tentacles.config import AppConfig
 from tentacles.diagnostics import DiagnosticEvent
 from tentacles.llm.registry import ModelRegistry
-from tentacles.models import Item
+from tentacles.models import Item, format_item_summary, format_item_title
 from tentacles.personas.models import PersonaView
 from tentacles.personas.render import render_persona
 from tentacles.pipelines.adapters import ModelRequirement
@@ -34,8 +34,8 @@ async def make_digest(config: AppConfig, spec: PipelineSpec, persona: PersonaVie
                       clock: Callable[[], datetime], on_completion: Callable[[Completion], None], *,
                       record_error: Callable[[DiagnosticEvent], None]) -> list[ReportDraft]:
     now = to_utc(clock())
-    items: list[dict[str, Any]] = [{'number': i + 1, 'id': item.id, 'source': item.source_id, 'title': item.title,
-              'summary': item.summary[:600] or '（无摘要）', 'url': item.url,
+    items: list[dict[str, Any]] = [{'number': i + 1, 'id': item.id, 'source': item.source_id, 'title': format_item_title(item),
+              'summary': format_item_summary(item)[:600] or '（无摘要）', 'url': item.url,
               'score': evaluation.score, 'tags': evaluation.tags}
              for i, (item, evaluation) in enumerate(selected)]
     groups: dict[str, list[dict[str, Any]]] = {tag.tag: [] for tag in persona.tags}

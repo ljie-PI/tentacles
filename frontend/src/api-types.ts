@@ -622,6 +622,113 @@ export interface components {
             /** Year */
             year: number;
         };
+        /**
+         * BrowserClickStep
+         * @description One pre-scan click step (e.g. switching from X 'For you' to 'Following').
+         */
+        BrowserClickStep: {
+            /** Has Text */
+            has_text?: string | string[] | null;
+            /** Nth */
+            nth?: number | null;
+            /** Selector */
+            selector: string;
+            /**
+             * Wait Ms
+             * @default 1500
+             */
+            wait_ms: number;
+        };
+        /** BrowserItemFormatPatch */
+        BrowserItemFormatPatch: {
+            /** Prefix Author In Title */
+            prefix_author_in_title?: boolean | null;
+            /** Prefix Metrics In Title */
+            prefix_metrics_in_title?: boolean | null;
+            /** Prepend Metadata In Content */
+            prepend_metadata_in_content?: boolean | null;
+        };
+        /** BrowserMetricsSelectors */
+        BrowserMetricsSelectors: {
+            /** Comments */
+            comments?: string | null;
+            /** Likes */
+            likes?: string | null;
+            /** Reposts */
+            reposts?: string | null;
+            /** Views */
+            views?: string | null;
+            /** Votes */
+            votes?: string | null;
+        };
+        /** BrowserPrefilterOptions */
+        BrowserPrefilterOptions: {
+            /**
+             * Match
+             * @default any
+             * @enum {string}
+             */
+            match: "any" | "all";
+            /** Min Comments */
+            min_comments?: number | null;
+            /** Min Likes */
+            min_likes?: number | null;
+            /** Min Media Text Chars */
+            min_media_text_chars?: number | null;
+            /** Min Reposts */
+            min_reposts?: number | null;
+            /**
+             * Min Text Chars
+             * @default 0
+             */
+            min_text_chars: number;
+            /** Min Views */
+            min_views?: number | null;
+            /** Min Votes */
+            min_votes?: number | null;
+        };
+        /** BrowserScrollPatch */
+        BrowserScrollPatch: {
+            /** Idle Rounds */
+            idle_rounds?: number | null;
+            /** Max Scrolls */
+            max_scrolls?: number | null;
+            /** Wait Max Ms */
+            wait_max_ms?: number | null;
+            /** Wait Min Ms */
+            wait_min_ms?: number | null;
+        };
+        /**
+         * BrowserSelectorPatch
+         * @description Typed partial/full selector map for REST `SourceCreate` / `SourceUpdate` / `SourceConfigView`.
+         */
+        BrowserSelectorPatch: {
+            /** Author */
+            author?: string | null;
+            /** Comments Url */
+            comments_url?: string | null;
+            /** Content */
+            content?: string | null;
+            /** Date */
+            date?: string | null;
+            /** External Url */
+            external_url?: string | null;
+            /** Item */
+            item?: string | null;
+            /** Link */
+            link?: string | null;
+            /** Media */
+            media?: string[] | null;
+            metrics?: components["schemas"]["BrowserMetricsSelectors"] | null;
+            /** Require */
+            require?: string[] | null;
+            /** Skip If */
+            skip_if?: string[] | null;
+            /** Summary */
+            summary?: string | null;
+            /** Title */
+            title?: string | null;
+        };
         /** DisplaySettings */
         DisplaySettings: {
             /** Timezone */
@@ -1434,6 +1541,8 @@ export interface components {
         };
         /** SourceConfigView */
         SourceConfigView: {
+            /** Actions */
+            actions?: components["schemas"]["BrowserClickStep"][] | null;
             /** Chrome Profile */
             chrome_profile?: string | null;
             /** Concurrency */
@@ -1448,6 +1557,7 @@ export interface components {
             fetch_content?: boolean | null;
             /** Folders */
             folders?: string[] | null;
+            format?: components["schemas"]["BrowserItemFormatPatch"] | null;
             /** Host */
             host?: string | null;
             /** Id */
@@ -1465,7 +1575,7 @@ export interface components {
             /** Max Items */
             max_items?: number | null;
             /** Mode */
-            mode?: ("list" | "page" | "llm") | null;
+            mode?: ("script" | "list" | "page" | "llm") | null;
             /** Model */
             model?: string | null;
             /** Name */
@@ -1478,16 +1588,17 @@ export interface components {
             pipelines?: string[];
             /** Port */
             port?: number | null;
+            prefilter?: components["schemas"]["BrowserPrefilterOptions"] | null;
+            /** Preset */
+            preset?: ("reddit" | "x-following") | null;
             /** Schedule */
             schedule: string;
+            scroll?: components["schemas"]["BrowserScrollPatch"] | null;
             /** Search */
             search?: string | null;
             /** Selector */
             selector?: string | null;
-            /** Selectors */
-            selectors?: {
-                [key: string]: string;
-            } | null;
+            selectors?: components["schemas"]["BrowserSelectorPatch"] | null;
             /** Ssl */
             ssl?: boolean | null;
             /** Task */
@@ -1509,6 +1620,8 @@ export interface components {
         };
         /** SourceCreate */
         SourceCreate: {
+            /** Actions */
+            actions?: components["schemas"]["BrowserClickStep"][] | null;
             /** Chrome Profile */
             chrome_profile?: string | null;
             /** Concurrency */
@@ -1522,6 +1635,7 @@ export interface components {
             enabled: boolean;
             /** Fetch Content */
             fetch_content?: boolean | null;
+            format?: components["schemas"]["BrowserItemFormatPatch"] | null;
             /** Id */
             id: string;
             /** Max Age Days */
@@ -1531,7 +1645,7 @@ export interface components {
             /** Max Items */
             max_items?: number | null;
             /** Mode */
-            mode?: ("list" | "page" | "llm") | null;
+            mode?: ("script" | "list" | "page" | "llm") | null;
             /** Model */
             model?: string | null;
             /** Name */
@@ -1542,17 +1656,18 @@ export interface components {
             page_url?: string | null;
             /** Pipelines */
             pipelines?: string[];
+            prefilter?: components["schemas"]["BrowserPrefilterOptions"] | null;
+            /** Preset */
+            preset?: ("reddit" | "x-following") | null;
             /**
              * Schedule
              * @default 1h
              */
             schedule: string;
+            scroll?: components["schemas"]["BrowserScrollPatch"] | null;
             /** Selector */
             selector?: string | null;
-            /** Selectors */
-            selectors?: {
-                [key: string]: string;
-            } | null;
+            selectors?: components["schemas"]["BrowserSelectorPatch"] | null;
             /** Task */
             task?: string | null;
             /** Timeout */
@@ -1578,6 +1693,8 @@ export interface components {
         };
         /** SourceUpdate */
         SourceUpdate: {
+            /** Actions */
+            actions?: components["schemas"]["BrowserClickStep"][] | null;
             /** Chrome Profile */
             chrome_profile?: string | null;
             /** Concurrency */
@@ -1592,6 +1709,7 @@ export interface components {
             fetch_content?: boolean | null;
             /** Folders */
             folders?: string[] | null;
+            format?: components["schemas"]["BrowserItemFormatPatch"] | null;
             /** Include Subfolders */
             include_subfolders?: boolean | null;
             /** Initial Days */
@@ -1605,7 +1723,7 @@ export interface components {
             /** Max Items */
             max_items?: number | null;
             /** Mode */
-            mode?: ("list" | "page" | "llm") | null;
+            mode?: ("script" | "list" | "page" | "llm") | null;
             /** Model */
             model?: string | null;
             /** Name */
@@ -1616,16 +1734,17 @@ export interface components {
             page_url?: string | null;
             /** Pipelines */
             pipelines?: string[] | null;
+            prefilter?: components["schemas"]["BrowserPrefilterOptions"] | null;
+            /** Preset */
+            preset?: ("reddit" | "x-following") | null;
             /** Schedule */
             schedule?: string | null;
+            scroll?: components["schemas"]["BrowserScrollPatch"] | null;
             /** Search */
             search?: string | null;
             /** Selector */
             selector?: string | null;
-            /** Selectors */
-            selectors?: {
-                [key: string]: string;
-            } | null;
+            selectors?: components["schemas"]["BrowserSelectorPatch"] | null;
             /** Task */
             task?: string | null;
             /** Timeout */

@@ -9,8 +9,16 @@ from typing import TYPE_CHECKING, Any, Generic, Literal, TypeVar
 from pydantic import BaseModel, ConfigDict, Field, computed_field, model_validator
 
 from tentacles.diagnostics import FailedTargetRef
-from tentacles.models import Item, ItemKind
+from tentacles.models import Item, ItemKind, format_item_content, format_item_summary, format_item_title
 from tentacles.pipelines.models import Evaluation, StageScore, PipelineOutcome
+from tentacles.sources.browser_list_models import (
+    BrowserClickStep,
+    BrowserItemFormatPatch,
+    BrowserListPresetName,
+    BrowserPrefilterOptions,
+    BrowserScrollPatch,
+    BrowserSelectorPatch,
+)
 from tentacles.llm.types import TokenUsage as TokenUsage
 
 if TYPE_CHECKING:
@@ -51,8 +59,9 @@ class _CreatableSourceFields(BaseModel):
     url: str | None = None
     max_age_days: int | None = None
     timeout: float | None = Field(default=None, gt=0, allow_inf_nan=False)
-    mode: Literal['list', 'page', 'llm'] | None = None
-    selectors: dict[str, str] | None = None
+    mode: Literal['script', 'list', 'page', 'llm'] | None = None
+    preset: BrowserListPresetName | None = None
+    selectors: BrowserSelectorPatch | None = None
     selector: str | None = None
     fetch_content: bool | None = None
     on_detail_error: Literal['fail_batch', 'record_and_skip'] | None = None
@@ -64,6 +73,10 @@ class _CreatableSourceFields(BaseModel):
     task: str | None = None
     chrome_profile: str | None = None
     max_items: int | None = None
+    scroll: BrowserScrollPatch | None = None
+    prefilter: BrowserPrefilterOptions | None = None
+    actions: list[BrowserClickStep] | None = None
+    format: BrowserItemFormatPatch | None = None
 
 
 class _EditableImapSourceFields(_CreatableSourceFields):
@@ -239,8 +252,15 @@ class ItemView(BaseModel):
     @classmethod
     def of(cls, item: Item, evaluation: Evaluation | None = None, *, snippet: str | None = None,
            archive_year: int | None = None) -> "ItemView":
-        return cls.model_validate({**item.model_dump(), **(evaluation.model_dump() if evaluation else {}),
-                                   "snippet": snippet, "archive_year": archive_year})
+        return cls.model_validate({
+            **item.model_dump(),
+            "title": format_item_title(item),
+            "summary": format_item_summary(item),
+            "content": format_item_content(item),
+            **(evaluation.model_dump() if evaluation else {}),
+            "snippet": snippet,
+            "archive_year": archive_year,
+        })
 
 
 class ItemSearchView(ItemView):
@@ -252,9 +272,16 @@ class ItemSearchView(ItemView):
     @classmethod
     def of(cls, item: Item, evaluation: Evaluation | None = None, *, snippet: str | None = None,
            bm25_rank: float | None = None, archive_year: int | None = None) -> "ItemSearchView":
-        return cls.model_validate({**item.model_dump(), **(evaluation.model_dump() if evaluation else {}),
-                                   "snippet": snippet or "", "bm25_rank": bm25_rank,
-                                   "archive_year": archive_year})
+        return cls.model_validate({
+            **item.model_dump(),
+            "title": format_item_title(item),
+            "summary": format_item_summary(item),
+            "content": format_item_content(item),
+            **(evaluation.model_dump() if evaluation else {}),
+            "snippet": snippet or "",
+            "bm25_rank": bm25_rank,
+            "archive_year": archive_year,
+        })
 
 
 class ItemDetail(ItemView):
@@ -262,6 +289,20 @@ class ItemDetail(ItemView):
     fingerprint: str
     meta: dict[str, Any]
     evaluations: list[Evaluation] = Field(default_factory=list)
+
+    @classmethod
+    def from_item(cls, item: Item, latest: Evaluation | None = None, *,
+                  evaluations: list[Evaluation] | None = None,
+                  archive_year: int | None = None) -> "ItemDetail":
+        return cls.model_validate({
+            **item.model_dump(),
+            "title": format_item_title(item),
+            "summary": format_item_summary(item),
+            "content": format_item_content(item),
+            **(latest.model_dump() if latest else {}),
+            "evaluations": evaluations or [],
+            "archive_year": archive_year,
+        })
 
 
 class RunView(BaseModel):

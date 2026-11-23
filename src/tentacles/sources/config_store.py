@@ -17,16 +17,18 @@ from tentacles.config_validation import parse_config, validate_source
 from tentacles.diagnostics import REDACTED, _sensitive_name
 from tentacles.errors import ConfigError, ConfigIssue, ConfigValidationError, Conflict, NotFound
 from tentacles.schemas import SourceConfigView, SourceCreate, SourceUpdate
+from tentacles.sources.browser_list_models import BROWSER_LIST_ONLY_FIELDS, BROWSER_SCRIPT_ONLY_FIELDS
 
 _TYPE_FIELDS: dict[str, tuple[str, ...]] = {
     'rss': ('url', 'max_age_days', 'timeout'),
     'imap': ('folders', 'include_subfolders', 'initial_days', 'max_fetch', 'search', 'exclude_senders', 'timeout'),
     'web': ('url', 'mode', 'selectors', 'selector', 'fetch_content', 'on_detail_error',
             'emit_baseline', 'max_input_chars', 'model', 'concurrency', 'timeout'),
-    'browser': ('page_url', 'task', 'chrome_profile', 'max_items', 'on_detail_error', 'timeout'),
+    'browser': ('page_url', 'mode', 'preset', 'task', 'chrome_profile', 'max_items', 'on_detail_error',
+                'selectors', 'scroll', 'prefilter', 'actions', 'format', 'timeout'),
 }
 
-_NULL_IF_BLANK = frozenset({'name', 'selector', 'model', 'chrome_profile', 'task'})
+_NULL_IF_BLANK = frozenset({'name', 'selector', 'model', 'chrome_profile', 'task', 'preset'})
 _ENV_REF_FORBIDDEN_MSG = 'environment variable references (${...}) must be edited in tentacles.yaml directly'
 
 
@@ -124,10 +126,19 @@ def _raw_str_list(raw: Mapping[str, Any], key: str, fallback: Any) -> list[str] 
     return None
 
 
-def _raw_selectors(raw: Mapping[str, Any], fallback: Any) -> dict[str, str] | None:
-    candidate = raw['selectors'] if 'selectors' in raw else fallback
+def _raw_dict(raw: Mapping[str, Any], key: str, fallback: Any) -> Any | None:
+    candidate = raw[key] if key in raw else fallback
     if isinstance(candidate, dict):
-        return {str(k): str(v) for k, v in candidate.items() if v is not None}
+        return deepcopy(candidate) or None
+    return None
+
+
+def _raw_dict_list(raw: Mapping[str, Any], key: str, fallback: Any) -> list[Any] | None:
+    candidate = raw[key] if key in raw else fallback
+    if isinstance(candidate, list):
+        # Preserve an explicit empty list (`actions: []`) because `[]` disables preset actions
+        # whereas `None` inherits preset actions!
+        return [deepcopy(v) for v in candidate if isinstance(v, dict)]
     return None
 
 
@@ -177,29 +188,53 @@ def _view_of(config: AppConfig, spec: SourceSpec, raw_entry: Mapping[str, Any] |
         search=_raw_str(raw_map, 'search', opts.get('search')),
         exclude_senders=_raw_str_list(raw_map, 'exclude_senders', opts.get('exclude_senders')),
         mode=opts.get('mode'),
-        selectors=_raw_selectors(raw_map, opts.get('selectors')),
+        preset=cast(Any, opts.get('preset')),
+        selectors=_raw_dict(raw_map, 'selectors', opts.get('selectors')),
         selector=_raw_str(raw_map, 'selector', opts.get('selector')),
         fetch_content=opts.get('fetch_content'),
-        on_detail_error=opts.get('on_detail_error'),
+        on_detail_error=opts.get('on_detail_error') if not (spec.type == 'browser' and opts.get('mode') == 'list') else None,
         emit_baseline=opts.get('emit_baseline'),
         max_input_chars=opts.get('max_input_chars'),
         model=_raw_str(raw_map, 'model', opts.get('model')),
         concurrency=opts.get('concurrency'),
         page_url=_safe_view_url(raw_map, 'page_url', opts.get('page_url')),
-        task=_raw_str(raw_map, 'task', opts.get('task')),
+        task=_raw_str(raw_map, 'task', opts.get('task')) if not (spec.type == 'browser' and opts.get('mode') == 'list') else None,
         chrome_profile=_raw_str(raw_map, 'chrome_profile', opts.get('chrome_profile')),
         max_items=opts.get('max_items'),
+        scroll=_raw_dict(raw_map, 'scroll', opts.get('scroll')),
+        prefilter=_raw_dict(raw_map, 'prefilter', opts.get('prefilter')),
+        actions=_raw_dict_list(raw_map, 'actions', opts.get('actions')),
+        format=_raw_dict(raw_map, 'format', opts.get('format')),
         pipelines=[p.id for p in config.pipelines if spec.id in p.sources],
     )
 
 
-def _clean_value(key: str, value: Any) -> Any:
+def _clean_value(key: str, value: Any, *, source_type: str = '') -> Any:
     if key in _NULL_IF_BLANK and isinstance(value, str):
         stripped = value.strip()
         return stripped or None
     if key == 'selectors' and isinstance(value, dict):
-        cleaned = {k: v.strip() for k, v in value.items() if isinstance(v, str) and v.strip()}
+        cleaned: dict[str, Any] = {}
+        for k, v in value.items():
+            if isinstance(v, str):
+                if v.strip():
+                    cleaned[k] = v.strip()
+            elif v is None and source_type == 'browser':
+                cleaned[k] = None
+            elif isinstance(v, dict):
+                nested = {nk: nv.strip() if isinstance(nv, str) else nv
+                          for nk, nv in v.items()
+                          if (isinstance(nv, str) and nv.strip()) or (nv is None and source_type == 'browser')}
+                if nested:
+                    cleaned[k] = nested
+            elif v is not None:
+                cleaned[k] = v
         return cleaned or None
+    if key in ('scroll', 'prefilter', 'format') and isinstance(value, dict):
+        return {k: v for k, v in value.items() if v is not None} or None
+    if key == 'actions' and isinstance(value, list):
+        # Preserve explicit `[]` so callers can disable preset actions on `x-following`.
+        return [v for v in value if isinstance(v, dict)]
     return value
 
 
@@ -228,7 +263,7 @@ def _apply_fields(entry: dict[str, Any], source_type: str, values: dict[str, Any
                     if config is not None and current_spec is not None else {})
     has_attached_creds = bool(entry.get('headers')) or bool(entry.get('cookies'))
     for key in sorted(fields & allowed):
-        val = _clean_value(key, values.get(key))
+        val = _clean_value(key, values.get(key), source_type=source_type)
         existing_raw = entry.get(key)
         unmatched_env_strings = _strings_with_env_refs(val) - _strings_with_env_refs(existing_raw)
         if unmatched_env_strings:
@@ -266,6 +301,14 @@ def _apply_fields(entry: dict[str, Any], source_type: str, values: dict[str, Any
                 entry.pop('update_existing', None)
         elif mode == 'llm':
             for stale in ('selectors', 'selector', 'emit_baseline'):
+                entry.pop(stale, None)
+    elif source_type == 'browser':
+        bmode = entry.get('mode', 'script')
+        if bmode == 'list':
+            for stale in BROWSER_SCRIPT_ONLY_FIELDS:
+                entry.pop(stale, None)
+        elif bmode == 'script':
+            for stale in BROWSER_LIST_ONLY_FIELDS:
                 entry.pop(stale, None)
 
 
@@ -476,6 +519,16 @@ def _validate_and_save(original_text: str, raw: dict[str, Any], path: Path,
     return parsed
 
 
+def _payload_values(payload: SourceCreate | SourceUpdate) -> dict[str, Any]:
+    """Dump only explicitly set fields on nested sub-models so unset optional fields
+    do not serialize as spurious `None` keys."""
+    raw = payload.model_dump(exclude_unset=True)
+    for k in ('schedule', 'enabled', 'update_existing', *payload.model_fields_set):
+        if k not in raw and hasattr(payload, k):
+            raw[k] = getattr(payload, k)
+    return raw
+
+
 def create_source_in_config(config: AppConfig, payload: SourceCreate, *,
                             existing_personas: Collection[str]) -> tuple[AppConfig, SourceConfigView]:
     source_id = payload.id.strip()
@@ -488,7 +541,7 @@ def create_source_in_config(config: AppConfig, payload: SourceCreate, *,
     sources = list(raw.get('sources') or [])
     entry: dict[str, Any] = {'id': source_id, 'type': payload.type}
     fields = set(payload.model_fields_set) | {'schedule', 'enabled', 'update_existing'}
-    _apply_fields(entry, payload.type, payload.model_dump(), fields, env_values=env_values)
+    _apply_fields(entry, payload.type, _payload_values(payload), fields, env_values=env_values)
     sources.append(entry)
     raw['sources'] = sources
     changed_pipelines = (_sync_pipelines(raw, source_id, payload.pipelines, env_values)
@@ -522,7 +575,7 @@ def update_source_in_config(config: AppConfig, source_id: str, payload: SourceUp
     if target is None or target_idx is None:
         raise NotFound(f'unknown source {source_id!r}')
     _apply_fields(
-        target, spec.type, payload.model_dump(), set(payload.model_fields_set),
+        target, spec.type, _payload_values(payload), set(payload.model_fields_set),
         env_values=env_values, config=config, current_spec=spec,
     )
     changed_pipelines: dict[int, list[str]] = {}
@@ -537,3 +590,19 @@ def update_source_in_config(config: AppConfig, source_id: str, payload: SourceUp
         patch=_YamlPatch(updated_source_idx=target_idx, changed_pipelines=changed_pipelines),
     )
     return updated, get_source_config(updated, source_id)
+
+
+def render_yaml_with_disabled_browser_sources(text: str) -> str:
+    """Return `text` with every `type: browser` source patched to `enabled: false` (preserving comments)."""
+    try:
+        raw = yaml.safe_load(text)
+    except yaml.YAMLError:
+        return text
+    if not isinstance(raw, dict) or not isinstance(raw.get('sources'), list):
+        return text
+    working = deepcopy(raw)
+    for idx, item in enumerate(raw['sources']):
+        if isinstance(item, dict) and item.get('type') == 'browser' and item.get('enabled', True):
+            working['sources'][idx]['enabled'] = False
+            text = _render_yaml(text, working, _YamlPatch(updated_source_idx=idx))
+    return text

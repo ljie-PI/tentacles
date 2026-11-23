@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from tentacles.errors import ConfigError
+from tentacles.sources.config_store import render_yaml_with_disabled_browser_sources
 
 PKG_ROOT = Path(__file__).resolve().parent
 REPO_ROOT = PKG_ROOT.parent.parent
@@ -66,6 +67,19 @@ def _copy_if_needed(src: Path, dst: Path, *, force: bool, mode: int | None = Non
     created.append(str(dst))
 
 
+def _sanitize_init_config(src: Path, dst: Path, *, force: bool,
+                          created: list[str], skipped: list[str]) -> None:
+    """Copy default config into a fresh workspace with `type: browser` sources disabled
+    until the user logs into a headed Chrome profile on that machine."""
+    if dst.exists() and not force:
+        skipped.append(str(dst))
+        return
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    text = render_yaml_with_disabled_browser_sources(src.read_text(encoding="utf-8"))
+    dst.write_text(text, encoding="utf-8")
+    created.append(str(dst))
+
+
 def init_workspace(directory: Path | None = None, *, force: bool = False) -> InitOutcome:
     root = (directory or DEFAULT_WORKSPACE_DIR).expanduser().resolve()
     assets = _asset_root()
@@ -73,8 +87,8 @@ def init_workspace(directory: Path | None = None, *, force: bool = False) -> Ini
     skipped: list[str] = []
 
     config_dst = root / "config" / "tentacles.yaml"
-    _copy_if_needed(assets / "config" / "tentacles.yaml", config_dst, force=force,
-                    created=created, skipped=skipped)
+    _sanitize_init_config(assets / "config" / "tentacles.yaml", config_dst, force=force,
+                          created=created, skipped=skipped)
 
     prompts_src = assets / "config" / "prompts"
     if prompts_src.is_dir():
