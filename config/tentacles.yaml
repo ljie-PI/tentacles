@@ -156,29 +156,29 @@ browser:
 #   timeout        请求超时秒数（默认 30）
 sources:
   # 中文
-  - {id: solidot, type: rss, url: "https://www.solidot.org/index.rss", schedule: 1h}
+  - {id: solidot, type: rss, url: "https://www.solidot.org/index.rss", schedule: 4h}
   # 英文
-  - {id: hacker-news, type: rss, url: "https://hnrss.org/frontpage", schedule: 30m, max_age_days: 2}
-  - {id: techcrunch, type: rss, url: "https://techcrunch.com/feed/", schedule: 1h}
-  - {id: the-verge, type: rss, url: "https://www.theverge.com/rss/index.xml", schedule: 1h}
-  - {id: product-hunt, name: Product Hunt, type: rss, url: "http://www.producthunt.com/feed", schedule: 1h, max_age_days: 1}
-  - {id: engadget, name: Engadget, type: rss, url: "http://www.engadget.com/rss-full.xml", schedule: 1h, max_age_days: 1}
-  - {id: facebook-engineering, name: Facebook Engineering, type: rss, url: "https://code.facebook.com/posts/rss", schedule: 1h, max_age_days: 1}
-  - {id: shopify-engineering, name: Shopify Engineering, type: rss, url: "https://shopifyengineering.myshopify.com/blogs/engineering.atom", schedule: 1h, max_age_days: 1}
-  - {id: nvidia-developer, name: Nvidia Developer, type: rss, url: "https://developer.nvidia.com/blog/feed", schedule: 1h, max_age_days: 1}
-  - {id: cmu-machine-learning, name: Machine Learning Blog @CMU, type: rss, url: "https://blog.ml.cmu.edu/feed/", schedule: 1h, max_age_days: 1}
-  - {id: deepmind-blog, name: DeepMind Blog, type: rss, url: "https://deepmind.com/blog/feed/basic/", schedule: 1h, max_age_days: 1}
-  - {id: mit-news-ai, name: MIT News - Artificial intelligence, type: rss, url: "http://news.mit.edu/rss/topic/artificial-intelligence2", schedule: 1h, max_age_days: 1}
-  - {id: berkeley-ai-research, name: The Berkeley AI Research Blog, type: rss, url: "http://bair.berkeley.edu/blog/feed.xml", schedule: 1h, max_age_days: 1}
-  - {id: openai-engineering, name: OpenAI Engineering, type: rss, url: "https://openai.com/news/engineering/rss.xml", schedule: 1h, max_age_days: 1}
-  - {id: google-ai, name: Google AI Blog, type: rss, url: "http://googleresearch.blogspot.com/atom.xml", schedule: 1h, max_age_days: 1}
-  - {id: towards-data-science, name: Towards Data Science, type: rss, url: "https://towardsdatascience.com/feed", schedule: 1h, max_age_days: 1}
-  - {id: jiqizhixin, name: 微信公众号-机器之心, type: rss, url: "https://decemberpei.cyou/rssbox/wechat-jiqizhixin.xml", schedule: 1h, max_age_days: 1}
-  - {id: liangziwei, name: 微信公众号-量子位, type: rss, url: "https://decemberpei.cyou/rssbox/wechat-liangziwei.xml", schedule: 1h, max_age_days: 1}
-  - {id: xinzhiyuan, name: 微信公众号-新智元, type: rss, url: "https://decemberpei.cyou/rssbox/wechat-xinzhiyuan.xml", schedule: 1h, max_age_days: 1}
-  - {id: deeptech, name: 微信公众号-DeepTech深科技, type: rss, url: "https://decemberpei.cyou/rssbox/wechat-shenkeji.xml", schedule: 1h, max_age_days: 1}
-  - {id: paperweekly, name: 微信公众号-PaperWeekly, type: rss, url: "https://decemberpei.cyou/rssbox/wechat-paperweekly.xml", schedule: 1h, max_age_days: 1}
-  - {id: ai-frontier, name: 微信公众号-AI前线, type: rss, url: "https://decemberpei.cyou/rssbox/wechat-aiqianxian.xml", schedule: 1h, max_age_days: 1}
+  - {id: hacker-news, type: rss, url: "https://hnrss.org/frontpage", schedule: 4h, max_age_days: 2}
+  - {id: techcrunch, type: rss, url: "https://techcrunch.com/feed/", schedule: 4h}
+  - {id: the-verge, type: rss, url: "https://www.theverge.com/rss/index.xml", schedule: 4h}
+  - {id: product-hunt, name: Product Hunt, type: rss, url: "http://www.producthunt.com/feed", schedule: 4h, max_age_days: 1}
+  - {id: engadget, name: Engadget, type: rss, url: "http://www.engadget.com/rss-full.xml", schedule: 4h, max_age_days: 1}
+  - {id: facebook-engineering, name: Facebook Engineering, type: rss, url: "https://code.facebook.com/posts/rss", schedule: 4h, max_age_days: 1}
+  - {id: shopify-engineering, name: Shopify Engineering, type: rss, url: "https://shopifyengineering.myshopify.com/blogs/engineering.atom", schedule: 4h, max_age_days: 1}
+  - {id: nvidia-developer, name: Nvidia Developer, type: rss, url: "https://developer.nvidia.com/blog/feed", schedule: 4h, max_age_days: 1}
+  - {id: cmu-machine-learning, name: Machine Learning Blog @CMU, type: rss, url: "https://blog.ml.cmu.edu/feed/", schedule: 4h, max_age_days: 1}
+  - {id: deepmind-blog, name: DeepMind Blog, type: rss, url: "https://deepmind.com/blog/feed/basic/", schedule: 4h, max_age_days: 1}
+  - {id: mit-news-ai, name: MIT News - Artificial intelligence, type: rss, url: "http://news.mit.edu/rss/topic/artificial-intelligence2", schedule: 4h, max_age_days: 1}
+  - {id: berkeley-ai-research, name: The Berkeley AI Research Blog, type: rss, url: "http://bair.berkeley.edu/blog/feed.xml", schedule: 4h, max_age_days: 1}
+  - {id: openai-engineering, name: OpenAI Engineering, type: rss, url: "https://openai.com/news/engineering/rss.xml", schedule: 4h, max_age_days: 1}
+  - {id: google-ai, name: Google AI Blog, type: rss, url: "http://googleresearch.blogspot.com/atom.xml", schedule: 4h, max_age_days: 1}
+  - {id: towards-data-science, name: Towards Data Science, type: rss, url: "https://towardsdatascience.com/feed", schedule: 4h, max_age_days: 1}
+  - {id: jiqizhixin, name: 微信公众号-机器之心, type: rss, url: "https://decemberpei.cyou/rssbox/wechat-jiqizhixin.xml", schedule: 4h, max_age_days: 1}
+  - {id: liangziwei, name: 微信公众号-量子位, type: rss, url: "https://decemberpei.cyou/rssbox/wechat-liangziwei.xml", schedule: 4h, max_age_days: 1}
+  - {id: xinzhiyuan, name: 微信公众号-新智元, type: rss, url: "https://decemberpei.cyou/rssbox/wechat-xinzhiyuan.xml", schedule: 4h, max_age_days: 1}
+  - {id: deeptech, name: 微信公众号-DeepTech深科技, type: rss, url: "https://decemberpei.cyou/rssbox/wechat-shenkeji.xml", schedule: 4h, max_age_days: 1}
+  - {id: paperweekly, name: 微信公众号-PaperWeekly, type: rss, url: "https://decemberpei.cyou/rssbox/wechat-paperweekly.xml", schedule: 4h, max_age_days: 1}
+  - {id: ai-frontier, name: 微信公众号-AI前线, type: rss, url: "https://decemberpei.cyou/rssbox/wechat-aiqianxian.xml", schedule: 4h, max_age_days: 1}
 
   # GitHub Daily Trending（overall + 5 种语言）：静态网页列表抓取，按仓库 URL 全局去重。
   - id: github-trending-overall
@@ -261,7 +261,7 @@ sources:
     type: browser
     name: r/LocalLLaMA 最新讨论
     enabled: false
-    schedule: 1h
+    schedule: 4h
     page_url: https://www.reddit.com/r/LocalLLaMA/new/
     task: >
       打开 r/LocalLLaMA 的 New 列表页，抓取前 20 条帖子的标题、帖子详情链接、作者、发布时间和正文摘要，
