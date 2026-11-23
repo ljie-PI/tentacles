@@ -19,7 +19,7 @@ from typing import Any, Callable, Literal, Sequence
 from tentacles.dedup import split_similar
 from tentacles.diagnostics import DiagnosticEvent, FailedTargetRef, RunErrorDetail, RunErrorRecord
 from tentacles.models import (CONTENT_UNITS, SUMMARY_UNITS, Item, ItemObservation, LinkDisposition,
-                              item_id, normalize_url, strip_display_prefix, strip_metadata_header)
+                              item_id, normalize_url)
 from tentacles.text import truncate_content_units
 from tentacles.errors import Conflict, TentaclesError
 from tentacles.personas.models import FeedbackView, PersonaEdit, PersonaView, edit_keywords, keywords
@@ -1049,21 +1049,9 @@ class Store:
                 seen_targets.add(target.id)
                 assert observation is not None
                 latest = observation.apply(target)
-
-                def _semantic_field(item_obj: Item, field_key: str) -> Any:
-                    val = getattr(item_obj, field_key)
-                    if field_key == 'title' and isinstance(val, str):
-                        return strip_display_prefix(val)
-                    if field_key in ('summary', 'content') and isinstance(val, str):
-                        return strip_metadata_header(val)
-                    return val
-
-                changed = (any(_semantic_field(target, key) != _semantic_field(latest, key)
-                               for key in _CONTENT_FIELDS)
+                changed = (any(getattr(target, key) != getattr(latest, key) for key in _CONTENT_FIELDS)
                            or any(str(target.meta.get(key, '')) != str(latest.meta.get(key, ''))
                                   for key in _CONTENT_META_FIELDS))
-                display_changed = any(getattr(target, key) != getattr(latest, key)
-                                      for key in ('title', 'summary', 'content'))
                 if changed:
                     if now is None:
                         raise ValueError('content updates require an observation time')
@@ -1076,11 +1064,9 @@ class Store:
                          latest.fingerprint, json.dumps(latest.meta, ensure_ascii=False), to_iso(now), target.id))
                     self._conn.execute('DELETE FROM evaluations WHERE item_id = ?', (target.id,))
                     updated += 1
-                elif display_changed or latest.meta != target.meta:
-                    self._conn.execute(
-                        'UPDATE items SET title = ?, summary = ?, content = ?, meta = ? WHERE id = ?',
-                        (latest.title, latest.summary, latest.content,
-                         json.dumps(latest.meta, ensure_ascii=False), target.id))
+                elif latest.meta != target.meta:
+                    self._conn.execute('UPDATE items SET meta = ? WHERE id = ?',
+                                       (json.dumps(latest.meta, ensure_ascii=False), target.id))
                 continue
             candidate = observation.apply(it) if observation is not None else it
             if observation is not None and not candidate.title:

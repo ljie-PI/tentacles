@@ -10,7 +10,7 @@ from tentacles.llm.decision_batch import DecisionBatchError, DecisionInput, deci
 from tentacles.llm.decision_protocol import MissingDecisionAnswers
 from tentacles.llm.registry import ModelRegistry
 from tentacles.llm.retry import ModelHTTPError, RequestGate
-from tentacles.models import Item
+from tentacles.models import Item, format_item_summary, format_item_title
 from tentacles.personas.models import InterestTag, PersonaView
 from tentacles.personas.render import render_persona
 from tentacles.pipelines.config import SemanticSpec, StageSpec
@@ -71,8 +71,8 @@ def _labels(persona: PersonaView) -> dict[str, InterestTag]:
 
 def _state(rendered: str, members: list[tuple[int, Item]], stage: SemanticSpec) -> dict[str, Any]:
     return {'persona': rendered,
-            'items': [{'idx': number, 'source': item.source_id, 'title': item.title,
-                       'author': item.author, 'summary': item.summary[:stage.summary_chars]}
+            'items': [{'idx': number, 'source': item.source_id, 'title': format_item_title(item),
+                       'author': item.author, 'summary': format_item_summary(item)[:stage.summary_chars]}
                       for number, item in members]}
 
 

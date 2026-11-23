@@ -5,11 +5,9 @@ import os
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
-
-import yaml
 
 from tentacles.errors import ConfigError
+from tentacles.sources.config_store import render_yaml_with_disabled_browser_sources
 
 PKG_ROOT = Path(__file__).resolve().parent
 REPO_ROOT = PKG_ROOT.parent.parent
@@ -77,19 +75,7 @@ def _sanitize_init_config(src: Path, dst: Path, *, force: bool,
         skipped.append(str(dst))
         return
     dst.parent.mkdir(parents=True, exist_ok=True)
-    text = src.read_text(encoding="utf-8")
-    try:
-        raw = yaml.safe_load(text)
-    except yaml.YAMLError:
-        raw = None
-    if isinstance(raw, dict) and isinstance(raw.get("sources"), list):
-        from copy import deepcopy
-        from tentacles.sources.config_store import _YamlPatch, _render_yaml
-        working = deepcopy(raw)
-        for idx, item in enumerate(raw["sources"]):
-            if isinstance(item, dict) and item.get("type") == "browser" and item.get("enabled", True):
-                working["sources"][idx]["enabled"] = False
-                text = _render_yaml(text, working, _YamlPatch(updated_source_idx=idx))
+    text = render_yaml_with_disabled_browser_sources(src.read_text(encoding="utf-8"))
     dst.write_text(text, encoding="utf-8")
     created.append(str(dst))
 

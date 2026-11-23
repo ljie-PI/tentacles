@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+from datetime import datetime
 import hashlib
 import re
-from datetime import datetime
 from typing import Any, Literal
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
@@ -51,40 +52,62 @@ def has_original_url(url: str, page_url: str) -> bool:
     return is_http_url(url) or is_http_url(page_url)
 
 
-# Browser `mode: list` display prefixes/headers that carry volatile engagement
-# counts; stripped when computing semantic content fingerprints, title similarity
-# and in-place content revision diffs so metric ticks do not cause false non-dups
-# or paid LLM re-evaluations.
-_METRIC_SEGMENT_RE = re.compile(
-    r'^(?:(?:votes|likes|comments|reposts|views)=\d+\s*)+$',
-    re.IGNORECASE,
-)
-_METADATA_HEADER_RE = re.compile(
-    r'^\[(?:Author:[^\]]*?|Published:[^\]]*?|Metrics:[^\]]*?)(?:\s*\|\s*(?:Author|Published|Metrics):[^\]]*?)*\]\s*',
-)
-
-
-def strip_display_prefix(title: str) -> str:
-    """Return the underlying semantic title without `Author | metrics | ` prefixes."""
-    parts = [part.strip() for part in title.split(' | ')]
-    if len(parts) >= 3 and _METRIC_SEGMENT_RE.fullmatch(parts[1]):
-        return ' | '.join(parts[2:]).strip() or title.strip()
-    if len(parts) >= 2 and _METRIC_SEGMENT_RE.fullmatch(parts[0]):
-        return ' | '.join(parts[1:]).strip() or title.strip()
-    return title.strip()
-
-
-def strip_metadata_header(text: str) -> str:
-    """Return `summary` or `content` without a leading `[Author: ... | Metrics: ...]` header."""
-    return _METADATA_HEADER_RE.sub('', text, count=1).strip()
+_DISPLAY_METRIC_KEYS: tuple[str, ...] = ("votes", "likes", "comments", "reposts", "views")
 
 
 def content_fingerprint(title: str, summary: str = "") -> str:
     """标题 + 摘要的规范化指纹，近似内容的哈希去重。"""
-    clean_title = strip_display_prefix(title)
-    clean_summary = strip_metadata_header(summary)
-    text = re.sub(r"\s+", " ", f"{clean_title} {clean_summary}".casefold()).strip()
+    text = re.sub(r"\s+", " ", f"{title} {summary}".casefold()).strip()
     return hashlib.sha1(text.encode("utf-8")).hexdigest()
+
+
+def format_item_title(item: "Item") -> str:
+    """Render outward title, prepending `author` / `meta.metrics` when `meta.display_format` opts in."""
+    fmt = item.meta.get("display_format")
+    if not isinstance(fmt, Mapping):
+        return item.title
+    segments: list[str] = []
+    if fmt.get("prefix_author_in_title") and item.author:
+        segments.append(item.author)
+    metrics = item.meta.get("metrics")
+    if fmt.get("prefix_metrics_in_title") and isinstance(metrics, Mapping):
+        metric_str = " ".join(f"{key}={metrics[key]}" for key in _DISPLAY_METRIC_KEYS if key in metrics)
+        if metric_str:
+            segments.append(metric_str)
+    segments.append(item.title)
+    return " | ".join(segments)
+
+
+def format_item_metadata_header(item: "Item") -> str:
+    """Render `[Author: ... | Published: ... | Metrics: ...]` when `meta.display_format` opts in."""
+    fmt = item.meta.get("display_format")
+    if not isinstance(fmt, Mapping) or not fmt.get("prepend_metadata_in_content"):
+        return ""
+    parts: list[str] = []
+    if item.author:
+        parts.append(f"Author: {item.author}")
+    if item.published is not None:
+        parts.append(f'Published: {item.published.strftime("%Y-%m-%d %H:%M UTC")}')
+    metrics = item.meta.get("metrics")
+    if isinstance(metrics, Mapping):
+        metric_parts = [f"{key}={metrics[key]}" for key in _DISPLAY_METRIC_KEYS if key in metrics]
+        if metric_parts:
+            parts.append("Metrics: " + ", ".join(metric_parts))
+    return "[" + " | ".join(parts) + "]" if parts else ""
+
+
+def format_item_summary(item: "Item") -> str:
+    header = format_item_metadata_header(item)
+    if not header:
+        return item.summary
+    return f"{header} {item.summary}" if item.summary else header
+
+
+def format_item_content(item: "Item") -> str:
+    header = format_item_metadata_header(item)
+    if not header:
+        return item.content
+    return f"{header}\n{item.content}" if item.content else header
 
 
 def item_id(source_id: str, external_id: str) -> str:

@@ -21,7 +21,7 @@
 
 - `external_id`: stable source-local identity (RSS GUID, email `Message-ID` or `folder:UIDVALIDITY:UID`, normalized URL, or `URL#hash`).
 - `fingerprint`: normalized `sha1(title + summary)`.
-- `meta`: source-specific metadata (`full_content_sha1`, `comments_url`, `browser_script`, `browser_entry_url`, or email `folder`/`uidvalidity`/`uid`/`message_id`/`to`/`cc`/`attachments`).
+- `meta`: source-specific metadata (`full_content_sha1`, `comments_url`, `external_url`, `browser_script`, `browser_mode`, `browser_entry_url`, `metrics`, `has_media`, `display_format`, or email `folder`/`uidvalidity`/`uid`/`message_id`/`to`/`cc`/`attachments`).
 - `evaluations[]`: latest evaluation per Pipeline on its newest Persona version (includes `reported_at` UTC timestamp when consumed by a report, else `null`; may include historical `input_revision`).
 
 ## `ReportView` (`reports show`)

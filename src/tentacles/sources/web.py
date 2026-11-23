@@ -28,6 +28,7 @@ from tentacles.diagnostics import (DiagnosticEvent, classify_failure, clip, html
 from tentacles.errors import UpstreamError
 from tentacles.models import Item, ItemObservation, LinkDisposition, normalize_url
 from tentacles.sources.base import DiagnosedError, FetchContext, FetchResult, Source, register
+from tentacles.sources.selectors import CssAttrBranch, parse_flexible_datetime, resolve_http_url
 from tentacles.text import content_sha1, html_to_text, truncate
 from tentacles.timeutil import to_utc
 
@@ -39,36 +40,8 @@ class Selector:
 
     @classmethod
     def parse(cls, value: str) -> Selector:
-        value = value.strip()
-        if not value or len(value) > 2000:
-            raise ValueError('selector must contain 1–2000 characters')
-        quote, escaped, depth, split = '', False, 0, -1
-        for index, char in enumerate(value):
-            if escaped:
-                escaped = False
-            elif char == '\\':
-                escaped = True
-            elif quote:
-                if char == quote:
-                    quote = ''
-            elif char in {'"', "'"}:
-                quote = char
-            elif char == '[':
-                depth += 1
-            elif char == ']':
-                depth -= 1
-            elif char == '@' and depth == 0:
-                if split >= 0:
-                    raise ValueError('selector has multiple attribute suffixes')
-                split = index
-        css, attribute = (value, None) if split < 0 else (value[:split].strip() or ':scope', value[split + 1:].strip())
-        if attribute is not None and (not attribute or any(not (c.isalnum() or c in '_:-.') for c in attribute)):
-            raise ValueError('invalid selector attribute suffix')
-        try:
-            soupsieve.compile(css)
-        except soupsieve.SelectorSyntaxError:
-            raise ValueError('invalid CSS selector') from None
-        return cls(css, attribute.lower() if attribute is not None else None)
+        branch = CssAttrBranch.parse_single(value)
+        return cls(branch.css, branch.attribute)
 
     def value(self, root: Tag, *, default_attribute: str | None = None) -> str:
         return self.observe(root, default_attribute=default_attribute) or ''
@@ -155,31 +128,11 @@ class WebOptions(BaseModel):
 
 
 def _link(base: str, value: str) -> str | None:
-    if not value:
-        return None
-    try:
-        url = httpx.URL(urljoin(base, value))
-        if url.scheme not in {'http', 'https'} or not url.host or url.userinfo:
-            return None
-        return normalize_url(str(url))
-    except (ValueError, httpx.InvalidURL):
-        return None
+    return resolve_http_url(base, value) or None
 
 
 def _published(value: str, ctx: FetchContext) -> datetime | None:
-    if not value.strip() or len(value) > 200:
-        return None
-    try:
-        settings = {'RELATIVE_BASE': to_utc(ctx.now).astimezone(ZoneInfo(ctx.timezone)),
-                    'TIMEZONE': ctx.timezone, 'TO_TIMEZONE': 'UTC', 'RETURN_AS_TIMEZONE_AWARE': True,
-                    'PREFER_DATES_FROM': 'past'}
-        parsed = dateparser.parse(value, settings=settings)
-        if parsed is None:
-            matches = search_dates(value, settings=settings, strategy='ngram')
-            parsed = matches[0][1] if matches else None
-    except (ValueError, OverflowError):
-        return None
-    return to_utc(parsed) if parsed is not None else None
+    return parse_flexible_datetime(value, ctx)
 
 
 def _document(html: bytes, content_type: str) -> BeautifulSoup:

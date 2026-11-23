@@ -26,6 +26,7 @@ from tentacles.pipelines.adapters import ModelRequirement
 from tentacles.pipelines.config import StageSpec
 from tentacles.pipelines.registry import PROCESSORS, STAGES as FILTER_STAGES
 from tentacles.prompts import load_prompt
+from tentacles.sources.browser_list_models import BROWSER_LIST_ONLY_FIELDS, BROWSER_SCRIPT_ONLY_FIELDS
 
 _STAGE_DECLARATION: TypeAdapter[StageSpec] = TypeAdapter(StageSpec)
 
@@ -191,14 +192,13 @@ def _browser_errors(options: Mapping[str, Any], where: str, browser: Mapping[str
     if mode == "list":
         if options.get("selectors") is None and options.get("preset") is None:
             errors.append(ConfigIssue(f"{where}.selectors", "list mode requires selectors or preset"))
-        for script_only in ("script_path", "pi", "on_detail_error"):
-            if options.get(script_only) is not None:
+        for script_only in BROWSER_SCRIPT_ONLY_FIELDS:
+            val = options.get(script_only)
+            if val is not None and val != "":
                 errors.append(ConfigIssue(f"{where}.{script_only}", f"{script_only} is only supported in script mode"))
-        if options.get("task"):
-            errors.append(ConfigIssue(f"{where}.task", "task is only supported in script mode"))
         return errors
     if mode == "script":
-        for list_only in ("preset", "selectors", "scroll", "prefilter", "actions", "format"):
+        for list_only in BROWSER_LIST_ONLY_FIELDS:
             if options.get(list_only) is not None:
                 errors.append(ConfigIssue(f"{where}.{list_only}", f"{list_only} is only supported in list mode"))
     raw = options.get("script_path")

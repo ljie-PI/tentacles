@@ -1,54 +1,68 @@
-"""`type: browser` + `mode: list`: infinite-scroll CSS selector & metric-prefilter extraction."""
+"""`type: browser` + `mode: list`: Playwright infinite-scroll runtime & card accumulator."""
 
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from datetime import datetime
 import random
-import re
 from time import monotonic
 from typing import Any, Literal
-from urllib.parse import urljoin
-from zoneinfo import ZoneInfo
 
-import dateparser
-from dateparser.search import search_dates
-import httpx
 from playwright.async_api import Page, TimeoutError as PlaywrightTimeoutError
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
-import soupsieve
 
+from tentacles.asyncutil import run_store_call
 from tentacles.config import AppConfig
 from tentacles.diagnostics import DiagnosticEvent, stack_frames
-from tentacles.models import Item, normalize_url
+from tentacles.models import Item, ItemObservation, LinkDisposition
 from tentacles.sources.base import DiagnosedError, FetchContext
+from tentacles.sources.browser_list_models import (
+    BROWSER_LIST_ONLY_FIELDS,
+    BROWSER_LIST_PRESETS,
+    BROWSER_SCRIPT_ONLY_FIELDS,
+    METRIC_KEYS,
+    BrowserClickStep,
+    BrowserItemFormat,
+    BrowserListPresetName,
+    BrowserListSelectors,
+    BrowserMetricsSelectors,
+    BrowserPrefilterOptions,
+    BrowserScrollOptions,
+    clean_author,
+    derive_semantic_title,
+    merge_preset_selectors_dict,
+    parse_metric_count,
+    resolve_list_preset,
+)
 from tentacles.sources.browser_session import page_snapshot, work_tab
+from tentacles.sources.selectors import MultiCssSelector, parse_flexible_datetime, resolve_http_url
 from tentacles.text import truncate
-from tentacles.timeutil import to_utc
+
+__all__ = [
+    'BROWSER_LIST_ONLY_FIELDS',
+    'BROWSER_LIST_PRESETS',
+    'BROWSER_SCRIPT_ONLY_FIELDS',
+    'BrowserClickStep',
+    'BrowserItemFormat',
+    'BrowserListPresetName',
+    'BrowserListScanResult',
+    'BrowserListSelectors',
+    'BrowserMetricsSelectors',
+    'BrowserPrefilterOptions',
+    'BrowserScrollOptions',
+    'accumulate_round_cards',
+    'build_extractor_payload',
+    'clean_author',
+    'derive_semantic_title',
+    'merge_preset_selectors_dict',
+    'parse_metric_count',
+    'resolve_list_preset',
+    'run_browser_list',
+    'scan_browser_list_page',
+]
 
 _INITIAL_SETTLE_MS = 1200
 _TIMEOUT_SAFETY_S = 3.0
-_DERIVED_TITLE_LIMIT = 140
-_METRIC_KEYS: tuple[str, ...] = ('votes', 'likes', 'comments', 'reposts', 'views')
-
-BrowserListPresetName = Literal['reddit', 'x-following']
-
-_METRIC_NUMBER_RE = re.compile(
-    r'(?<![\w@#/])'
-    r'(?:[+-]\s*)?'
-    r'(\d{1,3}(?:,\d{3})+|\d+)'
-    r'(?:\.(\d+))?'
-    r'\s*([kKmMbB]|万|亿)?'
-)
-_METRIC_MULTIPLIERS: dict[str, int] = {
-    'k': 1_000,
-    'm': 1_000_000,
-    'b': 1_000_000_000,
-    '万': 10_000,
-    '亿': 100_000_000,
-}
 
 _JS_EXTRACT_CARDS = """
 (spec) => {
@@ -57,10 +71,9 @@ _JS_EXTRACT_CARDS = """
     return raw.replace(/\\r\\n?/g, '\\n').trim();
   };
 
-  const queryValue = (root, sel, joinAll = false) => {
-    if (!sel) return null;
-    const attr = sel.attribute || sel.default_attribute;
-    if (sel.css === ':scope') {
+  const queryBranch = (root, branch, joinAll = false) => {
+    const attr = branch.attribute || branch.default_attribute;
+    if (branch.css === ':scope') {
       if (attr) {
         if (!root.hasAttribute(attr)) return null;
         const val = root.getAttribute(attr);
@@ -68,22 +81,40 @@ _JS_EXTRACT_CARDS = """
       }
       return cleanText(root);
     }
-    const nodes = Array.from(root.querySelectorAll(sel.css));
+    const nodes = Array.from(root.querySelectorAll(branch.css));
     if (!nodes.length) return null;
     if (attr) {
+      let emptyFallback = null;
       for (const node of nodes) {
         if (node.hasAttribute(attr)) {
           const val = node.getAttribute(attr);
-          return val === null ? null : String(val).trim();
+          const trimmed = val === null ? null : String(val).trim();
+          if (trimmed) return trimmed;
+          if (emptyFallback === null) emptyFallback = '';
         }
       }
-      return null;
+      return emptyFallback;
     }
     if (joinAll) {
       const texts = nodes.map(cleanText).filter(Boolean);
       return texts.length ? texts.join('\\n\\n> ') : '';
     }
-    return cleanText(nodes[0]);
+    for (const node of nodes) {
+      const text = cleanText(node);
+      if (text) return text;
+    }
+    return '';
+  };
+
+  const queryBranches = (root, branches, joinAll = false) => {
+    if (!branches || !branches.length) return null;
+    let emptyFallback = null;
+    for (const branch of branches) {
+      const result = queryBranch(root, branch, joinAll);
+      if (result !== null && result !== '') return result;
+      if (result === '' && emptyFallback === null) emptyFallback = '';
+    }
+    return emptyFallback;
   };
 
   const matchesRule = (root, css) => {
@@ -111,7 +142,7 @@ _JS_EXTRACT_CARDS = """
     }
     const rawText = typeof el.innerText === 'string' && el.innerText ? el.innerText : (el.textContent || '');
     if (skipped) {
-      const adLink = queryValue(el, spec.link);
+      const adLink = queryBranches(el, spec.link);
       cards.push({
         skipped_ad: true,
         ad_key: adLink || rawText.replace(/\\s+/g, ' ').trim().slice(0, 240) || el.outerHTML.slice(0, 240),
@@ -119,8 +150,8 @@ _JS_EXTRACT_CARDS = """
       continue;
     }
     const metrics = {};
-    for (const [key, sel] of Object.entries(spec.metrics)) {
-      metrics[key] = queryValue(el, sel);
+    for (const [key, branches] of Object.entries(spec.metrics)) {
+      metrics[key] = queryBranches(el, branches);
     }
     let hasMedia = false;
     for (const mediaCss of spec.media) {
@@ -131,14 +162,14 @@ _JS_EXTRACT_CARDS = """
     }
     cards.push({
       skipped_ad: false,
-      link: queryValue(el, spec.link),
-      title: queryValue(el, spec.title),
-      content: queryValue(el, spec.content, true),
-      summary: queryValue(el, spec.summary, true),
-      author: queryValue(el, spec.author),
-      date: queryValue(el, spec.date),
-      comments_url: queryValue(el, spec.comments_url),
-      external_url: queryValue(el, spec.external_url),
+      link: queryBranches(el, spec.link),
+      title: queryBranches(el, spec.title),
+      content: queryBranches(el, spec.content, true),
+      summary: queryBranches(el, spec.summary, true),
+      author: queryBranches(el, spec.author),
+      date: queryBranches(el, spec.date),
+      comments_url: queryBranches(el, spec.comments_url),
+      external_url: queryBranches(el, spec.external_url),
       has_media: hasMedia,
       metrics,
     });
@@ -160,477 +191,19 @@ _JS_SCROLL_DOWN = """
 """
 
 
-@dataclass(frozen=True)
-class BrowserSelector:
-    css: str
-    attribute: str | None
-
-    @classmethod
-    def parse(cls, value: str) -> BrowserSelector:
-        cleaned = value.strip()
-        if not cleaned or len(cleaned) > 2000:
-            raise ValueError('selector must contain 1–2000 characters')
-        quote, escaped, bracket_depth, paren_depth, split = '', False, 0, 0, -1
-        for index, char in enumerate(cleaned):
-            if escaped:
-                escaped = False
-            elif char == '\\':
-                escaped = True
-            elif quote:
-                if char == quote:
-                    quote = ''
-            elif char in {'"', "'"}:
-                quote = char
-            elif char == '[':
-                bracket_depth += 1
-            elif char == ']':
-                bracket_depth = max(0, bracket_depth - 1)
-            elif char == '(':
-                paren_depth += 1
-            elif char == ')':
-                paren_depth = max(0, paren_depth - 1)
-            elif char == '@' and bracket_depth == 0 and paren_depth == 0:
-                if split >= 0:
-                    raise ValueError('selector has multiple attribute suffixes')
-                split = index
-        if quote or bracket_depth != 0 or paren_depth != 0:
-            raise ValueError('invalid CSS selector')
-        css, attribute = (
-            (cleaned, None)
-            if split < 0
-            else (cleaned[:split].strip() or ':scope', cleaned[split + 1:].strip())
-        )
-        if attribute is not None and (
-            not attribute or any(not (c.isalnum() or c in '_:-.') for c in attribute)
-        ):
-            raise ValueError('invalid selector attribute suffix')
-        try:
-            soupsieve.compile(css)
-        except soupsieve.SelectorSyntaxError:
-            raise ValueError('invalid CSS selector') from None
-        return cls(css, attribute.lower() if attribute is not None else None)
-
-    def payload(self, *, default_attribute: str | None = None) -> dict[str, str | None]:
-        return {
-            'css': self.css,
-            'attribute': self.attribute,
-            'default_attribute': default_attribute if self.attribute is None else None,
-        }
-
-
-def _validate_selector(value: str | None) -> str | None:
-    if value is not None:
-        BrowserSelector.parse(value)
-    return value
-
-
-def _validate_node_selector(value: str) -> str:
-    parsed = BrowserSelector.parse(value)
-    if parsed.attribute is not None:
-        raise ValueError('selector must select nodes, not an attribute')
-    return parsed.css
-
-
-class BrowserClickStep(BaseModel):
-    """One pre-scan click step (e.g. switching from X 'For you' to 'Following')."""
-
-    model_config = ConfigDict(extra='forbid')
-
-    selector: str
-    has_text: str | list[str] | None = None
-    nth: int | None = Field(default=None, ge=0, le=50)
-    wait_ms: int = Field(default=1500, ge=0, le=30000)
-
-    @field_validator('selector')
-    @classmethod
-    def _selector(cls, value: str) -> str:
-        return _validate_node_selector(value)
-
-    @field_validator('has_text')
-    @classmethod
-    def _has_text(cls, value: str | list[str] | None) -> str | list[str] | None:
-        if value is None:
-            return None
-        if isinstance(value, str):
-            cleaned = value.strip()
-            if not cleaned:
-                raise ValueError('has_text must not be empty')
-            return cleaned
-        cleaned_list = [v.strip() for v in value if isinstance(v, str) and v.strip()]
-        if not cleaned_list:
-            raise ValueError('has_text list must contain at least one non-empty string')
-        return cleaned_list
-
-
-class BrowserScrollOptions(BaseModel):
-    model_config = ConfigDict(extra='forbid')
-
-    max_scrolls: int = Field(default=20, ge=0, le=200)
-    wait_min_ms: int = Field(default=2000, ge=100, le=30000)
-    wait_max_ms: int = Field(default=10000, ge=100, le=60000)
-    idle_rounds: int = Field(default=2, ge=1, le=20)
-
-    @model_validator(mode='after')
-    def _wait_bounds(self) -> BrowserScrollOptions:
-        if self.wait_max_ms < self.wait_min_ms:
-            raise ValueError('wait_max_ms must be greater than or equal to wait_min_ms')
-        return self
-
-
-class BrowserItemFormat(BaseModel):
-    """Presentation options for synthesized `Item.title` / `Item.content`."""
-
-    model_config = ConfigDict(extra='forbid')
-
-    prefix_author_in_title: bool = False
-    prefix_metrics_in_title: bool = False
-    prepend_metadata_in_content: bool = False
-
-
-class BrowserMetricsSelectors(BaseModel):
-    model_config = ConfigDict(extra='forbid')
-
-    votes: str | None = None
-    likes: str | None = None
-    comments: str | None = None
-    reposts: str | None = None
-    views: str | None = None
-
-    @field_validator('votes', 'likes', 'comments', 'reposts', 'views')
-    @classmethod
-    def _selector(cls, value: str | None) -> str | None:
-        return _validate_selector(value)
-
-
-class BrowserListSelectors(BaseModel):
-    """Pure DOM/attribute selectors for `type: browser` + `mode: list`."""
-
-    model_config = ConfigDict(extra='forbid')
-
-    item: str
-    link: str
-    title: str | None = None
-    content: str | None = None
-    summary: str | None = None
-    author: str | None = None
-    date: str | None = None
-    comments_url: str | None = None
-    external_url: str | None = None
-    media: list[str] = Field(default_factory=list)
-    skip_if: list[str] = Field(default_factory=list)
-    require: list[str] = Field(default_factory=list)
-    metrics: BrowserMetricsSelectors = Field(default_factory=BrowserMetricsSelectors)
-
-    @field_validator('item')
-    @classmethod
-    def _item_nodes(cls, value: str) -> str:
-        return _validate_node_selector(value)
-
-    @field_validator('link', 'title', 'content', 'summary', 'author', 'date', 'comments_url', 'external_url')
-    @classmethod
-    def _field_selectors(cls, value: str | None) -> str | None:
-        return _validate_selector(value)
-
-    @field_validator('skip_if', 'require', 'media')
-    @classmethod
-    def _filter_selectors(cls, values: list[str]) -> list[str]:
-        return [_validate_node_selector(value) for value in values]
-
-    @model_validator(mode='after')
-    def _require_text_field(self) -> BrowserListSelectors:
-        if not any((self.title, self.content, self.summary)):
-            raise ValueError('at least one of title, content or summary selector is required')
-        return self
-
-
-class BrowserPrefilterOptions(BaseModel):
-    model_config = ConfigDict(extra='forbid')
-
-    match: Literal['any', 'all'] = 'any'
-    min_votes: int | None = Field(default=None, ge=0)
-    min_likes: int | None = Field(default=None, ge=0)
-    min_comments: int | None = Field(default=None, ge=0)
-    min_reposts: int | None = Field(default=None, ge=0)
-    min_views: int | None = Field(default=None, ge=0)
-    min_text_chars: int = Field(default=0, ge=0, le=10000)
-    min_media_text_chars: int | None = Field(default=None, ge=0, le=10000)
-
-    def passes(self, metrics: dict[str, int], *, text_chars: int, has_media: bool = False) -> bool:
-        min_chars = (
-            self.min_media_text_chars
-            if has_media and self.min_media_text_chars is not None
-            else self.min_text_chars
-        )
-        if min_chars > 0 and text_chars < min_chars:
-            return False
-        thresholds: list[tuple[str, int]] = []
-        for key in _METRIC_KEYS:
-            threshold = getattr(self, f'min_{key}')
-            if threshold is not None:
-                thresholds.append((key, threshold))
-        if not thresholds:
-            return True
-        checks = [metrics.get(key, 0) >= threshold for key, threshold in thresholds]
-        return any(checks) if self.match == 'any' else all(checks)
-
-
-@dataclass(frozen=True)
-class BrowserListPreset:
-    selectors: dict[str, Any]
-    actions: list[dict[str, Any]]
-    format: dict[str, Any]
-
-
-BROWSER_LIST_PRESETS: dict[BrowserListPresetName, BrowserListPreset] = {
-    'reddit': BrowserListPreset(
-        selectors={
-            'item': 'shreddit-post',
-            'skip_if': ['[promoted]'],
-            'link': '@permalink',
-            'title': '@post-title',
-            'content': '[slot="text-body"]',
-            'author': '@author',
-            'date': '@created-timestamp',
-            'comments_url': '@permalink',
-            'external_url': '@content-href',
-            'metrics': {
-                'votes': '@score',
-                'comments': '@comment-count',
-            },
-        },
-        actions=[],
-        format={
-            'prefix_author_in_title': True,
-            'prefix_metrics_in_title': True,
-            'prepend_metadata_in_content': True,
-        },
-    ),
-    'x-following': BrowserListPreset(
-        selectors={
-            'item': 'article[data-testid="tweet"]',
-            'skip_if': ['[data-testid="placementTracking"]'],
-            'require': ['time'],
-            'link': 'a[href*="/status/"]:has(time)@href',
-            'content': '[data-testid="tweetText"]',
-            'summary': '[data-testid="card.wrapper"]',
-            'media': [
-                '[data-testid="tweetPhoto"]',
-                '[data-testid="videoPlayer"]',
-                '[data-testid="card.wrapper"]',
-            ],
-            'author': '[data-testid="User-Name"]',
-            'date': 'time@datetime',
-            'metrics': {
-                'comments': '[data-testid="reply"]@aria-label',
-                'reposts': '[data-testid="retweet"], [data-testid="unretweet"]@aria-label',
-                'likes': '[data-testid="like"], [data-testid="unlike"]@aria-label',
-                'views': 'a[href*="/analytics"]@aria-label',
-            },
-        },
-        actions=[
-            {
-                'selector': '[role="tablist"] [role="tab"]',
-                'has_text': ['正在关注', 'Following', '跟隨中', 'フォロー中'],
-                'nth': 1,
-                'wait_ms': 1800,
-            },
-        ],
-        format={
-            'prefix_author_in_title': True,
-            'prefix_metrics_in_title': True,
-            'prepend_metadata_in_content': True,
-        },
-    ),
-}
-
-
-def resolve_list_preset(
-    preset_name: BrowserListPresetName | None,
-    *,
-    selectors: BrowserListSelectors | None,
-    actions: list[BrowserClickStep] | None,
-    item_format: BrowserItemFormat | None,
-) -> tuple[BrowserListSelectors | None, list[BrowserClickStep], BrowserItemFormat]:
-    """Merge explicit source fields over a named preset when `preset` is configured."""
-    if preset_name is None:
-        return selectors, list(actions or []), item_format or BrowserItemFormat()
-    preset = BROWSER_LIST_PRESETS[preset_name]
-    merged_selectors_dict: dict[str, Any] = dict(preset.selectors)
-    if selectors is not None:
-        override = selectors.model_dump(exclude_unset=True)
-        if 'metrics' in override and isinstance(merged_selectors_dict.get('metrics'), dict):
-            override['metrics'] = {**merged_selectors_dict['metrics'], **override['metrics']}
-        merged_selectors_dict.update(override)
-    resolved_selectors = BrowserListSelectors.model_validate(merged_selectors_dict)
-    resolved_actions = (
-        list(actions)
-        if actions is not None
-        else [BrowserClickStep.model_validate(step) for step in preset.actions]
-    )
-    merged_format = dict(preset.format)
-    if item_format is not None:
-        merged_format.update(item_format.model_dump(exclude_unset=True))
-    return resolved_selectors, resolved_actions, BrowserItemFormat.model_validate(merged_format)
-
-
-def parse_metric_count(raw: str | None) -> int:
-    """Parse localized or compact engagement counts into a non-negative integer."""
-    if not raw:
-        return 0
-    cleaned = raw.replace('\xa0', ' ').replace('\u202f', ' ').strip()
-    if not cleaned:
-        return 0
-    match = _METRIC_NUMBER_RE.search(cleaned)
-    if match is None:
-        return 0
-    whole_raw, frac_raw, unit_raw = match.groups()
-    whole = int(whole_raw.replace(',', ''))
-    if not unit_raw:
-        return whole
-    multiplier = _METRIC_MULTIPLIERS[unit_raw.lower()]
-    if not frac_raw:
-        return whole * multiplier
-    scale = 10 ** len(frac_raw)
-    return (whole * scale + int(frac_raw)) * multiplier // scale
-
-
-def clean_author(raw: str | None) -> str:
-    """Normalize author strings, stripping trailing X-style `· timestamp` suffixes."""
-    if not raw:
-        return ''
-    lines = [re.sub(r'[ \t\xa0]+', ' ', line).strip() for line in raw.splitlines()]
-    lines = [line for line in lines if line]
-    if not lines:
-        return ''
-    if '·' in lines:
-        lines = lines[:lines.index('·')]
-    cleaned_lines: list[str] = []
-    for line in lines:
-        if ' · ' in line and '@' in ' '.join([*cleaned_lines, line]):
-            head = line.split(' · ', 1)[0].strip()
-            if head:
-                cleaned_lines.append(head)
-            break
-        cleaned_lines.append(line)
-    if len(cleaned_lines) >= 2 and cleaned_lines[1].startswith('@') and not cleaned_lines[0].startswith('@'):
-        return f'{cleaned_lines[0]} ({cleaned_lines[1]})'
-    return ' '.join(cleaned_lines).strip()
-
-
-def derive_title(
-    explicit_title: str | None,
-    content: str,
-    summary: str,
-    *,
-    author: str,
-    url: str,
-    metrics: Mapping[str, int] | None = None,
-    prefix_author: bool = False,
-    prefix_metrics: bool = False,
-) -> str:
-    """Use explicit title when present, otherwise derive from content/summary or URL.
-
-    When `prefix_author` and/or `prefix_metrics` are enabled, prefixes are joined
-    with `" | "`, e.g. `Author | likes=100 comments=8 reposts=12 | Actual Title`.
-    """
-    base_title = ''
-    if explicit_title and explicit_title.strip():
-        base_title = truncate(re.sub(r'\s+', ' ', explicit_title).strip(), 1000)
-    else:
-        for text in (content, summary):
-            normalized = re.sub(r'[ \t\xa0]*\n[ \t\xa0]*([@#][\w]+)[ \t\xa0]*\n[ \t\xa0]*', r' \1 ', text)
-            normalized = re.sub(r'[ \t\xa0]*\n[ \t\xa0]*(?=[@#])', ' ', normalized)
-            for line in normalized.splitlines():
-                cleaned = re.sub(r'\s+', ' ', line).strip()
-                if cleaned:
-                    base_title = truncate(cleaned, _DERIVED_TITLE_LIMIT)
-                    break
-            if base_title:
-                break
-    if not base_title:
-        base_title = truncate(url, _DERIVED_TITLE_LIMIT)
-
-    segments: list[str] = []
-    if prefix_author and author:
-        segments.append(author)
-    if prefix_metrics and metrics:
-        metric_str = ' '.join(f'{key}={metrics[key]}' for key in _METRIC_KEYS if key in metrics)
-        if metric_str:
-            segments.append(metric_str)
-    segments.append(base_title)
-    return truncate(' | '.join(segments), 1000)
-
-
-def format_metadata_header(
-    *,
-    author: str,
-    published: datetime | None,
-    metrics: Mapping[str, int],
-) -> str:
-    """Compact factual header so downstream LLM stages see author, UTC timestamp and metrics."""
-    parts: list[str] = []
-    if author:
-        parts.append(f'Author: {author}')
-    if published is not None:
-        parts.append(f'Published: {published.strftime("%Y-%m-%d %H:%M UTC")}')
-    metric_parts = [f'{key}={metrics[key]}' for key in _METRIC_KEYS if key in metrics]
-    if metric_parts:
-        parts.append('Metrics: ' + ', '.join(metric_parts))
-    return '[' + ' | '.join(parts) + ']' if parts else ''
-
-
-def resolve_http_url(base_url: str, value: str | None) -> str:
-    if not value or not value.strip():
-        return ''
-    try:
-        url = httpx.URL(urljoin(base_url, value.strip()))
-    except (ValueError, httpx.InvalidURL):
-        return ''
-    if url.scheme not in {'http', 'https'} or not url.host or url.userinfo:
-        return ''
-    return normalize_url(str(url))
-
-
-def parse_published(value: str | None, ctx: FetchContext) -> datetime | None:
-    if not value:
-        return None
-    cleaned = value.strip()
-    if not cleaned or len(cleaned) > 200:
-        return None
-    try:
-        return to_utc(datetime.fromisoformat(cleaned.replace('Z', '+00:00')))
-    except ValueError:
-        pass
-    try:
-        settings: Any = {
-            'RELATIVE_BASE': to_utc(ctx.now).astimezone(ZoneInfo(ctx.timezone)),
-            'TIMEZONE': ctx.timezone,
-            'TO_TIMEZONE': 'UTC',
-            'RETURN_AS_TIMEZONE_AWARE': True,
-            'PREFER_DATES_FROM': 'past',
-        }
-        parsed = dateparser.parse(cleaned, settings=settings)
-        if parsed is None:
-            matches = search_dates(cleaned, settings=settings, strategy='ngram')
-            parsed = matches[0][1] if matches else None
-    except (ValueError, OverflowError):
-        return None
-    return to_utc(parsed) if parsed is not None else None
-
-
 def build_extractor_payload(selectors: BrowserListSelectors) -> dict[str, Any]:
-    def optional(raw: str | None, *, default_attribute: str | None = None) -> dict[str, str | None] | None:
-        return BrowserSelector.parse(raw).payload(default_attribute=default_attribute) if raw is not None else None
+    def optional(raw: str | None, *, default_attribute: str | None = None) -> list[dict[str, str | None]] | None:
+        return MultiCssSelector.parse(raw).payload(default_attribute=default_attribute) if raw is not None else None
 
-    metrics_payload: dict[str, dict[str, str | None]] = {}
-    for key in _METRIC_KEYS:
+    metrics_payload: dict[str, list[dict[str, str | None]]] = {}
+    for key in METRIC_KEYS:
         sel = getattr(selectors.metrics, key)
         if sel is not None:
-            metrics_payload[key] = BrowserSelector.parse(sel).payload()
+            metrics_payload[key] = MultiCssSelector.parse(sel).payload()
 
     return {
         'item': selectors.item,
-        'link': BrowserSelector.parse(selectors.link).payload(default_attribute='href'),
+        'link': MultiCssSelector.parse(selectors.link).payload(default_attribute='href'),
         'title': optional(selectors.title),
         'content': optional(selectors.content),
         'summary': optional(selectors.summary),
@@ -648,11 +221,51 @@ def build_extractor_payload(selectors: BrowserListSelectors) -> dict[str, Any]:
 @dataclass
 class BrowserListScanResult:
     items: list[Item]
+    observations: list[ItemObservation]
     stats: dict[str, Any]
     snapshot: dict[str, Any]
 
 
-def accumulate_round_cards(
+def _as_optional_str(value: Any) -> str | None:
+    return value if isinstance(value, str) else None
+
+
+def _build_list_observation(
+    item: Item,
+    *,
+    selectors: BrowserListSelectors,
+    observed_title: str | None,
+    observed_content: str | None,
+    observed_summary: str | None,
+    observed_author: str | None,
+    observed_date: str | None,
+) -> ItemObservation:
+    """Construct `ItemObservation` preserving selector & DOM presence (`processing-seams.md`)."""
+    fields: dict[str, Any] = {
+        'stable_external_id': True,
+        'url': item.url,
+        'page_url': item.page_url,
+        'meta': item.meta,
+    }
+    if selectors.title is not None:
+        if observed_title is not None:
+            fields['title'] = item.title
+    elif observed_content is not None or observed_summary is not None:
+        fields['title'] = item.title
+    if selectors.content is not None and observed_content is not None:
+        fields['content'] = item.content
+    if (selectors.summary is not None and observed_summary is not None) or (
+        selectors.content is not None and observed_content is not None
+    ):
+        fields['summary'] = item.summary
+    if selectors.author is not None and observed_author is not None:
+        fields['author'] = item.author or None
+    if selectors.date is not None and observed_date is not None and (item.published is not None or not observed_date.strip()):
+        fields['published'] = item.published
+    return ItemObservation(**fields)
+
+
+async def accumulate_round_cards(
     raw_batch: Mapping[str, Any],
     *,
     source_id: str,
@@ -661,20 +274,25 @@ def accumulate_round_cards(
     item_format: BrowserItemFormat,
     prefilter: BrowserPrefilterOptions | None,
     max_items: int,
+    update_existing: bool,
     ctx: FetchContext,
     seen_keys: set[str],
     seen_ads: set[str],
     accepted_items: list[Item],
+    accepted_observations: list[ItemObservation],
     counters: dict[str, int],
 ) -> int:
-    """Process one round's evaluated cards, mutating `seen_keys`, `seen_ads`, `accepted_items` and `counters`."""
+    """Process one round's evaluated cards, skipping already-stored links before `max_items` cap."""
     base_url = str(raw_batch.get('base_url') or page_url)
     cards = raw_batch.get('cards')
     if not isinstance(cards, list):
         return 0
     configured_metric_keys = [
-        key for key in _METRIC_KEYS if getattr(selectors.metrics, key) is not None
+        key for key in METRIC_KEYS if getattr(selectors.metrics, key) is not None
     ]
+    display_fmt = item_format.meta_dict()
+
+    pending_cards: list[tuple[str, Mapping[str, Any]]] = []
     new_on_page = 0
     for idx, card in enumerate(cards):
         if not isinstance(card, Mapping):
@@ -695,11 +313,30 @@ def accumulate_round_cards(
         seen_keys.add(url)
         new_on_page += 1
         counters['dom_scanned'] += 1
+        pending_cards.append((url, card))
 
-        explicit_title = _as_optional_str(card.get('title'))
-        raw_content = (_as_optional_str(card.get('content')) or '').strip()
-        raw_summary = (_as_optional_str(card.get('summary')) or '').strip()
-        author = clean_author(_as_optional_str(card.get('author')))
+    if not pending_cards:
+        return new_on_page
+
+    # Classify candidate URLs against Store now so known/skipped items do NOT consume `max_items`!
+    candidate_urls = [url for url, _ in pending_cards]
+    link_dispositions: dict[str, LinkDisposition] = {}
+    if update_existing and ctx.classify_links is not None:
+        link_dispositions = await run_store_call(ctx.classify_links, candidate_urls)
+    elif ctx.seen_links is not None:
+        known = await run_store_call(ctx.seen_links, candidate_urls)
+        link_dispositions = {url: 'skip' for url in known}
+
+    for url, card in pending_cards:
+        observed_title = _as_optional_str(card.get('title'))
+        observed_content = _as_optional_str(card.get('content'))
+        observed_summary = _as_optional_str(card.get('summary'))
+        observed_author = _as_optional_str(card.get('author'))
+        observed_date = _as_optional_str(card.get('date'))
+
+        raw_content = (observed_content or '').strip()
+        raw_summary = (observed_summary or '').strip()
+        author = clean_author(observed_author)
 
         raw_metrics = card.get('metrics')
         parsed_metrics: dict[str, int] = {}
@@ -708,7 +345,7 @@ def accumulate_round_cards(
                 parsed_metrics[key] = parse_metric_count(_as_optional_str(raw_metrics.get(key)))
 
         has_media = bool(card.get('has_media'))
-        combined_texts = [t for t in (raw_content, raw_summary, (explicit_title or '').strip()) if t]
+        combined_texts = [t for t in (raw_content, raw_summary, (observed_title or '').strip()) if t]
         body_for_length = '\n'.join(combined_texts)
         if prefilter is not None and not prefilter.passes(
             parsed_metrics,
@@ -719,37 +356,31 @@ def accumulate_round_cards(
             continue
 
         counters['matched'] += 1
+        disposition = link_dispositions.get(url, 'new')
+        if disposition == 'skip':
+            counters['skipped_known'] += 1
+            continue
         if len(accepted_items) >= max_items:
             continue
+        if disposition == 'refresh':
+            counters['refresh_links'] += 1
 
-        title = derive_title(
-            explicit_title,
-            raw_content,
-            raw_summary,
-            author=author,
-            url=url,
-            metrics=parsed_metrics,
-            prefix_author=item_format.prefix_author_in_title,
-            prefix_metrics=item_format.prefix_metrics_in_title,
-        )
-        published = parse_published(_as_optional_str(card.get('date')), ctx)
+        title = derive_semantic_title(observed_title, raw_content, raw_summary, url=url)
+        published = parse_flexible_datetime(observed_date, ctx)
         if raw_content and raw_summary and raw_summary not in raw_content:
             merged_body = f'{raw_content}\n\n[Card] {raw_summary}'
         else:
             merged_body = raw_content or truncate(raw_summary, 2000) or title
         content = merged_body
         summary = truncate(merged_body, 2000)
-        if item_format.prepend_metadata_in_content:
-            header = format_metadata_header(author=author, published=published, metrics=parsed_metrics)
-            if header:
-                content = f'{header}\n{content}' if content else header
-                summary = truncate(f'{header} {summary}' if summary else header, 2000)
 
         meta: dict[str, Any] = {
             'browser_mode': 'list',
             'browser_entry_url': page_url,
             'metrics': dict(parsed_metrics),
         }
+        if display_fmt is not None:
+            meta['display_format'] = dict(display_fmt)
         if has_media:
             meta['has_media'] = True
         comments_url = resolve_http_url(base_url, _as_optional_str(card.get('comments_url')))
@@ -759,7 +390,7 @@ def accumulate_round_cards(
         if external_url and external_url != url:
             meta['external_url'] = external_url
 
-        accepted_items.append(Item(
+        item = Item(
             source_id=source_id,
             kind='browser',
             external_id=url,
@@ -771,12 +402,19 @@ def accumulate_round_cards(
             content=content,
             published=published,
             meta=meta,
-        ))
+        )
+        accepted_items.append(item)
+        if update_existing:
+            accepted_observations.append(_build_list_observation(
+                item,
+                selectors=selectors,
+                observed_title=observed_title,
+                observed_content=observed_content,
+                observed_summary=observed_summary,
+                observed_author=observed_author,
+                observed_date=observed_date,
+            ))
     return new_on_page
-
-
-def _as_optional_str(value: Any) -> str | None:
-    return value if isinstance(value, str) else None
 
 
 async def _run_pre_scan_actions(
@@ -834,8 +472,10 @@ async def scan_browser_list_page(
     scroll: BrowserScrollOptions | None = None,
     prefilter: BrowserPrefilterOptions | None = None,
     max_items: int,
+    update_existing: bool = False,
     timeout: float,
     ctx: FetchContext,
+    record_error: Callable[..., None] | None = None,
     initial_settle_ms: int = _INITIAL_SETTLE_MS,
 ) -> BrowserListScanResult:
     """Drive `page` through navigation, pre-scan actions, selector wait, and scroll rounds."""
@@ -851,6 +491,14 @@ async def scan_browser_list_page(
             raise PlaywrightTimeoutError('browser list timeout budget exhausted')
         return rem
 
+    def emit_error(*, phase: str, error_code: str, message: str, snapshot: dict[str, Any],
+                   exc: BaseException | None = None) -> None:
+        if record_error is not None:
+            record_error(phase=phase, error_code=error_code, message=message, snapshot=snapshot, exc=exc)
+        else:
+            _default_record_error(ctx, source_id=source_id, page_url=page_url, phase=phase,
+                                  error_code=error_code, message=message, snapshot=snapshot, exc=exc)
+
     await page.bring_to_front()
     try:
         await page.goto(page_url, wait_until='domcontentloaded', timeout=remaining_timeout_ms())
@@ -859,10 +507,7 @@ async def scan_browser_list_page(
         await page.wait_for_selector(selectors.item, timeout=remaining_timeout_ms())
     except (PlaywrightTimeoutError, TimeoutError, asyncio.TimeoutError) as exc:
         snap = await page_snapshot(page)
-        _record_list_error(
-            ctx,
-            source_id=source_id,
-            page_url=page_url,
+        emit_error(
             phase='browser_replay',
             error_code='playwright_selector_timeout',
             message=f'browser list timed out waiting for {selectors.item!r} ({type(exc).__name__})',
@@ -880,6 +525,7 @@ async def scan_browser_list_page(
     seen_keys: set[str] = set()
     seen_ads: set[str] = set()
     accepted_items: list[Item] = []
+    accepted_observations: list[ItemObservation] = []
     counters: dict[str, int] = {
         'dom_scanned': 0,
         'skipped_ads': 0,
@@ -887,16 +533,16 @@ async def scan_browser_list_page(
         'matched': 0,
         'mounted_non_ad_seen': 0,
         'missing_link': 0,
+        'skipped_known': 0,
+        'refresh_links': 0,
     }
     scroll_rounds = 0
     idle_streak = 0
-    stalled_bottom_streak = 0
-    prev_scroll_y = -1
     stop_reason: Literal['max_scrolls', 'no_new_items', 'max_items', 'timeout_budget'] = 'max_scrolls'
 
     for round_idx in range(resolved_scroll.max_scrolls + 1):
         raw_batch = await page.evaluate(_JS_EXTRACT_CARDS, payload)
-        new_on_page = accumulate_round_cards(
+        new_on_page = await accumulate_round_cards(
             raw_batch,
             source_id=source_id,
             page_url=page_url,
@@ -904,36 +550,23 @@ async def scan_browser_list_page(
             item_format=resolved_format,
             prefilter=prefilter,
             max_items=max_items,
+            update_existing=update_existing,
             ctx=ctx,
             seen_keys=seen_keys,
             seen_ads=seen_ads,
             accepted_items=accepted_items,
+            accepted_observations=accepted_observations,
             counters=counters,
-        )
-        pos = await page.evaluate(
-            "({y: Math.floor(window.scrollY), h: Math.floor(window.innerHeight), sh: Math.floor(document.documentElement.scrollHeight)})"
-        )
-        cur_y = int(pos.get('y', 0)) if isinstance(pos, Mapping) else 0
-        at_bottom = (
-            bool(cur_y + int(pos.get('h', 0)) >= int(pos.get('sh', 0)) - 200)
-            if isinstance(pos, Mapping)
-            else True
         )
 
         if round_idx > 0:
             if new_on_page > 0:
                 idle_streak = 0
-                stalled_bottom_streak = 0
-            elif at_bottom or cur_y <= prev_scroll_y:
-                idle_streak += 1
             else:
-                stalled_bottom_streak += 1
-                if stalled_bottom_streak >= 12:
-                    idle_streak += 1
+                idle_streak += 1
             if idle_streak >= resolved_scroll.idle_rounds:
                 stop_reason = 'no_new_items'
                 break
-        prev_scroll_y = cur_y
 
         if len(accepted_items) >= max_items:
             stop_reason = 'max_items'
@@ -953,11 +586,10 @@ async def scan_browser_list_page(
         await page.wait_for_timeout(wait_ms)
 
     snap = await page_snapshot(page)
-    if counters['dom_scanned'] == 0 and counters['skipped_ads'] == 0:
-        _record_list_error(
-            ctx,
-            source_id=source_id,
-            page_url=page_url,
+    # Fail with `selector_no_match` when non-ad cards were mounted on screen yet zero yielded usable links
+    # (even if some ads were skipped!), OR when nothing was extracted and no ads existed either.
+    if counters['dom_scanned'] == 0 and (counters['mounted_non_ad_seen'] > 0 or counters['skipped_ads'] == 0):
+        emit_error(
             phase='parse_entry',
             error_code='selector_no_match',
             message='browser list selectors extracted zero items with usable links',
@@ -977,9 +609,17 @@ async def scan_browser_list_page(
         'skipped_ads': counters['skipped_ads'],
         'filtered_out': counters['filtered_out'],
         'matched': counters['matched'],
+        'skipped_known': counters['skipped_known'],
         'stop_reason': stop_reason,
     }
-    return BrowserListScanResult(items=accepted_items[:max_items], stats=stats, snapshot=snap)
+    if update_existing:
+        stats['refresh_links'] = counters['refresh_links']
+    return BrowserListScanResult(
+        items=accepted_items[:max_items],
+        observations=accepted_observations[:max_items],
+        stats=stats,
+        snapshot=snap,
+    )
 
 
 async def run_browser_list(
@@ -994,10 +634,20 @@ async def run_browser_list(
     scroll: BrowserScrollOptions | None = None,
     prefilter: BrowserPrefilterOptions | None = None,
     max_items: int,
+    update_existing: bool = False,
     timeout: float,
     ctx: FetchContext,
+    record_error: Callable[..., None] | None = None,
 ) -> BrowserListScanResult:
     """Open one isolated work tab in headed Chrome and run `scan_browser_list_page` under `timeout`."""
+    def emit_error(*, phase: str, error_code: str, message: str, snapshot: dict[str, Any],
+                   exc: BaseException | None = None) -> None:
+        if record_error is not None:
+            record_error(phase=phase, error_code=error_code, message=message, snapshot=snapshot, exc=exc)
+        else:
+            _default_record_error(ctx, source_id=source_id, page_url=page_url, phase=phase,
+                                  error_code=error_code, message=message, snapshot=snapshot, exc=exc)
+
     async with work_tab(config, chrome_profile=chrome_profile) as page:
         try:
             return await asyncio.wait_for(
@@ -1011,17 +661,16 @@ async def run_browser_list(
                     scroll=scroll,
                     prefilter=prefilter,
                     max_items=max_items,
+                    update_existing=update_existing,
                     timeout=timeout,
                     ctx=ctx,
+                    record_error=record_error,
                 ),
                 timeout=timeout + _TIMEOUT_SAFETY_S,
             )
         except asyncio.TimeoutError as exc:
             snap = await page_snapshot(page)
-            _record_list_error(
-                ctx,
-                source_id=source_id,
-                page_url=page_url,
+            emit_error(
                 phase='browser_replay',
                 error_code='playwright_selector_timeout',
                 message=f'browser list exceeded overall timeout {timeout}s',
@@ -1031,7 +680,7 @@ async def run_browser_list(
             raise DiagnosedError(f'browser list exceeded overall timeout {timeout}s') from None
 
 
-def _record_list_error(
+def _default_record_error(
     ctx: FetchContext,
     *,
     source_id: str,

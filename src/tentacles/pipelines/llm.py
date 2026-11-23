@@ -8,7 +8,7 @@ from typing import Any
 
 from tentacles.llm.json import extract_json
 from tentacles.llm.registry import ModelRegistry
-from tentacles.models import Item
+from tentacles.models import Item, format_item_summary, format_item_title
 from tentacles.personas.models import PersonaView
 from tentacles.personas.render import render_persona
 from tentacles.pipelines.config import SemanticSpec, StageSpec
@@ -131,8 +131,8 @@ async def score_llm(items: list[Item], persona: PersonaView, stage: StageSpec, i
 
     async def ask(chunk: list[tuple[int, Item]]) -> list[StageScore]:
         payload = {'persona': rendered, 'tags': labels,
-                   'items': [{'id': number, 'source': item.source_id, 'title': item.title,
-                              'summary': item.summary[:stage.summary_chars]}
+                   'items': [{'id': number, 'source': item.source_id, 'title': format_item_title(item),
+                              'summary': format_item_summary(item)[:stage.summary_chars]}
                              for number, item in chunk]}
         result = await models.chat(name).complete(
             [{'role': 'user', 'content': json.dumps(payload, ensure_ascii=False)}], system=_SYSTEM,

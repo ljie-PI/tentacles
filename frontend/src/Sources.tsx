@@ -55,7 +55,7 @@ type SourceDraft = {
 
 function emptyDraft(): SourceDraft {
   return {
-    id: '', type: 'rss', name: '', schedule: '4h', enabled: true, updateExisting: false,
+    id: '', type: 'rss', name: '', schedule: '1h', enabled: true, updateExisting: false,
     url: '', maxAgeDays: '', timeout: '',
     mode: 'list', browserMode: 'script', browserPreset: 'reddit', browserMaxScrolls: '20',
     selItem: 'article', selTitle: 'h2', selLink: 'a@href', selSummary: '', selDate: '',
@@ -68,7 +68,7 @@ function emptyDraft(): SourceDraft {
   }
 }
 
-const selectorStr = (selectors: SourceConfig['selectors'], key: string): string => {
+const selectorStr = (selectors: SourceConfig['selectors'], key: 'item' | 'title' | 'link' | 'summary' | 'date'): string => {
   const val = selectors?.[key]
   return typeof val === 'string' ? val : ''
 }
@@ -140,10 +140,12 @@ function applyNonImapFields(
   target: SourceCreate | SourceUpdate,
   draft: SourceDraft,
   type: CreatableSourceType,
-  includeNullTimeout: boolean,
+  mode: 'create' | 'update',
+  existingConfig?: SourceConfig,
 ): void {
+  const isUpdate = mode === 'update'
   const timeout = optionalNumber(draft.timeout)
-  if (timeout !== null || includeNullTimeout) target.timeout = timeout
+  if (timeout !== null || isUpdate) target.timeout = timeout
   if (type === 'rss') {
     target.url = draft.url.trim()
     target.max_age_days = optionalInt(draft.maxAgeDays)
@@ -177,9 +179,23 @@ function applyNonImapFields(
     target.max_items = optionalInt(draft.maxItems)
     if (draft.browserMode === 'list') {
       target.mode = 'list'
-      if (draft.browserPreset) target.preset = draft.browserPreset
+      if (draft.browserPreset) {
+        target.preset = draft.browserPreset
+      } else if (isUpdate) {
+        target.preset = null
+      }
       const maxScrolls = optionalInt(draft.browserMaxScrolls)
-      if (maxScrolls !== null && !includeNullTimeout) {
+      if (isUpdate) {
+        if (maxScrolls !== null) {
+          target.scroll = { ...(existingConfig?.scroll || {}), max_scrolls: maxScrolls }
+        } else if (existingConfig?.scroll) {
+          const rest = { ...existingConfig.scroll, max_scrolls: null }
+          const hasAny = Object.values(rest).some(val => val !== null && val !== undefined)
+          target.scroll = hasAny ? rest : null
+        } else {
+          target.scroll = null
+        }
+      } else if (maxScrolls !== null) {
         target.scroll = { max_scrolls: maxScrolls }
       }
     } else {
@@ -201,7 +217,7 @@ function toCreatePayload(draft: SourceDraft): SourceCreate {
     update_existing: type === 'web' && draft.mode === 'page' ? false : draft.updateExisting,
     pipelines: draft.pipelines,
   }
-  applyNonImapFields(base, draft, type, false)
+  applyNonImapFields(base, draft, type, 'create')
   return base
 }
 
@@ -212,21 +228,9 @@ function toUpdatePayload(draft: SourceDraft, existingConfig?: SourceConfig): Sou
     enabled: draft.enabled,
     pipelines: draft.pipelines,
   }
-  if (draft.type === 'browser' && draft.browserMode === 'list') {
-    patch.update_existing = draft.updateExisting
-    patch.timeout = optionalNumber(draft.timeout)
-    patch.page_url = draft.pageUrl.trim()
-    patch.chrome_profile = draft.chromeProfile.trim() || null
-    patch.max_items = optionalInt(draft.maxItems)
-    patch.mode = 'list'
-    if (draft.browserPreset) patch.preset = draft.browserPreset
-    const maxScrolls = optionalInt(draft.browserMaxScrolls)
-    if (maxScrolls !== null) {
-      patch.scroll = { ...(existingConfig?.scroll || {}), max_scrolls: maxScrolls }
-    }
-  } else if (draft.type !== 'imap') {
+  if (draft.type !== 'imap') {
     patch.update_existing = draft.type === 'web' && draft.mode === 'page' ? false : draft.updateExisting
-    applyNonImapFields(patch, draft, draft.type, true)
+    applyNonImapFields(patch, draft, draft.type, 'update', existingConfig)
   } else {
     patch.timeout = optionalNumber(draft.timeout)
     patch.folders = parseLines(draft.folders)
@@ -265,7 +269,9 @@ function SourceForm({
       pipelines: has ? draft.pipelines.filter(id => id !== pid) : [...draft.pipelines, pid],
     })
   }
-  const timeoutPlaceholder = draft.type === 'browser' ? '默认 60' : '默认 30'
+  const timeoutPlaceholder = draft.type === 'browser'
+    ? (draft.browserMode === 'list' ? '默认 180' : '默认 60')
+    : '默认 30'
 
   return (
     <form className="source-form" onSubmit={event => { event.preventDefault(); onSubmit() }}>

@@ -48,12 +48,14 @@ tentacles --json runs show <RUN_ID>
 
 ## 2. Browser Sources (`type: browser`)
 
-Browser sources require a **headed** Chrome window via CDP (`headless` is forbidden).
+Browser sources require a **headed** Chrome window via CDP (`headless` is forbidden) and support two modes:
 
 - If `sources fetch <ID>` fails with CDP/profile errors, check `errors show` or start Chrome with the exact `--remote-debugging-port` and `--profile-directory` printed in the error (or enable `browser.auto_launch: true` with `chrome_user_data_dir`).
-- On cold start (missing `<scripts_dir>/<id>.py`) or `sources distill <ID>`, `pi --mode rpc` explores, records `data/trajectories/<id>/<run_id>.jsonl`, distills, passes AST gate + live trial tab, installs the script, and opens/updates a PR per `browser.pr`.
-- On replay failure (exception, timeout, or 0 items), one `pi` self-healing session runs (up to 2 candidates). If exhausted (`pi_heal_exhausted`), old script/meta remain untouched and the run fails.
-- If `stats.pr_status == "error"` (`git_or_pr_failed`), fix `gh auth status` / git remote and re-run `sources distill <ID>` (idempotent).
+- **`mode: script` (default)**: replays `<scripts_dir>/<id>.py`.
+  - On cold start (missing `<scripts_dir>/<id>.py`) or `sources distill <ID>`, `pi --mode rpc` explores, records `data/trajectories/<id>/<run_id>.jsonl`, distills, passes AST gate + live trial tab, installs the script, and opens/updates a PR per `browser.pr`.
+  - On replay failure (exception, timeout, or 0 items), one `pi` self-healing session runs (up to 2 candidates). If exhausted (`pi_heal_exhausted`), old script/meta remain untouched and the run fails.
+  - If `stats.pr_status == "error"` (`git_or_pr_failed`), fix `gh auth status` / git remote and re-run `sources distill <ID>` (idempotent).
+- **`mode: list` (infinite-scroll CSS selectors & engagement prefilter)**: zero LLM / `pi` cost (`sources distill` is rejected with `invalid`). Uses `preset` (`reddit` \| `x-following`) or explicit `selectors`, optional pre-scan `actions`, `scroll`, `prefilter`, and `format`. A round where all cards are filtered out by `prefilter` or already stored returns 0 new items cleanly without error.
 
 ## 3. Six-step failure diagnostics (`run_errors`)
 

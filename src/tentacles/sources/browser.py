@@ -22,7 +22,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any, ClassVar, Literal, Type, cast
-from urllib.parse import urljoin
+from tentacles.sources.selectors import resolve_http_url
 
 import httpx
 from playwright.async_api import TimeoutError as PlaywrightTimeoutError
@@ -42,7 +42,8 @@ from tentacles.sources.browser_contract import (
 from tentacles.sources.browser_heal import HealFailed, HealRequest, heal
 from tentacles.sources.browser_list import (
     BrowserClickStep, BrowserItemFormat, BrowserListPresetName, BrowserListSelectors,
-    BrowserPrefilterOptions, BrowserScrollOptions, resolve_list_preset, run_browser_list,
+    BrowserPrefilterOptions, BrowserScrollOptions, merge_preset_selectors_dict,
+    resolve_list_preset, run_browser_list,
 )
 from tentacles.sources.browser_script import load_script
 from tentacles.sources.browser_session import page_snapshot, work_tab
@@ -77,7 +78,7 @@ class BrowserOptions(BaseModel):
     on_detail_error: Literal['fail_batch', 'record_and_skip'] = 'record_and_skip'
     script_path: str | None = None
     max_items: int = Field(default=25, ge=1, le=500)
-    timeout: float = Field(default=60, gt=0, allow_inf_nan=False)
+    timeout: float | None = Field(default=None, gt=0, allow_inf_nan=False)
     actions: list[BrowserClickStep] | None = None
     scroll: BrowserScrollOptions | None = None
     selectors: BrowserListSelectors | None = None
@@ -89,6 +90,12 @@ class BrowserOptions(BaseModel):
 
     _headed_only = field_validator('headless')(reject_headless)
 
+    @property
+    def effective_timeout(self) -> float:
+        if self.timeout is not None:
+            return self.timeout
+        return 180.0 if self.mode == 'list' else 60.0
+
     @model_validator(mode='before')
     @classmethod
     def _apply_preset_selectors(cls, data: Any) -> Any:
@@ -97,12 +104,10 @@ class BrowserOptions(BaseModel):
         preset = data.get('preset')
         raw_selectors = data.get('selectors')
         if isinstance(preset, str) and preset in ('reddit', 'x-following') and isinstance(raw_selectors, Mapping):
-            from tentacles.sources.browser_list import BROWSER_LIST_PRESETS
-            base = dict(BROWSER_LIST_PRESETS[cast(BrowserListPresetName, preset)].selectors)
-            override = dict(raw_selectors)
-            if isinstance(override.get('metrics'), Mapping) and isinstance(base.get('metrics'), Mapping):
-                override['metrics'] = {**base['metrics'], **override['metrics']}
-            return {**data, 'selectors': {**base, **override}}
+            return {
+                **data,
+                'selectors': merge_preset_selectors_dict(cast(BrowserListPresetName, preset), raw_selectors),
+            }
         return data
 
     @field_validator('page_url')
@@ -170,7 +175,7 @@ class BrowserSource(Source):
         config = cast(AppConfig, ctx.config)
         request = DistillRequest(
             source_id=self.spec.id, run_id=ctx.run_id, page_url=opts.page_url, task=opts.task,
-            max_items=opts.max_items, timeout=opts.timeout, chrome_profile=opts.chrome_profile,
+            max_items=opts.max_items, timeout=opts.effective_timeout, chrome_profile=opts.chrome_profile,
             script_path=script, pi=_pi_spec(config, opts))
         stats: dict[str, Any] = {'browser_mode': 'distill'}
         try:
@@ -205,9 +210,10 @@ class BrowserSource(Source):
         """Run the script against one isolated work tab, keeping its failure site."""
         async with work_tab(config, chrome_profile=opts.chrome_profile) as page:
             try:
+                effective_timeout = opts.effective_timeout
                 output = await asyncio.wait_for(
                     extract(page, page_url=opts.page_url, max_items=opts.max_items,
-                            timeout_ms=int(opts.timeout * 1000)), timeout=opts.timeout)
+                            timeout_ms=int(effective_timeout * 1000)), timeout=effective_timeout)
             except (PlaywrightTimeoutError, asyncio.TimeoutError) as exc:
                 raise _ReplayBroken(_ReplayFailure(exc, await page_snapshot(page), timeout=True)) from None
             except Exception as exc:
@@ -250,6 +256,20 @@ class BrowserSource(Source):
         )
         if selectors is None:
             raise ConfigError('browser list mode requires selectors or preset')
+
+        def record_list_err(*, phase: str, error_code: str, message: str,
+                            snapshot: dict[str, Any], exc: BaseException | None = None) -> None:
+            self._record(
+                ctx,
+                opts,
+                phase=phase,
+                error_code=error_code,
+                message=message,
+                exc=exc,
+                snapshot={'browser_mode': 'list', **snapshot},
+                target_url=_failed_target(opts, snapshot),
+            )
+
         try:
             scan = await run_browser_list(
                 config,
@@ -262,36 +282,30 @@ class BrowserSource(Source):
                 scroll=opts.scroll,
                 prefilter=opts.prefilter,
                 max_items=opts.max_items,
-                timeout=opts.timeout,
+                update_existing=self.spec.update_existing,
+                timeout=opts.effective_timeout,
                 ctx=ctx,
+                record_error=record_list_err,
             )
         except (DiagnosedError, ConfigError):
             raise
         except Exception as exc:
-            self._record(
-                ctx,
-                opts,
+            record_list_err(
                 phase='browser_replay',
                 error_code='unexpected_exception',
                 message=f'browser list failed ({type(exc).__name__})',
                 exc=exc,
-                snapshot={'browser_mode': 'list'},
-                target_url=opts.page_url,
+                snapshot={},
             )
             raise DiagnosedError(f'browser list failed ({type(exc).__name__})') from None
 
-        kept, links = await self._classify(scan.items, ctx)
         stats: dict[str, Any] = {
             **scan.stats,
             'entries': len(scan.items),
             'duplicates': 0,
-            'skipped_known': len(scan.items) - len(kept),
         }
-        if self.spec.update_existing:
-            stats['refresh_links'] = sum(1 for item in kept if links.get(item.url) == 'refresh')
-        observations = [_observation(item) for item in kept] if self.spec.update_existing else []
-        next_cursor = {'page_url': opts.page_url, 'mode': 'list', 'items': len(kept)}
-        return FetchResult(kept, next_cursor, stats, observations)
+        next_cursor = {'page_url': opts.page_url, 'mode': 'list', 'items': len(scan.items)}
+        return FetchResult(scan.items, next_cursor, stats, scan.observations)
 
     async def _classify(self, items: list[Item], ctx: FetchContext) -> tuple[list[Item], dict[str, LinkDisposition]]:
         """Skip entries this source already holds unless an in-place update is allowed."""
@@ -311,7 +325,7 @@ class BrowserSource(Source):
         stats: dict[str, Any] = {'browser_mode': 'heal'}
         request = HealRequest(
             source_id=self.spec.id, run_id=ctx.run_id, page_url=opts.page_url, task=opts.task,
-            max_items=opts.max_items, timeout=opts.timeout, chrome_profile=opts.chrome_profile,
+            max_items=opts.max_items, timeout=opts.effective_timeout, chrome_profile=opts.chrome_profile,
             script_path=script, pi=_pi_spec(config, opts), old_source=_read_script(script),
             failure=failure.describe(), snapshot=failure.snapshot,
             meta=_local_meta(config, self.spec.id))
@@ -437,21 +451,14 @@ def _item(source_id: str, page_url: str, raw: RawBrowserItem, script: Path) -> I
 
 def _observation(item: Item) -> ItemObservation:
     return ItemObservation(stable_external_id=True, title=item.title, url=item.url,
-                           author=item.author or None, summary=item.summary, content=item.content,
+                           page_url=item.page_url, author=item.author or None,
+                           summary=item.summary, content=item.content,
                            published=item.published, meta=item.meta)
 
 
 def _entry_url(page_url: str, value: str | None) -> str:
     """Resolve a script-provided link against the entry page; non-http(s) is unusable."""
-    if not value or not value.strip():
-        return ''
-    try:
-        url = httpx.URL(urljoin(page_url, value.strip()))
-    except (ValueError, httpx.InvalidURL):
-        return ''
-    if url.scheme not in {'http', 'https'} or not url.host or url.userinfo:
-        return ''
-    return normalize_url(str(url))
+    return resolve_http_url(page_url, value)
 
 
 def _published(value: str | None) -> datetime | None:

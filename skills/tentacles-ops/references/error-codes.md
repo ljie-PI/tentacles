@@ -9,10 +9,10 @@
 | `fetch_page` / `fetch_detail` | `network_timeout` | Connect/read timeout (`retryable: true`). |
 | `fetch_page` / `fetch_detail` / `imap_fetch` | `connection_failed` | DNS/TLS/socket failure (`retryable: true`). Verify reachability or proxy. |
 | `fetch_page` | `feed_parse_error` | Unrecognized RSS/Atom body (often login/HTML error page). Inspect `debug_context.body_preview`. |
-| `parse_entry` | `selector_no_match` | CSS selector matched 0 nodes, or items lacked `title`/`link`. Compare `configured_selectors` vs `html_skeleton` / `node_samples`. |
+| `parse_entry` | `selector_no_match` | Web/Browser `mode: list` CSS selector matched 0 nodes or extracted 0 usable links/titles. Compare `configured_selectors` vs `html_skeleton` / `node_samples` / `a11y_snapshot`. |
 | `parse_entry` | `entry_unusable` | RSS/Atom entry lacked both title and `guid`/`link` (`severity: warning`). |
 | `fetch_detail` | `empty_extracted_body` | Detail returned HTTP 200 with empty extracted body (SPA shell or anti-bot challenge). Switch to `type: browser`. |
-| `browser_replay` | `playwright_selector_timeout` | Fixed script timed out; inspect `current_url`, `page_title`, `a11y_snapshot`, `traceback`. |
+| `browser_replay` | `playwright_selector_timeout` | Fixed script or `browser` `mode: list` navigation/selector wait timed out; inspect `current_url`, `page_title`, `a11y_snapshot`, `traceback`. |
 | `browser_replay` | `script_assertion_failed` | Script failed assertion, returned invalid contract, violated AST gate, or returned 0 items (`warning`). |
 | `browser_heal` | `pi_heal_exhausted` | Self-healing exhausted 2 candidates (`last_failure` + `trajectory_path`). Inspect page snapshot and run `sources distill` or edit script manually. |
 | `browser_distill` | `pi_rpc_failed` | Controlled `pi` subprocess failed (`pi` binary/model/creds/timeout/empty `task`). Verify `pi --model <model> --thinking <level> "hello"`. |

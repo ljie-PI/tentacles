@@ -38,7 +38,7 @@ Tentacles 通过 `tentacles serve` 在同一服务进程内托管已构建的前
 | `PATCH /api/sources/{source_id}` | 局部更新信息源配置、启停状态或关联 `pipelines`，原子写回 YAML 并热刷新调度，返回 `SourceConfigView` |
 | `POST /api/sources/fetch` | 可选请求体 `{"ids": ["id"]}`，返回 `FetchOutcome[]`（省略时抓取全部启用源） |
 | `POST /api/sources/{source_id}/fetch` | 单个 `FetchOutcome`；未知 ID `404`，运行中 `409`，抓取失败 `502` |
-| `POST /api/sources/{source_id}/distill` | 显式重提炼 `type: browser` 源的固化脚本，返回 `FetchOutcome` |
+| `POST /api/sources/{source_id}/distill` | 显式重提炼 `type: browser`（`mode: script`）源的固化脚本，返回 `FetchOutcome`；对非 `browser` 源或 `mode: list` 返回 `400` |
 | `GET /api/items` | `Page[ItemView]`；支持重复 `sources`/`kinds` 及 `since`、`until`、`search`、`pipeline`、`persona`、`passed`、`min_score`、`topic`、`sort`（`time`\|`relevance`）、`limit`(1–500)、`offset`、`include_archive`（默认 `false`）。`sort=relevance` 需同时提供 `search`（否则 `400`）；带 `search` 时额外返回高亮 `snippet`；开启 `include_archive=true` 扩展至年度冷库 |
 | `GET /api/items/{item_id}` | `ItemDetail`（含入库正文、原文/入口链接、`meta` 与 `evaluations`）；支持 `include_archive=true`，热库优先、冷库结果带 `archive_year` |
 | `GET /api/items/{item_id}/feedback` | 查询指定或默认 `persona` 的最新投票 `FeedbackView \| null` |
