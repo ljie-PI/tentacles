@@ -162,6 +162,7 @@ def _launch_argv(config: AppConfig, spec: BrowserSpec, profile: str) -> list[str
             f"--profile-directory={profile}", "--no-first-run", "--no-default-browser-check"]
     if spec.chrome_user_data_dir is not None:
         argv.append(f"--user-data-dir={config.resolve(spec.chrome_user_data_dir)}")
+    argv.append("about:blank")
     return argv
 
 
