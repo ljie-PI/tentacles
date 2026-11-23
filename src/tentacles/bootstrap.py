@@ -5,6 +5,9 @@ import os
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
+
+import yaml
 
 from tentacles.errors import ConfigError
 
@@ -66,6 +69,31 @@ def _copy_if_needed(src: Path, dst: Path, *, force: bool, mode: int | None = Non
     created.append(str(dst))
 
 
+def _sanitize_init_config(src: Path, dst: Path, *, force: bool,
+                          created: list[str], skipped: list[str]) -> None:
+    """Copy default config into a fresh workspace with `type: browser` sources disabled
+    until the user logs into a headed Chrome profile on that machine."""
+    if dst.exists() and not force:
+        skipped.append(str(dst))
+        return
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    text = src.read_text(encoding="utf-8")
+    try:
+        raw = yaml.safe_load(text)
+    except yaml.YAMLError:
+        raw = None
+    if isinstance(raw, dict) and isinstance(raw.get("sources"), list):
+        from copy import deepcopy
+        from tentacles.sources.config_store import _YamlPatch, _render_yaml
+        working = deepcopy(raw)
+        for idx, item in enumerate(raw["sources"]):
+            if isinstance(item, dict) and item.get("type") == "browser" and item.get("enabled", True):
+                working["sources"][idx]["enabled"] = False
+                text = _render_yaml(text, working, _YamlPatch(updated_source_idx=idx))
+    dst.write_text(text, encoding="utf-8")
+    created.append(str(dst))
+
+
 def init_workspace(directory: Path | None = None, *, force: bool = False) -> InitOutcome:
     root = (directory or DEFAULT_WORKSPACE_DIR).expanduser().resolve()
     assets = _asset_root()
@@ -73,8 +101,8 @@ def init_workspace(directory: Path | None = None, *, force: bool = False) -> Ini
     skipped: list[str] = []
 
     config_dst = root / "config" / "tentacles.yaml"
-    _copy_if_needed(assets / "config" / "tentacles.yaml", config_dst, force=force,
-                    created=created, skipped=skipped)
+    _sanitize_init_config(assets / "config" / "tentacles.yaml", config_dst, force=force,
+                          created=created, skipped=skipped)
 
     prompts_src = assets / "config" / "prompts"
     if prompts_src.is_dir():
