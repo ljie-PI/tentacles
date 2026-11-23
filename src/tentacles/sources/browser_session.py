@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import logging
 import os
 import re
@@ -19,6 +20,7 @@ import shutil
 import socket
 import subprocess
 import time
+import urllib.request
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, AsyncIterator
@@ -93,6 +95,27 @@ async def work_tab(config: AppConfig, *, chrome_profile: str | None = None,
                 await _detach(browser, launched)
 
 
+def _prune_restored_tabs_sync(cdp_url: str) -> None:
+    """On a freshly auto-launched Chrome, close excess restored tabs so Playwright's
+    `Target.setAutoAttach` handshake cannot stall on dozens of restoring heavy pages."""
+    base = cdp_url.rstrip("/")
+    with contextlib.suppress(Exception):
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        with opener.open(f"{base}/json/list", timeout=2.0) as resp:
+            targets = json.loads(resp.read().decode("utf-8", "ignore"))
+        if not isinstance(targets, list):
+            return
+        pages = [t for t in targets if isinstance(t, dict) and t.get("type") == "page"]
+        if len(pages) <= 3:
+            return
+        for extra in pages[1:]:
+            tid = extra.get("id")
+            if isinstance(tid, str) and tid:
+                with contextlib.suppress(Exception):
+                    with opener.open(f"{base}/json/close/{tid}", timeout=1.5) as _:
+                        pass
+
+
 async def _attach(playwright: Playwright, config: AppConfig, spec: BrowserSpec, profile: str,
                   timeout_ms: int) -> tuple[Browser, subprocess.Popen[bytes] | None]:
     """Reuse the running headed Chrome, or launch one when `auto_launch` allows it."""
@@ -105,13 +128,17 @@ async def _attach(playwright: Playwright, config: AppConfig, spec: BrowserSpec, 
                  spec.cdp_url, type(exc).__name__, profile)
     process = _launch(config, spec, profile)
     deadline = time.monotonic() + LAUNCH_TIMEOUT_S
+    pruned = False
     while True:
         await asyncio.sleep(0.25)
+        if not pruned:
+            await asyncio.to_thread(_prune_restored_tabs_sync, spec.cdp_url)
+            pruned = True
         try:
-            return await playwright.chromium.connect_over_cdp(spec.cdp_url, timeout=5000), process
+            return await playwright.chromium.connect_over_cdp(spec.cdp_url, timeout=10000), process
         except Exception as exc:
+            pruned = False
             if process.poll() is not None and spec.chrome_user_data_dir is not None and time.monotonic() <= deadline:
-                # If a dead SingletonLock raced startup, clean it once and retry launching.
                 _clean_stale_singleton_lock(config.resolve(spec.chrome_user_data_dir))
             if process.poll() is not None or time.monotonic() > deadline:
                 _terminate(process)
