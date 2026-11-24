@@ -199,7 +199,7 @@ case "$COMMAND" in
     if [[ "$SKIP_FRONTEND" -eq 1 ]]; then
       BUILD_FLAGS+=(--skip-frontend)
     fi
-    "$REPO_ROOT/scripts/build.sh" "${BUILD_FLAGS[@]}"
+    "$REPO_ROOT/scripts/build.sh" ${BUILD_FLAGS[@]+"${BUILD_FLAGS[@]}"}
     if [[ "$FOREGROUND" -eq 0 ]] && running_pid >/dev/null; then
       do_stop
     fi

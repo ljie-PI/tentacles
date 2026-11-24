@@ -118,5 +118,5 @@ fi
 
 if [[ "$BUILD_WHEEL" -eq 1 ]]; then
   echo "==> Building self-contained wheel..."
-  TENTACLES_PYTHON="$PYTHON_BIN" "$REPO_ROOT/scripts/build-wheel.sh" --skip-frontend "${WHEEL_ARGS[@]}"
+  TENTACLES_PYTHON="$PYTHON_BIN" "$REPO_ROOT/scripts/build-wheel.sh" --skip-frontend ${WHEEL_ARGS[@]+"${WHEEL_ARGS[@]}"}
 fi
