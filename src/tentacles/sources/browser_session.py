@@ -95,45 +95,63 @@ async def work_tab(config: AppConfig, *, chrome_profile: str | None = None,
                 await _detach(browser, launched)
 
 
-def _prune_restored_tabs_sync(cdp_url: str) -> None:
-    """On a freshly auto-launched Chrome, close excess restored tabs so Playwright's
-    `Target.setAutoAttach` handshake cannot stall on dozens of restoring heavy pages."""
+def _ensure_page_target_sync(cdp_url: str, *, prune_excess: bool = False) -> bool:
+    """Inspect a listening CDP endpoint; open `about:blank` when 0 `page` targets exist.
+
+    macOS Chrome stays alive with 0 `page` targets when all windows are closed,
+    causing Playwright `connect_over_cdp` (`Browser.setDownloadBehavior`) to fail
+    with `Browser context management is not supported`. Returns `True` if the
+    CDP HTTP endpoint answered, else `False`.
+    """
     base = cdp_url.rstrip("/")
-    with contextlib.suppress(Exception):
-        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    try:
         with opener.open(f"{base}/json/list", timeout=2.0) as resp:
             targets = json.loads(resp.read().decode("utf-8", "ignore"))
-        if not isinstance(targets, list):
-            return
-        pages = [t for t in targets if isinstance(t, dict) and t.get("type") == "page"]
-        if len(pages) <= 3:
-            return
+    except Exception:
+        return False
+    if not isinstance(targets, list):
+        return True
+    pages = [t for t in targets if isinstance(t, dict) and t.get("type") == "page"]
+    if not pages:
+        for method in ("PUT", "GET"):
+            try:
+                req = urllib.request.Request(f"{base}/json/new?about:blank", method=method)
+                with opener.open(req, timeout=2.0) as _:
+                    return True
+            except Exception:
+                continue
+        return True
+    if prune_excess and len(pages) > 3:
         for extra in pages[1:]:
             tid = extra.get("id")
             if isinstance(tid, str) and tid:
                 with contextlib.suppress(Exception):
                     with opener.open(f"{base}/json/close/{tid}", timeout=1.5) as _:
                         pass
+    return True
 
 
 async def _attach(playwright: Playwright, config: AppConfig, spec: BrowserSpec, profile: str,
                   timeout_ms: int) -> tuple[Browser, subprocess.Popen[bytes] | None]:
     """Reuse the running headed Chrome, or launch one when `auto_launch` allows it."""
-    try:
-        return await playwright.chromium.connect_over_cdp(spec.cdp_url, timeout=timeout_ms), None
-    except Exception as exc:
-        if not spec.auto_launch:
-            raise ConfigError(_attach_hint(config, spec, profile)) from exc
-        log.info("browser: no CDP endpoint at %s (%s); launching headed Chrome for %s",
-                 spec.cdp_url, type(exc).__name__, profile)
+    if await asyncio.to_thread(_ensure_page_target_sync, spec.cdp_url):
+        try:
+            return await playwright.chromium.connect_over_cdp(spec.cdp_url, timeout=timeout_ms), None
+        except Exception as exc:
+            raise UpstreamError(
+                f"Chrome is listening on {spec.cdp_url} but CDP attach failed ({type(exc).__name__}): {exc}"
+            ) from exc
+    if not spec.auto_launch:
+        raise ConfigError(_attach_hint(config, spec, profile))
+    log.info("browser: no CDP endpoint at %s; launching headed Chrome for %s", spec.cdp_url, profile)
     process = _launch(config, spec, profile)
     deadline = time.monotonic() + LAUNCH_TIMEOUT_S
     pruned = False
     while True:
         await asyncio.sleep(0.25)
         if not pruned:
-            await asyncio.to_thread(_prune_restored_tabs_sync, spec.cdp_url)
-            pruned = True
+            pruned = await asyncio.to_thread(_ensure_page_target_sync, spec.cdp_url, prune_excess=True)
         try:
             return await playwright.chromium.connect_over_cdp(spec.cdp_url, timeout=10000), process
         except Exception as exc:
