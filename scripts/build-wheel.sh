@@ -49,9 +49,14 @@ if [[ ! -f "$REPO_ROOT/frontend/dist/index.html" ]]; then
   exit 1
 fi
 
+CONFIG_SRC="$REPO_ROOT/config/tentacles.example.yaml"
+if [[ ! -f "$CONFIG_SRC" ]]; then
+  CONFIG_SRC="$REPO_ROOT/config/tentacles.yaml"
+fi
+
 mkdir -p "$WEB_DST" "$BUNDLED_DST/config/prompts" "$BUNDLED_DST/scripts/browser_sources" "$BUNDLED_DST/skills"
 cp -R "$REPO_ROOT/frontend/dist/." "$WEB_DST/"
-cp "$REPO_ROOT/config/tentacles.yaml" "$BUNDLED_DST/config/tentacles.yaml"
+cp "$CONFIG_SRC" "$BUNDLED_DST/config/tentacles.yaml"
 cp "$REPO_ROOT/config/prompts/"*.md "$BUNDLED_DST/config/prompts/"
 cp "$REPO_ROOT/.env.example" "$BUNDLED_DST/.env.example"
 cp "$REPO_ROOT/scripts/browser_sources/"*.py "$BUNDLED_DST/scripts/browser_sources/"

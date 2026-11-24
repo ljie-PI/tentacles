@@ -15,11 +15,19 @@ DEFAULT_WORKSPACE_DIR = Path("~/.tentacles")
 DEFAULT_SKILLS_TARGET = Path("~/.agents/skills")
 
 
+def _config_template(assets: Path) -> Path:
+    for name in ("tentacles.yaml", "tentacles.example.yaml"):
+        candidate = assets / "config" / name
+        if candidate.is_file():
+            return candidate
+    raise ConfigError("bundled workspace templates are missing from this installation")
+
+
 def _asset_root() -> Path:
     bundled = PKG_ROOT / "_bundled"
-    if (bundled / "config" / "tentacles.yaml").is_file():
+    if (bundled / "config" / "tentacles.yaml").is_file() or (bundled / "config" / "tentacles.example.yaml").is_file():
         return bundled
-    if (REPO_ROOT / "config" / "tentacles.yaml").is_file():
+    if (REPO_ROOT / "config" / "tentacles.yaml").is_file() or (REPO_ROOT / "config" / "tentacles.example.yaml").is_file():
         return REPO_ROOT
     raise ConfigError("bundled workspace templates are missing from this installation")
 
@@ -87,7 +95,7 @@ def init_workspace(directory: Path | None = None, *, force: bool = False) -> Ini
     skipped: list[str] = []
 
     config_dst = root / "config" / "tentacles.yaml"
-    _sanitize_init_config(assets / "config" / "tentacles.yaml", config_dst, force=force,
+    _sanitize_init_config(_config_template(assets), config_dst, force=force,
                           created=created, skipped=skipped)
 
     prompts_src = assets / "config" / "prompts"
