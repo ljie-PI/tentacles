@@ -127,7 +127,7 @@ personas:
 # 通过 CDP 附着或按需拉起可见窗口，并在新建的隔离工作 Tab 中重放固化脚本。
 # 前置条件、Profile 核验与脚本规范见 README.md 与 scripts/browser_sources/README.md。
 browser:
-  cdp_url: http://127.0.0.1:9223          # Chrome Remote Debugging 端点（connect_over_cdp 附着）
+  cdp_url: http://127.0.0.1:9222          # Chrome Remote Debugging 端点（connect_over_cdp 附着）
   webbridge_url: http://127.0.0.1:10086   # 冷启动探索的一次性本地工具桥接端点（仅回环地址）
   auto_launch: true                       # CDP 无人监听时自动拉起有界面 Chrome（绝不传 --headless）
   chrome_executable: null                 # 可选显式 Chrome 可执行文件路径
