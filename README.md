@@ -23,37 +23,45 @@ tentacles serve                   # 启动内置 Web 界面（http://127.0.0.1:8
 
 按需编辑 `~/.tentacles/.env` 填入模型 API Key 或 IMAP 凭据后即可使用。
 
-### 方式二：源码开发安装
+### 方式二：源码开发与本地部署
 
-#### 1. 安装后端并校验配置
+要求 Python >= 3.10、Node >= 22.12、pnpm 10.33（推荐使用 `uv`）。`config/tentacles.yaml` 已加入 `.gitignore` 供本地定制（如本机 `chrome_user_data_dir`、个人订阅源等），模板保存在 `config/tentacles.example.yaml`：
 
-要求 Python >= 3.10：
-
-```bash
-python -m venv .venv && source .venv/bin/activate
-pip install -e ".[dev]"
-
-cp .env.example .env              # 按需填入模型 API Key、IMAP 密码或 Server Token
-tentacles config check            # 无副作用校验 config/tentacles.yaml
-```
-
-默认仓库配置开启了中英文科技与新闻 RSS、GitHub Trending 网页源、`mail-tech` / `mail-finance` 邮箱源以及有界面浏览器滚动源（`x-home` 与 Reddit 自定义流；通过 `tentacles init` 初始化新机器工作目录时会自动将 `type: browser` 源置为 `enabled: false`，未配置模型 Key、邮箱凭据或登录态 Chrome 时可先指定单个 RSS 源测试抓取）：
+#### 1. 准备本地配置与构建
 
 ```bash
-tentacles sources fetch solidot   # 单源测试抓取（配置好邮箱后可直接运行 tentacles sources fetch）
-tentacles items list --since 24h  # 查看最近 24 小时入库的条目
+cp .env.example .env                                   # 按需填入模型 API Key、IMAP 密码或 Server Token
+cp config/tentacles.example.yaml config/tentacles.yaml # 首次克隆时拷贝配置模板（脚本缺失时也会自动初始化）
+
+./scripts/build.sh                                     # 创建/同步 .venv、构建 frontend/dist 并执行 config check
+# 可选参数：
+#   ./scripts/build.sh --skip-frontend                 # 仅同步 Python 环境与校验配置，跳过前端打包
+#   ./scripts/build.sh --dev                           # 安装 dev 依赖并额外运行 mypy 与 OpenAPI 类型校验
+#   ./scripts/build.sh --wheel                         # 同时通过 scripts/build-wheel.sh 打出 dist/*.whl
 ```
 
-#### 2. 构建前端与启动 Web 服务（可选）
-
-要求 Node >= 22.12、pnpm 10.33：
+默认模板开启了中英文科技与新闻 RSS、GitHub Trending 网页源、`mail-tech` / `mail-finance` 邮箱源以及有界面浏览器滚动源（`x-home` 与 Reddit 自定义流；通过 `tentacles init` 初始化新机器工作目录时会自动将 `type: browser` 源置为 `enabled: false`，未配置模型 Key、邮箱凭据或登录态 Chrome 时可先指定单个 RSS 源测试抓取）：
 
 ```bash
-cd frontend && pnpm install --frozen-lockfile && pnpm build && cd ..
-tentacles serve                   # 托管前端、REST API 与内置调度器（--no-scheduler 关闭后台轮询）
+.venv/bin/tentacles sources fetch solidot              # 单源测试抓取
+.venv/bin/tentacles items list --since 24h             # 查看最近 24 小时入库的条目
 ```
 
-访问 `http://127.0.0.1:8000`；前端开发调试可运行 `tentacles serve --no-scheduler` 并在 `frontend/` 下启动 `pnpm dev`。
+#### 2. 启动与管理服务（`scripts/serve.sh`）
+
+源码目录下推荐使用 `./scripts/serve.sh` 统一管理构建、后台常驻（PID 写入 `data/serve.pid`，日志写入 `data/serve.log`）与启停：
+
+```bash
+./scripts/serve.sh up                 # 一键构建（build.sh）并后台启动/重启服务（无参 ./scripts/serve.sh 等同于 up）
+./scripts/serve.sh up --skip-frontend # 仅改后端或配置时，跳过前端构建快速同步并重启
+./scripts/serve.sh start              # 直接后台启动（不重新构建）
+./scripts/serve.sh restart            # 平滑重启后台服务
+./scripts/serve.sh stop               # 优雅停止后台服务（等待当前轮 tick 收尾）
+./scripts/serve.sh status             # 查看运行 PID、监听地址与 /api/health 状态
+./scripts/serve.sh logs               # 实时跟踪 data/serve.log
+```
+
+访问 `http://127.0.0.1:8000`。若需前台调试或联调前端 Vite，可加 `--foreground` / `--no-scheduler`（例如 `./scripts/serve.sh start --foreground --no-scheduler`，另开终端在 `frontend/` 下运行 `pnpm dev`；底层 CLI 子命令 `tentacles serve` 仍完整保留供 Wheel 安装场景直接调用）。
 
 #### 3. 安装 AI Agent 技能（可选）
 

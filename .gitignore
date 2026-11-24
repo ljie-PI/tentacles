@@ -11,6 +11,7 @@ dist/
 
 # Env & data
 .env
+config/tentacles.yaml
 data/
 reports/
 *.log
